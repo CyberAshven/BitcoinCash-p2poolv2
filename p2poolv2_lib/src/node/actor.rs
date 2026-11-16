@@ -136,7 +136,7 @@ impl NodeHandle {
             BchHeaderFeeder::new(
                 client,
                 chain_store_handle.clone(),
-                bitcoin_cash_tick_schedule(&config),
+                config.stratum.bitcoin_cash_network,
             )
             .first_sync(FIRST_SYNC_LIMIT)
             .await;
@@ -712,7 +712,7 @@ impl NodeActor {
                 Some(BchHeaderFeeder::new(
                     client,
                     chain_store_handle.clone(),
-                    bitcoin_cash_tick_schedule(&config),
+                    config.stratum.bitcoin_cash_network,
                 )),
             )
         } else {

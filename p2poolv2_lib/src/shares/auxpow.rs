@@ -875,11 +875,12 @@ impl AuxProof {
     ///    own nBits).
     ///
     /// With `asert`, the header's nBits must also pass the ASERT format
-    /// check at the coinbase's BIP34 height ([`BchAsert::check_header_bits`]);
-    /// regtest and scalenet have no anchor and pass `None`. `parent` is the
-    /// tick info of the block the header builds on when its header is known;
-    /// without it the network's pins give the ticks and interval by height,
-    /// as the covenant computes them.
+    /// check at the coinbase's BIP34 height as every peer applies it
+    /// ([`BchAsert::check_header_bits_for_peers`]); regtest and scalenet have
+    /// no anchor and pass `None`. The check by the network's pins, by height
+    /// as the covenant computes them, always applies; `parent`, the tick
+    /// info of the block the header builds on when its header is known,
+    /// adds the check by its own values.
     pub fn verify(
         &self,
         leaf: &TokenLeaf,
@@ -932,7 +933,7 @@ impl AuxProof {
                 .coinbase_height()
                 .ok_or_else(|| AuxError::Asert("coinbase has no BIP34 height".into()))?;
             asert
-                .check_header_bits(self.header.bits, self.header.time, height, parent)
+                .check_header_bits_for_peers(self.header.bits, self.header.time, height, parent)
                 .map_err(AuxError::Asert)?;
         }
         Ok(())

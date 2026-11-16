@@ -47,6 +47,21 @@ switch at median time past 1810382400 (2027-05-15 12:00 UTC), as in BCHN.
   known within seconds, and the template relay no longer waits for the whole
   walk. It learns 58 days of headers counted in ticks, 84,000 one-minute
   blocks.
+- A first walk's starting ticks must give the chain's own nBits: before its
+  first chunk is stored, every walked header's nBits is checked against the
+  ASERT target its counted parent requires. The node's report is tried
+  first, then the pins; where neither fits, nothing is stored and the walk
+  is retried. A node backed by a Bitcoin Cash node that reports no ticks,
+  on mainnet after its switch and before a release pins it, would otherwise
+  have counted ten-minute ticks and required different nBits of peers'
+  headers. A walk that stored chunks and then reaches a known header keeps
+  the values worked up from that header, storing the counted ones again if
+  they differ.
+- A walk that stops part way (a Bitcoin Cash node error, a restart, or the
+  five-minute limit on the round before share sync) is finished in later
+  rounds: the feeder finds the lowest header below the best block and walks
+  on below it. Before, a stopped first walk left the store short for good,
+  so shares on older BCH blocks could never be settled.
 - Node-local: the payout tree spends a coinbase once the block on the tip is
   60,000 ticks past the coinbase's block, from both known headers (1,000
   one-minute blocks); the found-block verifier counts BCHN's finalization
@@ -64,7 +79,11 @@ switch at median time past 1810382400 (2027-05-15 12:00 UTC), as in BCHN.
   token band, and a token share P2Pool accepts would fail the covenant. The
   covenant is not changed here. Mainnet's activation block is not pinned
   yet, so until a release pins it the header gate refuses mainnet token
-  shares after the switch.
+  shares after the switch. Pinning it changes the gate's verdicts, so it is
+  a share-chain rule change of its own, with a new protocol segment. Token
+  jobs (also Stratum V2 custom jobs) and token wins are offered only when
+  the header passes both bands peers check: the pins' and the known BCH
+  prev's.
 
 The CHIP's ASERT and tick vectors pass, and real chipnet headers 332,429 to
 332,460 fed through the header path get the ticks and next intervals Knuth

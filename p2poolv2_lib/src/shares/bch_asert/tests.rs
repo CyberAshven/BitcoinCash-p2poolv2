@@ -310,6 +310,56 @@ fn mainnet_band_is_half_to_one_point_zero_five() {
     assert!(check(BCH_POW_LIMIT_BITS).is_err());
 }
 
+/// A token share's nBits must pass the band by the pins and by its known
+/// parent's own values, as peers check it at the header gate and in block
+/// validation. Mainnet after its switch, not pinned: a header with the nBits
+/// its one-minute parent requires passes the parent's band, but the pins
+/// count ten-minute blocks and want a target over ten times harder, so peers'
+/// gates would refuse it and it is no token share worth handing out.
+#[test]
+fn a_token_header_must_pass_both_bands_peers_check() {
+    let mainnet = BchAsert::MAINNET;
+    let height: u32 = 1_005_400;
+    // A switch after block 1,003,000.
+    let parent = TickInfo {
+        ticks: 600 * 1_003_000 + 60 * i64::from(height - 1 - 1_003_000),
+        next_interval: 60,
+    };
+    let parent_time =
+        (mainnet.anchor_parent_time + parent.ticks - 600 * i64::from(mainnet.anchor_height)) as u32;
+    let bits = mainnet.next_bits(parent, parent_time).unwrap();
+    let time = parent_time + 60;
+    let height = u64::from(height);
+
+    mainnet
+        .check_header_bits(bits, time, height, Some(parent))
+        .unwrap();
+    assert!(
+        mainnet
+            .check_header_bits(bits, time, height, None)
+            .unwrap_err()
+            .contains("easier")
+    );
+    assert!(
+        mainnet
+            .check_header_bits_for_peers(bits, time, height, Some(parent))
+            .is_err()
+    );
+    assert!(
+        mainnet
+            .check_header_bits_for_peers(bits, time, height, None)
+            .is_err()
+    );
+    // Where the pins agree with the parent, as before any switch, both pass.
+    let ten_minute = mainnet.tick_schedule.tick_info(661_700);
+    let before = (mainnet.anchor_parent_time + ten_minute.ticks
+        - 600 * i64::from(mainnet.anchor_height)) as u32;
+    let bits = mainnet.next_bits(ten_minute, before).unwrap();
+    mainnet
+        .check_header_bits_for_peers(bits, before + 600, 661_701, Some(ten_minute))
+        .unwrap();
+}
+
 /// Chipnet: up to eight times harder, up to eight times easier, or the
 /// limit's bits, as the SAFA covenant's chipnet band.
 #[test]

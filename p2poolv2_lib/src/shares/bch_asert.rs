@@ -189,6 +189,9 @@ impl TickSchedule {
 
     /// Mainnet (also testnet3, testnet4, scalenet and regtest, as in BCHN):
     /// one-minute blocks from 2027-05-15 12:00 UTC, no block pinned yet.
+    /// The header gate checks token shares by the pins, so pinning the
+    /// switch block changes its verdicts: a share-chain rule change, with a
+    /// new protocol segment, never a quiet update.
     const MAINNET: Self = Self {
         timed: MAINNET_SWITCHES,
         pinned: [None; MAX_SWITCHES],
@@ -619,6 +622,26 @@ impl BchAsert {
             ));
         }
         Ok(())
+    }
+
+    /// [`Self::check_header_bits`] as every peer applies it to a token
+    /// share: by the pins, as the header gate does without a store, and by
+    /// `known_parent`, the tick info of the block the header builds on, as
+    /// block validation does once that block is known. A share must pass
+    /// both, so a token job or a token win is only worth handing a miner
+    /// when it does.
+    pub fn check_header_bits_for_peers(
+        &self,
+        bits: CompactTarget,
+        header_time: u32,
+        height: u64,
+        known_parent: Option<TickInfo>,
+    ) -> Result<(), String> {
+        self.check_header_bits(bits, header_time, height, None)?;
+        match known_parent {
+            Some(parent) => self.check_header_bits(bits, header_time, height, Some(parent)),
+            None => Ok(()),
+        }
     }
 }
 

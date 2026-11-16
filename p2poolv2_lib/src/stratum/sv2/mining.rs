@@ -417,7 +417,7 @@ impl MiningChannels {
             .and_then(|commitment| commitment.bch_coinbase.as_ref())
             .is_some_and(|coinbase| !coinbase.merge_mining.is_empty())
             && let Some(asert) = self.ctx.token_asert()
-            && let Err(reason) = asert.check_header_bits(
+            && let Err(reason) = asert.check_header_bits_for_peers(
                 CompactTarget::from_consensus(request.nbits),
                 request.min_ntime,
                 u64::from(job.blocktemplate.height),

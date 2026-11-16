@@ -109,6 +109,36 @@ fn a_test_network_block_within_twenty_minutes_may_not_use_the_limit() {
     assert!(matches!(error, BchHeaderError::Bits { .. }), "{error}");
 }
 
+/// The minimum-difficulty gap is strict, on ten-minute and one-minute
+/// blocks alike: a chipnet block dated exactly twice its parent's next
+/// interval after it needs ASERT's nBits, and one a second later takes the
+/// limit.
+#[test]
+fn the_minimum_difficulty_gap_is_strict() {
+    let rules = BchHeaderRules::for_network(BitcoinCashNetwork::Chipnet);
+    let times: HashMap<u32, u32> = chipnet_times_around_activation().into_iter().collect();
+    let limit = Some(CompactTarget::from_consensus(BCH_POW_LIMIT_BITS));
+    for (height, gap) in [(332_442, 1_200), (332_455, 120)] {
+        let tick_info = rules.tick_schedule().tick_info(height);
+        assert_eq!(tick_info.min_difficulty_gap(), gap, "block {height}");
+        let parent = KnownBchHeader {
+            height,
+            header: linked_headers(
+                BlockHash::all_zeros(),
+                &[(times[&height], 0x1a21_8c7e)],
+                0x22,
+            )[0],
+            ticks: tick_info.ticks,
+            next_interval: tick_info.next_interval,
+        };
+        let asert = BchAsert::CHIPNET.next_bits(tick_info, parent.header.time);
+        assert_ne!(asert, limit, "block {height}");
+        let time = parent.header.time;
+        assert_eq!(rules.required_bits(&parent, time + gap), asert);
+        assert_eq!(rules.required_bits(&parent, time + gap + 1), limit);
+    }
+}
+
 /// Mainnet never allows the minimum difficulty, whatever the gap.
 #[test]
 fn mainnet_requires_asert_bits_even_after_a_long_gap() {

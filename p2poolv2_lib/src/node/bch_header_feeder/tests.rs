@@ -4,6 +4,7 @@
 
 use super::*;
 use crate::config::BitcoinCashNetwork;
+use crate::shares::bch_asert::BchAsert;
 use crate::shares::bch_asert::tests::{MAINNET_PAIRS, header};
 use crate::shares::bch_headers::tests::ten_minute_header;
 use bitcoin::block::Version;
@@ -188,7 +189,7 @@ fn feeder(server: &MockServer, held: &Arc<Mutex<Held>>) -> BchHeaderFeeder {
     BchHeaderFeeder::new(
         BitcoindRpcClient::new(&server.uri(), "user", "pass").unwrap(),
         store_holding(Arc::clone(held)),
-        TickSchedule::TEN_MINUTES,
+        None,
     )
 }
 
@@ -399,7 +400,7 @@ async fn the_template_relay_learns_a_new_templates_parent_first() {
     let relay = tokio::spawn(relay_templates_learning_prevs(
         BitcoindRpcClient::new(&server.uri(), "user", "pass").unwrap(),
         store_holding(Arc::clone(&held)),
-        TickSchedule::TEN_MINUTES,
+        None,
         input_rx,
         output_tx,
     ));
@@ -485,7 +486,7 @@ async fn the_first_sync_gives_up_on_a_slow_or_absent_bchn() {
     let absent = BchHeaderFeeder::new(
         BitcoindRpcClient::new("http://127.0.0.1:9", "user", "pass").unwrap(),
         store_holding(Arc::clone(&held)),
-        TickSchedule::TEN_MINUTES,
+        None,
     );
     absent.first_sync(Duration::from_secs(10)).await;
 
@@ -701,4 +702,314 @@ fn report_disagreements_name_each_field_that_differs() {
     assert!(disagreements[1].contains("target_time 600"));
     // An own interval P2Pool cannot tell is not compared.
     assert!(report_disagreements(&summary(None, Some(600), None), &tip, None).is_empty());
+}
+
+/// BCHN at the last of `served`, serving every header with its height and
+/// reporting `tip_ticks` for the last, as a node with CHIP-2025-03 does.
+async fn bchn_reporting(served: &[(u32, Header)], tip_ticks: Option<i64>) -> MockServer {
+    let (tip_height, tip) = *served.last().unwrap();
+    let server = bchn(&tip, &[]).await;
+    for (height, header) in served {
+        answer(
+            &server,
+            serde_json::json!({
+                "method": "getblockheader",
+                "params": [header.block_hash().to_string(), false]
+            }),
+            serde_json::json!(hex::encode(serialize(header))),
+        )
+        .await;
+        let mut summary = serde_json::json!({ "height": height });
+        if *height == tip_height
+            && let Some(ticks) = tip_ticks
+        {
+            summary["ticks"] = serde_json::json!(ticks);
+        }
+        report(&server, header, summary).await;
+    }
+    server
+}
+
+/// A walk that stops part way, here on a BCHN error at height 30, keeps the
+/// chunks it stored. The next round finds the run below the best block short
+/// of the span and walks on below its lowest header, down to the chain's
+/// first block, giving every header the values one whole walk gives it, and
+/// indexes them.
+#[tokio::test]
+async fn a_walk_that_stopped_part_way_goes_on_in_the_next_round() {
+    let chain = chain_from_first_block(60, 0);
+    let served: Vec<(u32, Header)> = at_heights(&chain)
+        .into_iter()
+        .filter(|(height, _)| *height != 30)
+        .collect();
+    let server = bchn(&chain[59], &served).await;
+    let held = Arc::new(Mutex::new(Held::default()));
+    let mut feeder = feeder(&server, &held);
+    feeder.store_chunk = 5;
+
+    let stopped = feeder.sync_once().await;
+    assert!(stopped.is_err(), "{stopped:?}");
+    let stored = held.lock().unwrap().headers.len();
+    assert!(stored > 0 && stored < 30, "{stored}");
+
+    // BCHN answers for block 30 again.
+    answer(
+        &server,
+        serde_json::json!({
+            "method": "getblockheader",
+            "params": [chain[30].block_hash().to_string(), false]
+        }),
+        serde_json::json!(hex::encode(serialize(&chain[30]))),
+    )
+    .await;
+    assert_eq!(feeder.sync_once().await, Ok(60 - stored));
+
+    let held = held.lock().unwrap();
+    for (height, header) in chain.iter().enumerate() {
+        assert_eq!(
+            held.headers[&header.block_hash()],
+            known(height as u32, *header)
+        );
+        assert_eq!(held.index[&(height as u32)], header.block_hash());
+    }
+    assert_eq!(held.tip, Some(59));
+}
+
+/// The block after which these tests pin mainnet's switch to one-minute
+/// blocks, as a release would.
+const TEST_SWITCH: u32 = 1_003_000;
+
+/// Ticks of a mainnet block at `height`, after a switch after
+/// [`TEST_SWITCH`].
+fn ticks_after_test_switch(height: u32) -> i64 {
+    600 * i64::from(TEST_SWITCH) + 60 * i64::from(height - TEST_SWITCH)
+}
+
+/// `length` linked mainnet headers from `first_height`, after a switch
+/// after [`TEST_SWITCH`]: each dated on ASERT's schedule for its ticks, and
+/// from the second on carrying the nBits mainnet's ASERT requires on its
+/// parent's ticks. A chain whose difficulty fits those ticks and no others.
+fn one_minute_mainnet_chain(length: u32, first_height: u32) -> Vec<Header> {
+    let asert = BchAsert::MAINNET;
+    let mut chain: Vec<Header> = Vec::new();
+    for index in 0..length {
+        let height = first_height + index;
+        let time = asert.anchor_parent_time + ticks_after_test_switch(height)
+            - 600 * i64::from(asert.anchor_height);
+        let bits = match chain.last() {
+            Some(parent) => asert
+                .next_bits(
+                    TickInfo {
+                        ticks: ticks_after_test_switch(height - 1),
+                        next_interval: 60,
+                    },
+                    parent.time,
+                )
+                .unwrap(),
+            // Its parent is never walked.
+            None => CompactTarget::from_consensus(0x1802_0000),
+        };
+        chain.push(Header {
+            version: Version::from_consensus(0x2000_0000),
+            prev_blockhash: chain
+                .last()
+                .map_or(BlockHash::from_byte_array([0x77; 32]), Header::block_hash),
+            merkle_root: TxMerkleNode::from_byte_array([index as u8; 32]),
+            time: u32::try_from(time).unwrap(),
+            bits,
+            nonce: 0,
+        });
+    }
+    chain
+}
+
+/// A first walk's starting ticks must give the chain's own nBits before
+/// anything is stored: the node's report where it does, else the pins where
+/// they do, and nothing where neither does. Here mainnet after its switch:
+/// with the switch not pinned the pins give ten-minute ticks, which the
+/// chain's nBits refute, as they refute a report one block off.
+#[tokio::test]
+async fn a_first_walks_starting_ticks_must_give_the_chains_nbits() {
+    let first_height = 1_005_339;
+    let chain = one_minute_mainnet_chain(30, first_height);
+    let served: Vec<(u32, Header)> = chain
+        .iter()
+        .enumerate()
+        .map(|(index, header)| (first_height + index as u32, *header))
+        .collect();
+    let (tip_height, tip) = *served.last().unwrap();
+    let ticks = ticks_after_test_switch(tip_height);
+    let unpinned = TickSchedule::for_network(BitcoinCashNetwork::Mainnet);
+    let pinned = unpinned
+        .with_switch(crate::shares::bch_asert::IntervalSwitch {
+            height: TEST_SWITCH,
+            interval: 60,
+        })
+        .unwrap();
+    assert_eq!(pinned.ticks(tip_height), ticks);
+    assert_ne!(unpinned.ticks(tip_height), ticks);
+
+    for (schedule, reported, stored) in [
+        (unpinned, Some(ticks), true),
+        (pinned, None, true),
+        (pinned, Some(ticks + 540), true),
+        (unpinned, None, false),
+        (unpinned, Some(ticks + 540), false),
+    ] {
+        let case = format!("pinned {}, reported {reported:?}", schedule == pinned);
+        let server = bchn_reporting(&served, reported).await;
+        let held = Arc::new(Mutex::new(Held::default()));
+        let mut feeder = feeder(&server, &held);
+        feeder.tick_schedule = schedule;
+        feeder.rules = Some(BchHeaderRules::for_network(BitcoinCashNetwork::Mainnet));
+        feeder.initial_header_ticks = 15 * 60;
+
+        let learned = feeder.learn_from(tip.block_hash()).await;
+
+        let held = held.lock().unwrap();
+        if stored {
+            assert_eq!(learned, Ok(15), "{case}");
+            for (depth, header) in chain.iter().rev().take(15).enumerate() {
+                let known = held.headers[&header.block_hash()];
+                assert_eq!(known.ticks, ticks - 60 * depth as i64, "{case}");
+                assert_eq!(known.next_interval, 60, "{case}");
+            }
+        } else {
+            let error = learned.unwrap_err();
+            assert!(error.contains("cannot tell the ticks"), "{case}: {error}");
+            assert!(held.headers.is_empty(), "{case}");
+        }
+    }
+}
+
+/// Blocks 600 seconds apart from 12,000 seconds before mainnet's activation
+/// time: block 25 is the first whose median time past (block 20's time)
+/// reaches it, so its next block is one minute.
+fn chain_across_mainnet_activation() -> Vec<Header> {
+    chain_dated_from(40, 0, 1_810_382_400 - 12_000)
+}
+
+/// The values one walk from the chain's first block gives `header`, at
+/// `height` of [`chain_across_mainnet_activation`].
+fn across_activation(height: u32, header: Header) -> KnownBchHeader {
+    let blocks = i64::from(height);
+    KnownBchHeader {
+        height,
+        header,
+        ticks: if blocks <= 25 {
+            600 * blocks
+        } else {
+            15_000 + 60 * (blocks - 25)
+        },
+        next_interval: if blocks >= 25 { 60 } else { 600 },
+    }
+}
+
+/// Every way a node learns a chain across mainnet's activation gives each
+/// header the same values: one walk down to the chain's first block, a first
+/// walk counted down from the tip's ticks over the switch, where each
+/// header's ticks are the block above's less its own next interval, and a
+/// walk up from a known header below the switch, whose first headers' median
+/// time past needs the known header's ancestors.
+#[tokio::test]
+async fn walks_across_mainnets_activation_agree_however_they_start() {
+    let chain = chain_across_mainnet_activation();
+    let served = at_heights(&chain);
+    let mainnet = TickSchedule::for_network(BitcoinCashNetwork::Mainnet);
+    let expected = |height: u32| across_activation(height, chain[height as usize]);
+
+    // Down to the first block.
+    let server = bchn_reporting(&served, None).await;
+    let held = Arc::new(Mutex::new(Held::default()));
+    let mut whole = feeder(&server, &held);
+    whole.tick_schedule = mainnet;
+    assert_eq!(whole.learn_from(chain[39].block_hash()).await, Ok(40));
+    for height in 0..40 {
+        assert_eq!(
+            held.lock().unwrap().headers[&chain[height as usize].block_hash()],
+            expected(height),
+            "whole walk, block {height}"
+        );
+    }
+
+    // Counted down from the tip's ticks, stopping at block 23.
+    let server = bchn_reporting(&served, Some(expected(39).ticks)).await;
+    let held = Arc::new(Mutex::new(Held::default()));
+    let mut counted = feeder(&server, &held);
+    counted.tick_schedule = mainnet;
+    counted.initial_header_ticks = 1_500;
+    assert_eq!(counted.learn_from(chain[39].block_hash()).await, Ok(16));
+    for height in 24..40 {
+        assert_eq!(
+            held.lock().unwrap().headers[&chain[height as usize].block_hash()],
+            expected(height),
+            "counted down, block {height}"
+        );
+    }
+
+    // Up from block 22, known with its ancestors.
+    let server = bchn_reporting(&served, None).await;
+    let held = Arc::new(Mutex::new(Held::default()));
+    for height in 0..=22 {
+        held.lock()
+            .unwrap()
+            .headers
+            .insert(chain[height as usize].block_hash(), expected(height));
+    }
+    let mut up = feeder(&server, &held);
+    up.tick_schedule = mainnet;
+    assert_eq!(up.learn_from(chain[39].block_hash()).await, Ok(17));
+    for height in 23..40 {
+        assert_eq!(
+            held.lock().unwrap().headers[&chain[height as usize].block_hash()],
+            expected(height),
+            "up from a known header, block {height}"
+        );
+    }
+}
+
+/// A long walk counted down from wrong starting ticks, which no nBits check
+/// catches here (no rules, as on regtest), stores chunks with them; once it
+/// reaches a known header, the values worked up from that header win: every
+/// walked header is stored again with them, and the disagreement is logged.
+#[tokio::test]
+async fn a_walk_reaching_a_known_header_keeps_the_values_worked_up_from_it() {
+    let log = Log::default();
+    let writer = log.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(move || writer.clone())
+        .with_ansi(false)
+        .finish();
+    let _default = tracing::subscriber::set_default(subscriber);
+    let chain = chain_from_first_block(40, 0);
+    let served = at_heights(&chain);
+    let server = bchn_reporting(&served, Some(39 * 600 + 540)).await;
+    let held = Arc::new(Mutex::new(Held::default()));
+    for (height, header) in chain.iter().enumerate().take(10) {
+        held.lock()
+            .unwrap()
+            .headers
+            .insert(header.block_hash(), known(height as u32, *header));
+    }
+    let mut feeder = feeder(&server, &held);
+    feeder.store_chunk = 5;
+
+    assert_eq!(
+        feeder.learn_from(chain[39].block_hash()).await,
+        Ok(4 * 5 + 30)
+    );
+
+    let held = held.lock().unwrap();
+    // Chunks of five counted down from the wrong ticks, then all 30 walked
+    // headers again, worked up from block 9.
+    assert_eq!(held.writes.len(), 5);
+    assert_eq!(held.writes[4], (10..=39).collect::<Vec<u32>>());
+    for (height, header) in chain.iter().enumerate() {
+        assert_eq!(
+            held.headers[&header.block_hash()],
+            known(height as u32, *header)
+        );
+    }
+    let logged = String::from_utf8(log.0.lock().unwrap().clone()).unwrap();
+    assert!(logged.contains("keeps the values worked up"), "{logged}");
 }
