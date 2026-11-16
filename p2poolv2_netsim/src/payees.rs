@@ -79,9 +79,9 @@ pub fn hashrate_fractions(count: u64, spread: HashrateSpread) -> Vec<f64> {
 }
 
 /// Shares in the Bitcoin Cash PPLNS window for a pool holding
-/// `pool_fraction_of_bch` of BCH's hashrate: `K` BCH blocks of work at one
-/// share every `share_interval_seconds`, about `K * 60 / f` shares at
-/// 10-second shares, never more than `PPLNS_WINDOW_SHARES`.
+/// `pool_fraction_of_bch` of BCH's hashrate: `K` one-minute BCH blocks of
+/// work at one share every `share_interval_seconds`, about `K * 6 / f`
+/// shares at 10-second shares, never more than `PPLNS_WINDOW_SHARES`.
 ///
 /// It leaves out the uncles' work the real window also counts, so it is
 /// slightly long when shares go stale. A fraction of zero or less is a pool
@@ -91,7 +91,7 @@ pub fn pplns_window_shares(pool_fraction_of_bch: f64, share_interval_seconds: f6
         return PPLNS_WINDOW_SHARES;
     }
     let shares_per_block = BCH_BLOCK_INTERVAL_SECONDS / share_interval_seconds;
-    // The small offset keeps float noise such as 1800.0000000000002 from
+    // The small offset keeps float noise such as 180.00000000000003 from
     // rounding a whole number of shares up by one.
     let window = (BCH_PPLNS_WINDOW_BLOCKS * shares_per_block / pool_fraction_of_bch - 1e-9).ceil();
     if window >= PPLNS_WINDOW_SHARES as f64 {

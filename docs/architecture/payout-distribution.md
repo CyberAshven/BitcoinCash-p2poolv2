@@ -153,17 +153,21 @@ tag with the others.
 Bitcoin Cash sets `D` every block with ASERT, so `K * D` is `K` blocks' worth
 of work for the pool. The window therefore spans about `K` of the pool's own
 blocks at any pool size: short for a large pool, long for a small one, and
-shorter by itself if BCH blocks get faster (CHIP-2025-03). At 10-second
-shares and 10-minute blocks the window is about `K * 60 / f` shares for a
-pool holding fraction `f` of BCH's hashrate, so pools under about `K / 2016`
-(0.15%) reach the cap and pay exactly upstream's fixed window.
+shorter by itself when BCH blocks get faster. At 10-second shares and the
+one-minute blocks of CHIP-2025-03 (chipnet since 2026-11-15, mainnet from
+2027-05-15) the window is about `K * 6 / f` shares for a pool holding
+fraction `f` of BCH's hashrate, so pools under about `K / 20160` (0.015%)
+reach the cap and pay exactly upstream's fixed window. With ten-minute
+blocks it was `K * 60 / f` shares, ten times as long, and the cap bound
+under 0.15%.
 
-| Pool share of BCH | Window (K = 3) |
+| Pool share of BCH | Window (K = 3), one-minute blocks |
 |---|---|
-| 0.05% | capped at 120,960 shares, about 14 days |
-| 1% | about 18,000 shares, 50 hours |
-| 10% | about 1,800 shares, 5 hours |
-| 30% | about 600 shares, 100 minutes |
+| 0.005% | capped at 120,960 shares, about 14 days |
+| 0.1% | about 18,000 shares, 50 hours |
+| 1% | about 1,800 shares, 5 hours |
+| 10% | about 180 shares, 30 minutes |
+| 30% | about 60 shares, 10 minutes |
 
 - **Why `D` comes from the paying header.** BCH accepts a block only with the
   correct ASERT bits, so a coinbase that reaches the chain was sized by the

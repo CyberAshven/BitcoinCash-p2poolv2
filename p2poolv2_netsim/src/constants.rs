@@ -17,9 +17,27 @@
 // Bitcoin Cash
 // ---------------------------------------------------------------------------
 
-/// Target block interval, seconds. BCHN `src/chainparams.cpp`
-/// (`nPowTargetSpacing`), kept by the ASERT difficulty rule.
-pub const BCH_BLOCK_INTERVAL_SECONDS: f64 = 600.0;
+/// Target block interval, seconds: one minute, CHIP-2025-03 "Faster Blocks
+/// for Bitcoin Cash" (chipnet since block 332,451 on 2026-11-15, mainnet
+/// from 2027-05-15), kept by the ASERT difficulty rule. The model runs on
+/// one-minute blocks everywhere, as every network will.
+pub const BCH_BLOCK_INTERVAL_SECONDS: f64 = 60.0;
+
+/// The block interval the block size floors and the reward were set for,
+/// ten minutes. CHIP-2025-03 scales both by `BCH_BLOCK_INTERVAL_SECONDS /
+/// BCH_TEN_MINUTE_BLOCK_SECONDS`, a tenth, so a minute of blocks holds and
+/// pays what a minute did before.
+pub const BCH_TEN_MINUTE_BLOCK_SECONDS: f64 = 600.0;
+
+/// `ten_minute_amount`, a per-block amount set for a ten-minute block, for
+/// a block of `BCH_BLOCK_INTERVAL_SECONDS`: CHIP-2025-03 scales the ABLA
+/// limit (its floor included) and the subsidy by the block's interval, in
+/// whole seconds, as `block_size_floor` in `p2poolv2_lib` does. Every
+/// per-block amount in the model is derived through it, so a later change of
+/// the interval is a change of `BCH_BLOCK_INTERVAL_SECONDS` alone.
+pub const fn scaled_to_block_interval(ten_minute_amount: u64) -> u64 {
+    ten_minute_amount * BCH_BLOCK_INTERVAL_SECONDS as u64 / BCH_TEN_MINUTE_BLOCK_SECONDS as u64
+}
 
 /// Largest transaction BCH consensus accepts, the coinbase included.
 /// BCHN `src/consensus/consensus.h` (`MAX_TX_SIZE = ONE_MEGABYTE`), checked
@@ -32,19 +50,35 @@ pub const BCH_MAX_TRANSACTION_BYTES: u64 = 1_000_000;
 /// described there as a temporary limit until 32-bit platforms are dropped.
 pub const BCH_MAX_CONSENSUS_BLOCK_BYTES: u64 = 2_000_000_000;
 
-/// Mainnet ABLA floor and the limit since the May 2024 upgrade. BCHN
-/// `src/consensus/consensus.h` (`DEFAULT_CONSENSUS_BLOCK_SIZE`) and
-/// CHIP-2023-04 (epsilon0 + beta0 = 16,000,000 + 16,000,000).
-pub const BCH_MAINNET_ABLA_FLOOR_BYTES: u64 = 32_000_000;
+/// Mainnet ABLA floor of a ten-minute block and the limit since the May 2024
+/// upgrade: BCHN `src/consensus/consensus.h` (`DEFAULT_CONSENSUS_BLOCK_SIZE`)
+/// and CHIP-2023-04 (epsilon0 + beta0 = 16,000,000 + 16,000,000).
+pub const BCH_TEN_MINUTE_MAINNET_ABLA_FLOOR_BYTES: u64 = 32_000_000;
 
-/// Chipnet's ABLA floor: CHIP-2023-04 (epsilon0 = beta0 = 1,000,000) and the
-/// BCHN test network documentation (2 MB).
-pub const BCH_CHIPNET_ABLA_FLOOR_BYTES: u64 = 2_000_000;
+/// Mainnet ABLA floor of a block of `BCH_BLOCK_INTERVAL_SECONDS`: 3.2 MB for
+/// a one-minute block.
+pub const BCH_MAINNET_ABLA_FLOOR_BYTES: u64 =
+    scaled_to_block_interval(BCH_TEN_MINUTE_MAINNET_ABLA_FLOOR_BYTES);
 
-/// Scalenet's starting limit: BCHN `src/chainparams.cpp`
-/// (`nDefaultConsensusBlockSize = 256 * ONE_MEGABYTE` for scalenet) and
-/// CHIP-2023-04, which says 256 MB blocks have been extensively tested.
-pub const BCH_SCALENET_LIMIT_BYTES: u64 = 256_000_000;
+/// Chipnet's ABLA floor of a ten-minute block: CHIP-2023-04 (epsilon0 =
+/// beta0 = 1,000,000) and the BCHN test network documentation (2 MB).
+pub const BCH_TEN_MINUTE_CHIPNET_ABLA_FLOOR_BYTES: u64 = 2_000_000;
+
+/// Chipnet's ABLA floor of a block of `BCH_BLOCK_INTERVAL_SECONDS`: 200 kB for
+/// a one-minute block.
+pub const BCH_CHIPNET_ABLA_FLOOR_BYTES: u64 =
+    scaled_to_block_interval(BCH_TEN_MINUTE_CHIPNET_ABLA_FLOOR_BYTES);
+
+/// Scalenet's starting limit for a ten-minute block: BCHN
+/// `src/chainparams.cpp` (`nDefaultConsensusBlockSize = 256 * ONE_MEGABYTE`
+/// for scalenet) and CHIP-2023-04, which says 256 MB blocks have been
+/// extensively tested.
+pub const BCH_TEN_MINUTE_SCALENET_LIMIT_BYTES: u64 = 256_000_000;
+
+/// Scalenet's starting limit for a block of `BCH_BLOCK_INTERVAL_SECONDS`:
+/// 25.6 MB for a one-minute block.
+pub const BCH_SCALENET_LIMIT_BYTES: u64 =
+    scaled_to_block_interval(BCH_TEN_MINUTE_SCALENET_LIMIT_BYTES);
 
 /// A P2PKH output: 8-byte value, 1-byte script length, 25-byte script.
 pub const P2PKH_OUTPUT_BYTES: u64 = 34;
@@ -265,3 +299,6 @@ pub const SHARE_COINBASE_BYTES: u64 = 118;
 /// (`docs/sharechain/small-miners-design.md`, "What a weak share message
 /// holds"). The format is not built.
 pub const WEAK_SHARE_PAYLOAD_BYTES: u64 = 800;
+
+#[cfg(test)]
+mod tests;
