@@ -6,11 +6,11 @@
 //!
 //! Defaults are assumptions, not measurements: a hundred nodes on mixed
 //! home and data-centre links, a thousand miners, a pool with 1% of BCH's
-//! hashrate, 32 MB blocks (mainnet's ABLA floor), 10-second shares, the
-//! hybrid payout rule for a share without merge-mined tokens, whole
-//! shares on the wire as today, and a day of mining (8,640 shares). Shares
-//! are forwarded after validation, name at most three uncles and travel
-//! without weak shares, as today.
+//! hashrate, 3.2 MB one-minute blocks (mainnet's ABLA floor), 10-second
+//! shares, the hybrid payout rule for a share without merge-mined tokens,
+//! whole shares on the wire as today, and a day of mining (8,640 shares).
+//! Shares are forwarded after validation, name at most three uncles and
+//! travel without weak shares, as today.
 
 use crate::constants::{
     BCH_BLOCK_INTERVAL_SECONDS, BCH_MAINNET_ABLA_FLOOR_BYTES, BCHN_OUTBOUND_PEERS,
