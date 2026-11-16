@@ -85,14 +85,18 @@ with their weak shares whole: it was never sent them on their own.
 
 | Weak shares a share | Carried whole: stale shares on 1,000 nodes | Gossiped only |
 |---:|---:|---:|
-| 32 | 5.27% | 4.20% |
-| 160 | 8.66% | 4.20% |
-| 320 | 14.11% | 4.20% |
+| 32 | 5.53% | 4.91% |
+| 160 | 9.99% | 4.91% |
+| 320 | 14.99% | 4.91% |
 
 The [network simulation](simulation/network-sim.md) gave these at
-10-second shares (`cargo netsim run --nodes 1000 --duration 10800
---weak-shares N --weak-share-carriage whole`, or `gossip-only`; the runs are
-recorded with the weak share proposal, #117). Listing a share's weak shares
+10-second shares and one-minute Bitcoin Cash blocks (`cargo netsim run
+--nodes 1000 --duration 10800 --weak-shares N --weak-share-carriage whole`,
+or `gossip-only`; the runs are recorded with the weak share proposal, #117).
+With ten-minute blocks they were 5.27%, 8.66% and 14.11% against 4.20%: a
+BCH block now crosses the links every minute, which adds stale shares
+either way, and carrying the weak shares whole adds about what it did, 0.6,
+5.1 and 10.1 points (1.1, 4.5 and 9.9). Listing a share's weak shares
 by hash costs it 32 bytes each, against about 800 whole. On a 12-node swarm
 listing alone cut a relayed share message from 23.4 KB to 4.7 KB, but the
 2.4% of weak shares a receiver then asked for added a round trip and raised

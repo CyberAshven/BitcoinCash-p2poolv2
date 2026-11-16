@@ -11,7 +11,7 @@ use crate::constants::{
 };
 use crate::distribution::Distribution;
 use crate::limits::Limit;
-use crate::report::{Report, group_thousands};
+use crate::report::{Report, decimal_bytes, group_thousands};
 use crate::scaling::{self, Idea};
 use crate::scenario::{Scenario, ShareRelay};
 use crate::sizes::CoinbaseLayout;
@@ -237,19 +237,19 @@ fn data_centre(base: &Scenario) -> Scenario {
 
 fn block_size_scenarios(base: &Scenario) -> Vec<Scenario> {
     let sizes = [
-        ("2 MB", BCH_CHIPNET_ABLA_FLOOR_BYTES),
-        ("32 MB", BCH_MAINNET_ABLA_FLOOR_BYTES),
-        ("256 MB", BCH_SCALENET_LIMIT_BYTES),
-        ("1 GB", 1_000_000_000),
-        ("2 GB", BCH_MAX_CONSENSUS_BLOCK_BYTES),
+        BCH_CHIPNET_ABLA_FLOOR_BYTES,
+        BCH_MAINNET_ABLA_FLOOR_BYTES,
+        BCH_SCALENET_LIMIT_BYTES,
+        1_000_000_000,
+        BCH_MAX_CONSENSUS_BLOCK_BYTES,
     ];
-    let mixed = sizes.map(|(name, bytes)| Scenario {
-        label: format!("{name} blocks, mixed links"),
+    let mixed = sizes.map(|bytes| Scenario {
+        label: format!("{} blocks, mixed links", decimal_bytes(bytes)),
         block_bytes: bytes,
         ..base.clone()
     });
-    let servers = sizes.map(|(name, bytes)| Scenario {
-        label: format!("{name} blocks, data-centre links"),
+    let servers = sizes.map(|bytes| Scenario {
+        label: format!("{} blocks, data-centre links", decimal_bytes(bytes)),
         block_bytes: bytes,
         ..data_centre(base)
     });

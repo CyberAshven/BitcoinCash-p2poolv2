@@ -68,8 +68,9 @@ a discount: a sale makes sense to both when `y` is a little below what the
 buyer expects to collect.
 
 Upstream draws the window as about two weeks. On Bitcoin Cash it is three
-blocks' worth of work: two weeks only for pools below about 0.15% of Bitcoin
-Cash's hashrate, about 50 hours at 1% and about 5 hours at 10%
+blocks' worth of work: with one-minute blocks (CHIP-2025-03) two weeks only for
+pools below about 0.015% of Bitcoin Cash's hashrate, about 5 hours at 1% and
+about 30 minutes at 10%
 ([PPLNS accounting](../sharechain/pplns-accounting.md)).
 
 ## On-chain swaps
