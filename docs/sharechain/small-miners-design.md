@@ -810,8 +810,9 @@ shares a second as its 1-second rows. Taking out what the shares themselves
 cost there, with a template a node, checking weak shares keeps a node about
 1% busy with 1,000 miners and 12% with 10,000; with 100,000 it takes 1.3
 times what a node can do, so the node falls behind, unless the pool's nodes
-build one template (16%). The node checks one share or weak share at a time
-today.
+build one template (16%). Until 2026-11-16 a node checked one share or weak
+share at a time; it now checks the weak shares a share carries on several
+cores (item 2 below), while a relayed weak share is still checked on one.
 
 ### What has to come first
 
@@ -834,9 +835,16 @@ Neither is a share-chain rule, and each helps under today's rule too.
    and ten times more than triple it.
 2. **Weak share checks leave the single validation queue**, so a node with
    several cores checks several at once, or the check gets cheap enough
-   that 35 a second fit one core with 100,000 miners in the window. Until
-   then `WEAK_FILL_MAX` 320 is safe for pools paying tens of thousands of
-   miners, not 100,000.
+   that 35 a second fit one core with 100,000 miners in the window. Built
+   for the weak shares a share carries (2026-11-16): a node checks them on
+   its own thread and on helper threads, one fewer than its CPUs across the
+   node (`utils/parallel.rs`), and holds the PPLNS window only while their
+   payouts are taken, not while their coinbases are rebuilt and hashed. The
+   verdict is the first failing weak share's in carried order, as before. A
+   relayed weak share is still checked by the weak share worker alone,
+   though no longer under the window. Until a node is measured keeping up
+   with 100,000 miners in the window, `WEAK_FILL_MAX` 320 is safe for pools
+   paying tens of thousands of miners, not 100,000.
 
 ### What was decided
 

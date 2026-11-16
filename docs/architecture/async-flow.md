@@ -70,6 +70,14 @@ except the per-peer services and the StoreWriter thread:
 - **ValidationWorker** -- context-free validation, one spawned task per block,
   concurrency capped by a semaphore sized to the CPU count.
 - **OrganiseWorker** -- serial candidate-to-confirmed promotion.
+- **Weak share check helpers** (Bitcoin Cash) -- the header checks of the
+  weak shares a share carries (in its validation task) and their coinbase
+  checks (in the organise worker) run on the calling thread plus scoped
+  helper threads (`utils/parallel.rs`), at most one fewer than the CPUs
+  across the node; a caller that finds none free checks alone. The verdict
+  is the first failing weak share's in carried order. The coinbase checks
+  hold the PPLNS window only while a batch's payouts are taken and let it go
+  before the helpers hash, so no helper waits for it.
 - **FoundBlockVerifier** -- on Bitcoin Cash, checks candidate block hashes
   against BCHN's chain independently of share confirmation. RPC failures
   defer accounting and do not stop share processing. Positive acceptance is

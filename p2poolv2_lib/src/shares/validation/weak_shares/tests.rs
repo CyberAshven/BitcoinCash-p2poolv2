@@ -4,7 +4,7 @@
 
 use super::*;
 use crate::accounting::payout::payout_levels::PplnsWeights;
-use crate::accounting::payout::sharechain_pplns::pplns_window::MockPplnsWindow;
+use crate::accounting::payout::sharechain_pplns::pplns_window::{MockPplnsWindow, WindowError};
 use crate::pool_difficulty::{AsertParent, MockPoolDifficulty};
 use crate::shares::chain::chain_store_handle::MockChainStoreHandle;
 use crate::shares::validation::FailureKind;
@@ -18,6 +18,9 @@ use bitcoin::hashes::Hash;
 use bitcoin::{Address, CompactTarget, Network, PubkeyHash, Work};
 use p2poolv2_wallet::payout_address::PayoutAddress;
 use p2poolv2_wallet::share_owner::ShareOwner;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
+use std::thread;
 use std::time::{Duration, UNIX_EPOCH};
 
 //* Validity tests. A weak share is mined at `HARD`, a target its hash
@@ -991,4 +994,179 @@ fn a_weak_share_an_ancestor_carries_is_refused_under_another_encoding() {
         error.message.contains("already carried by an ancestor"),
         "{error}"
     );
+}
+
+//* Parallel check tests. A share's weak shares are checked on several
+//* threads, and the verdict must be the one checking them one by one gives:
+//* the first failing weak share's, in carried order.
+
+/// 32 carried weak shares: the 2nd is on a parent not stored yet, found
+/// after its other header rules, and the 3rd is more than two minutes after
+/// its carrier, found at once. One by one, the check stops at the 2nd,
+/// `Recoverable`, and never reaches the 3rd's `Consensus`; on several
+/// threads the 3rd fails first, and the verdict is still the 2nd's.
+#[test]
+fn carried_weak_headers_give_the_first_failure_in_carried_order() {
+    let parent = TestShareBlockBuilder::new()
+        .share_owner(ShareOwner::CashP2pkh([0x11; 20]))
+        .bits(CompactTarget::from_consensus(EASY))
+        .build()
+        .header;
+    let parent_hash = parent.block_hash();
+    let missing_parent = BlockHash::from_byte_array([0x99; 32]);
+    let distribution = HashMap::from([(
+        PayoutAddress::from(Address::p2pkh(
+            PubkeyHash::from_byte_array([0x55; 20]),
+            Network::Regtest,
+        )),
+        1u128,
+    )]);
+    let weak_share_on = |parent_hash, time, nonce| {
+        build_test_weak_share(TestWeakShare {
+            parent_hash,
+            bits: CompactTarget::from_consensus(HARD),
+            minimum: CompactTarget::from_consensus(HARD),
+            weak_ratio: next_weak_ratio(GENESIS_WEAK_RATIO, 0),
+            distribution: &distribution,
+            time,
+            nonce,
+        })
+    };
+    let mut weak_shares: Vec<WeakShare> = (0..32)
+        .map(|nonce| weak_share_on(parent_hash, WEAK_TIME, nonce))
+        .collect();
+    weak_shares[1] = weak_share_on(missing_parent, WEAK_TIME, 1);
+    weak_shares[2] = weak_share_on(parent_hash, WEAK_TIME + 121, 2);
+    let carrier = TestShareBlockBuilder::new()
+        .share_owner(ShareOwner::CashP2pkh([0x22; 20]))
+        .time(WEAK_TIME)
+        .weak_shares(weak_shares)
+        .build();
+    let mut pool_difficulty = MockPoolDifficulty::default();
+    pool_difficulty
+        .expect_calculate_target_clamped()
+        .returning(|_| CompactTarget::from_consensus(HARD));
+    let mut store = MockChainStoreHandle::default();
+    let asert_parent = AsertParent::from_header(&parent, 0, 0);
+    store.expect_get_asert_parent().returning(move |hash| {
+        if *hash == missing_parent {
+            Err(StoreError::NotFound(format!("share {hash}")))
+        } else {
+            Ok(asert_parent)
+        }
+    });
+    store
+        .expect_get_share_header()
+        .returning(move |_| Ok(parent.clone()));
+    store.expect_get_block_metadata().returning(|_| {
+        Ok(BlockMetadata {
+            expected_height: Some(0),
+            chain_work: Work::from_le_bytes([0u8; 32]),
+            status: Status::BlockValid,
+            chain: ChainMembership::Confirmed,
+        })
+    });
+    let validator = DefaultShareValidator::new(pool_difficulty)
+        .for_chain(Chain::BitcoinCash)
+        .with_target_ceiling(CompactTarget::from_consensus(EASY));
+
+    let error = validator
+        .validate_carried_weak_headers(&carrier, &store)
+        .unwrap_err();
+
+    assert_eq!(error.kind, FailureKind::Recoverable, "{error}");
+    assert!(error.message.contains("parent"), "{error}");
+}
+
+/// 80 carried weak shares, two batches: the 71st's window cannot be read
+/// yet and the 76th does not pay its window. One by one, the check stops at
+/// the 71st, `Recoverable`, and never reaches the 76th's `Consensus`; on
+/// several threads it gives the same, while another thread takes the window
+/// again and again, and it lets the window go once done.
+#[test]
+fn carried_weak_coinbases_give_the_first_failure_while_the_window_is_contended() {
+    let payee = PayoutAddress::from(Address::p2pkh(
+        PubkeyHash::from_byte_array([0x55; 20]),
+        Network::Regtest,
+    ));
+    let distribution = HashMap::from([(payee, 1_000u128)]);
+    let other_distribution = HashMap::from([(
+        PayoutAddress::from(Address::p2pkh(
+            PubkeyHash::from_byte_array([0x77; 20]),
+            Network::Regtest,
+        )),
+        1_000u128,
+    )]);
+    let parent = BlockHash::from_byte_array([0x66; 32]);
+    let unreadable_parent = BlockHash::from_byte_array([0x67; 32]);
+    let weak_share_on = |parent_hash, distribution: &HashMap<PayoutAddress, u128>, nonce| {
+        build_test_weak_share(TestWeakShare {
+            parent_hash,
+            bits: CompactTarget::from_consensus(HARD),
+            minimum: CompactTarget::from_consensus(HARD),
+            weak_ratio: GENESIS_WEAK_RATIO,
+            distribution,
+            time: WEAK_TIME,
+            nonce,
+        })
+    };
+    let mut weak_shares: Vec<WeakShare> = (0..80)
+        .map(|nonce| weak_share_on(parent, &distribution, nonce))
+        .collect();
+    weak_shares[70] = weak_share_on(unreadable_parent, &distribution, 70);
+    weak_shares[75] = weak_share_on(parent, &other_distribution, 75);
+    let share = TestShareBlockBuilder::new()
+        .share_owner(ShareOwner::CashP2pkh([0x22; 20]))
+        .weak_shares(weak_shares)
+        .build();
+    let mut window = MockPplnsWindow::default();
+    window.expect_network().return_const(Network::Regtest);
+    window
+        .expect_get_weights_from_start_hash()
+        .returning(move |start_hash, _, _| {
+            if start_hash == unreadable_parent {
+                Err(WindowError::ReadFailure("ancestry not stored yet".into()))
+            } else {
+                Ok(PplnsWeights::without_levels(distribution.clone()))
+            }
+        });
+    let pplns_window = Arc::new(RwLock::new(window));
+    let validator =
+        DefaultShareValidator::new(MockPoolDifficulty::default()).for_chain(Chain::BitcoinCash);
+    let stop = Arc::new(AtomicBool::new(false));
+    let contender = thread::spawn({
+        let pplns_window = Arc::clone(&pplns_window);
+        let stop = Arc::clone(&stop);
+        move || {
+            while !stop.load(Ordering::Relaxed) {
+                drop(pplns_window.write().expect("window lock"));
+                thread::yield_now();
+            }
+        }
+    });
+    let (verdict_tx, verdict_rx) = mpsc::channel();
+    let checker = thread::spawn({
+        let pplns_window = Arc::clone(&pplns_window);
+        move || {
+            let verdict = validator.validate_carried_weak_coinbases(
+                &share,
+                &MockChainStoreHandle::default(),
+                &pplns_window,
+            );
+            verdict_tx
+                .send(verdict)
+                .expect("the test waits for the verdict");
+        }
+    });
+
+    let verdict = verdict_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the check finishes while the window is contended");
+    stop.store(true, Ordering::Relaxed);
+    contender.join().expect("contender thread");
+    checker.join().expect("checker thread");
+
+    let error = verdict.unwrap_err();
+    assert_eq!(error.kind, FailureKind::Recoverable, "{error}");
+    assert!(pplns_window.try_write().is_ok(), "the window is let go");
 }
