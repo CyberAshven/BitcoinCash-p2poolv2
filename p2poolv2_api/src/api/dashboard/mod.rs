@@ -148,19 +148,26 @@ fn error_page(state: &AppState, error: ApiError) -> Response {
 }
 
 /// A `?page=` query, counted from 1, plus the overview's `?auto=` toggle,
-/// `?range=` chart window and the `?pool=`/`?node=`/`?network`/`?blocks`
-/// chart series toggles (a pool/node/blocks series is hidden when its
-/// parameter is `0`; the network series shows only for `network=1`, it
-/// being opt-in).
+/// `?range=` chart window, `?chart=` chart tab and the series toggles
+/// (`?pool=`/`?node=`/`?network`/`?blocks` for the hashrate tab,
+/// `?height=`/`?dmin=`/`?dmax=`/`?uncles=`/`?weak=` for the sharechain)
+/// (a series is hidden when its parameter is `0`; the network series is
+/// opt-in and shows only for `network=1`).
 #[derive(Deserialize)]
 struct PageQuery {
     page: Option<usize>,
     auto: Option<String>,
     range: Option<String>,
+    chart: Option<String>,
     pool: Option<String>,
     node: Option<String>,
     network: Option<String>,
     blocks: Option<String>,
+    height: Option<String>,
+    dmin: Option<String>,
+    dmax: Option<String>,
+    uncles: Option<String>,
+    weak: Option<String>,
 }
 
 /// Whether the share `blockhash` met its own Bitcoin Cash block target.
@@ -232,6 +239,79 @@ fn share_page(
         }
     }
     (Some(tip), paging, rows)
+}
+
+/// Max shares the sharechain tab loads from the store: the range's samples
+/// plus the trailing hour the difficulty / uncle / weak windows need, with
+/// room for ~17 s intervals (the fixture chain) over a month.
+const SHARE_SERIES_MAX: u32 = 3000;
+
+/// One share as the sharechain tab needs it: time, height, difficulty,
+/// the timestamps of its uncles (for counting uncle lines) and its weak
+/// count. Sorted oldest first.
+#[derive(Clone)]
+pub(crate) struct ShareSeriesItem {
+    time: u32,
+    height: u32,
+    difficulty: f64,
+    uncle_times: Vec<u32>,
+    weak_count: u16,
+}
+
+/// Shares behind the Sharechain tab, oldest first: pages backwards from the
+/// tip through `query_shares` until the oldest share reaches back past the
+/// given window plus the trailing hour the difficulty / uncle / weak windows
+/// need (or the chain runs out / the max count fills).
+fn share_series(state: &AppState, window_secs: u64) -> Vec<ShareSeriesItem> {
+    let tip = match state.chain_store_handle.get_tip_height().ok().flatten() {
+        Some(tip) => tip,
+        None => return Vec::new(),
+    };
+    let store = state.chain_store_handle.store_handle().store();
+    let mut collected: Vec<ShareSeriesItem> = Vec::with_capacity(200);
+    // Page backwards: each loop steps down by up to PAGE_HEIGHT_STEP
+    // heights, requesting shares through query_shares.
+    const PAGE_HEIGHT_STEP: u32 = 100;
+    let mut hi = tip;
+    loop {
+        let lo = hi.saturating_sub(PAGE_HEIGHT_STEP - 1);
+        let shares = match store.query_shares(lo, hi) {
+            Ok(shares) => shares,
+            Err(_) => break,
+        };
+        if shares.is_empty() {
+            break;
+        }
+        let newest_time = u64::from(shares.iter().map(|s| s.timestamp).max().unwrap_or(0));
+        for share in &shares {
+            collected.push(ShareSeriesItem {
+                time: share.timestamp,
+                height: share.height,
+                difficulty: Target::from_compact(share.bits).difficulty_float(),
+                uncle_times: share.uncles.iter().map(|u| u.timestamp).collect(),
+                weak_count: share.weak_count,
+            });
+        }
+        // Stop when the oldest collected share is at least window+3600s
+        // before the newest one we have seen so far, or the count fills.
+        if collected.len() as u32 >= SHARE_SERIES_MAX {
+            break;
+        }
+        let oldest_in_batch = shares.iter().map(|s| s.timestamp).min().unwrap_or(0);
+        if newest_time.saturating_sub(u64::from(oldest_in_batch)) > window_secs + 3600 {
+            break;
+        }
+        // Step down from lo - 1 rather than the lowest height, since
+        // query_shares includes both ends and we want the next slice.
+        let lowest_height = shares.iter().map(|s| s.height).min().unwrap_or(0);
+        if lowest_height == 0 {
+            break;
+        }
+        hi = lowest_height.saturating_sub(1);
+    }
+    // Sort oldest first (by time, then height as tiebreaker).
+    collected.sort_by_key(|s| (s.time, s.height));
+    collected
 }
 
 /// Blocks the pool found, as the store records them on confirmation, newest
@@ -366,10 +446,16 @@ async fn overview(
     let state = &dashboard.app;
     let auto = pages::Auto::from_query(query.auto.as_deref());
     let range_key = pages::normalize_range(query.range.as_deref());
+    let chart_key = pages::normalize_chart(query.chart.as_deref());
     let pool_on = pages::series_on(query.pool.as_deref());
     let node_on = pages::series_on(query.node.as_deref());
     let network_on = pages::network_on(query.network.as_deref());
     let blocks_on = pages::series_on(query.blocks.as_deref());
+    let height_on = pages::series_on(query.height.as_deref());
+    let dmin_on = pages::series_on(query.dmin.as_deref());
+    let dmax_on = pages::series_on(query.dmax.as_deref());
+    let uncles_on = pages::series_on(query.uncles.as_deref());
+    let weak_on = pages::series_on(query.weak.as_deref());
     let now = unix_now();
     let chain = read_store(state, move |state| {
         (
@@ -423,6 +509,18 @@ async fn overview(
             time: block.time,
         })
         .collect();
+    // The sharechain tab's shares: oldest first, carrying time, height,
+    // difficulty, uncle timestamps and weak count for the trailing-hour
+    // envelope and counts. Only fetched when the sharechain tab is active.
+    let share_series: Vec<ShareSeriesItem> = if chart_key == "sharechain" {
+        read_store(state, move |state| {
+            share_series(state, range_window_secs(range_key))
+        })
+        .await
+        .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
     // The connected peers, longest uptime first (get_peer_infos sorts).
     // The panel falls back to its empty state when the node actor cannot
     // answer, rather than failing the whole page.
@@ -459,6 +557,13 @@ async fn overview(
         network_on,
         blocks_on,
         chart_blocks,
+        chart_key,
+        height_on,
+        dmin_on,
+        dmax_on,
+        uncles_on,
+        weak_on,
+        share_series,
     }))
 }
 

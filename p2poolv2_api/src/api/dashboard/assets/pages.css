@@ -181,6 +181,24 @@ tr.uncle-row {
   flex-shrink: 0;
 }
 
+/* The heading's chart-tab switch: both names side by side, the active one
+   underlined in full colour, the inactive one muted and without underline. */
+.hashrate-head .head-switch {
+  color: inherit;
+  text-decoration: none;
+}
+.hashrate-head .head-switch[aria-current] {
+  text-decoration: underline;
+  text-underline-offset: 0.2em;
+}
+.hashrate-head .head-switch.dim {
+  color: var(--pico-muted-color);
+  text-decoration: none;
+}
+.hashrate-head .head-switch:hover {
+  color: var(--pico-primary-color);
+}
+
 /* Pool/Node/Network series toggles: their own row under the hashrate heading,
    so the stateless links can flip ?pool=0/?node=0/?network=1 (server) or
    toggle the signals (wasm) without a script. The network line is opt-in. */
@@ -301,6 +319,42 @@ tr.uncle-row {
   border-radius: 1px;
   transform: rotate(45deg);
 }
+/* Sharechain series colours: height white, min diff cyan, max diff light
+   violet, uncles rose, weak amber. Each group covers line, dot, key, tracer. */
+.chart-wrap .line.height { stroke: #ffffff; }
+.chart-wrap .dot.height,
+.chart-wrap .key.height { fill: #ffffff; color: #ffffff; }
+.chart-wrap .tracer.height {
+  fill: #ffffff; stroke: #ffffff;
+  filter: drop-shadow(0 0 1px #fff) drop-shadow(0 0 3px #fff); }
+.chart-wrap .line.dmin { stroke: #06b6d4; }
+.chart-wrap .dot.dmin,
+.chart-wrap .key.dmin { fill: #06b6d4; color: #06b6d4; }
+.chart-wrap .tracer.dmin {
+  fill: #06b6d4; stroke: #06b6d4;
+  filter: drop-shadow(0 0 1px #06b6d4) drop-shadow(0 0 3px #06b6d4); }
+.chart-wrap .line.dmax { stroke: #a78bfa; }
+.chart-wrap .dot.dmax,
+.chart-wrap .key.dmax { fill: #a78bfa; color: #a78bfa; }
+.chart-wrap .tracer.dmax {
+  fill: #a78bfa; stroke: #a78bfa;
+  filter: drop-shadow(0 0 1px #a78bfa) drop-shadow(0 0 3px #a78bfa); }
+.chart-wrap .line.uncles { stroke: #f43f5e; }
+.chart-wrap .dot.uncles,
+.chart-wrap .key.uncles { fill: #f43f5e; color: #f43f5e; }
+.chart-wrap .tracer.uncles {
+  fill: #f43f5e; stroke: #f43f5e;
+  filter: drop-shadow(0 0 1px #f43f5e) drop-shadow(0 0 3px #f43f5e); }
+.chart-wrap .line.weak { stroke: #f59e0b; }
+.chart-wrap .dot.weak,
+.chart-wrap .key.weak { fill: #f59e0b; color: #f59e0b; }
+.chart-wrap .tracer.weak {
+  fill: #f59e0b; stroke: #f59e0b;
+  filter: drop-shadow(0 0 1px #f59e0b) drop-shadow(0 0 3px #f59e0b); }
+/* The key chip for uncle/weak counts shows an integer (no decimal point or
+   units) so the tip rows read "Uncle 3" instead of "Uncle 3.00". */
+.chart-wrap .key.uncles,
+.chart-wrap .key.weak { font-variant-numeric: tabular-nums; }
 .chart-wrap figcaption {
   display: flex;
   gap: 1rem;
