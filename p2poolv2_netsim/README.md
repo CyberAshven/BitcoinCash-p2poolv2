@@ -11,8 +11,8 @@ The model, the results and what they mean are in
 
 ```sh
 # One scenario, read as text (defaults: 100 nodes, 1,000 miners, a pool
-# with 1% of BCH, 32 MB blocks, 10-second shares, hybrid payout, no tokens,
-# a day of mining)
+# with 1% of BCH, 3.2 MB one-minute blocks, 10-second shares, hybrid
+# payout, no tokens, a day of mining)
 cargo netsim run
 
 # The same with merge-mined tokens and a million miners

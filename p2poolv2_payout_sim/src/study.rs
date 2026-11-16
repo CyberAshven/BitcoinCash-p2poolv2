@@ -1360,8 +1360,10 @@ pub(crate) fn scale_scenario(base: &Scenario, multiple: f64, fraction: f64) -> S
 /// Bitcoin Cash and 1 to 1,000 times today's hashrate, 50% industrial, with
 /// every class at the payout level a node would leave its machine, including
 /// the tracked Bitaxe and the tracked ASIC. Each row gives Bitcoin Cash's
-/// difficulty at that hashrate (Bitcoin's is about the x270 rows') and the
-/// smallest miner that still finds three weak shares a month.
+/// difficulty at that hashrate for its `BCH_BLOCK_INTERVAL_SECONDS` blocks
+/// (Bitcoin's, at about the x270 rows' hashrate but with ten-minute blocks,
+/// is ten times the x270 rows' for one-minute blocks) and the smallest miner
+/// that still finds three weak shares a month.
 pub fn scale(base: &Scenario) -> String {
     let scenarios: Vec<Scenario> = SCALE_HASHRATE_MULTIPLES
         .into_iter()
@@ -1563,9 +1565,11 @@ pub fn scale_levers(base: &Scenario) -> String {
 }
 
 /// Pools of the window cap table, as parts of today's Bitcoin Cash: from
-/// 370 TH/s, which finds a block about every 70 days, to 37 PH/s, about
-/// 43 blocks a month. Above about 0.15% the window holds three blocks of
-/// work well inside 14 days and the cap never binds.
+/// 370 TH/s, which finds a one-minute block about every 7 days, to 37 PH/s,
+/// about 432 blocks a month (a block every 70 days to 43 a month with
+/// ten-minute blocks). Above about 0.015% the window holds three blocks of
+/// work inside 14 days and the cap never binds (0.15% with ten-minute
+/// blocks), so with one-minute blocks only the smallest row reaches it.
 const WINDOW_CAP_POOL_FRACTIONS: [f64; 7] = [0.0001, 0.0002, 0.0005, 0.001, 0.002, 0.005, 0.01];
 
 /// Window caps of the window cap table, in days: today's 14 (120,960
