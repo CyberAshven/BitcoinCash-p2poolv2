@@ -29,9 +29,38 @@ API report a different network.
 | P2Pool Status: Miners | miners on this node and their workers, then one miner's place in the PPLNS window | `/miners?page=1`, `/miner?address=` |
 | P2Pool Status: Blocks | blocks the pool found | `/found_blocks` |
 | P2Pool Status: Peers | share chain peers and live connects and disconnects | `/peers`, `/ws` topic `peers` |
+| P2Pool Status: System | the node's systemd user service, whether it runs, and keys to start, stop and restart it | `systemctl --user` |
 | Settings | the node config file and where these settings are kept | `settings.toml` |
 
 Each shown source is asked again every 10 seconds, and `r` asks now.
+
+The colours stay readable on light and dark terminals, as PDM's theme
+(`src/theme.rs`) does: no fixed backgrounds, dimmed text for hints, and
+reversed video for the selection.
+
+## The node as a systemd user service
+
+The System tab controls the node when it runs as the systemd user service
+`p2poolv2@<instance>` from [systemd/user/p2poolv2@.service](systemd/user/p2poolv2@.service),
+PDM's unit: the binary at `~/.local/bin/p2poolv2` and the config at
+`~/.config/p2poolv2/config-<instance>.toml`, such as
+`config-chipnet.toml`. Pick that config and the tab shows whether the
+service runs; `s`, `x` and `r` start, stop and restart it. Any other config,
+such as one under `/etc/p2poolv2` that the system service in the
+repository root runs, has no controls here.
+
+```sh
+mkdir -p ~/.config/systemd/user ~/.config/p2poolv2 ~/.local/bin
+cp p2poolv2_tui/systemd/user/p2poolv2@.service ~/.config/systemd/user/
+cp target/release/p2poolv2 ~/.local/bin/
+cp config.toml ~/.config/p2poolv2/config-chipnet.toml
+systemctl --user daemon-reload
+systemctl --user enable --now p2poolv2@chipnet
+```
+
+Relative paths in the config, such as `./store.db`, are kept under
+`~/.local/state/p2poolv2/<instance>/`. A user service stops when the user
+logs out unless lingering is on (`loginctl enable-linger`).
 
 ## Point it at a node and BCHN
 
@@ -80,9 +109,10 @@ Settings live in `p2poolv2_tui/settings.toml` under `$XDG_CONFIG_HOME` or
 | Left / Right | switch tabs |
 | Enter | focus a screen's list; edit a setting; apply an edit; show the selected miner |
 | Esc | give the keyboard back to the sidebar; cancel an edit or the file picker |
-| s | save the config (in the editor) |
+| s | save the config (in the editor); start the service (on the System tab) |
+| x | stop the service (on the System tab) |
 | Backspace | clear a setting; go up a folder in the file picker |
-| r | refresh now |
+| r | refresh now; restart the service (on the System tab) |
 | q, Ctrl-C | quit (q types a q while editing) |
 
 ## The config editor
@@ -163,16 +193,20 @@ P2POOL_TUI_LIVE_CONFIG=/path/to/node/config.toml cargo nextest run -p p2poolv2_t
   covenant contracts instead (`p2poolv2_cli bch-trade`, see
   `docs/atomic-swap/bch-share-trading.md`).
 - The share market screen: upstream removed it before it had content.
-- Work still open upstream (installing P2Poolv2 and its systemd service,
+- Work still open upstream (installing P2Poolv2,
   memory and storage use, Prometheus): it can follow once upstream lands it.
 
 ## Credits and licence
 
 Ported from [p2poolv2/pdm](https://github.com/p2poolv2/pdm) at `83835ae`,
-by the PDM Authors (Raunak Kumar, Francesco Micheli, pool2win and
-contributors). Its app state, key handling, file picker, settings, status
-bar, Bitcoin and P2Pool status views, API and WebSocket clients and config
-editor are the base of the modules here; each file says what it ports.
+and followed through `b7d97c34` (2026-11-04): the theme, the systemd
+service controls and their user unit. PDM's own dependency, CI, dependabot,
+cargo-deny and toolchain files are the workspace's here, and its
+`difficulty_multiplier` setting never was. By the PDM Authors (Raunak
+Kumar, Francesco Micheli, pool2win and contributors). Its app state, key
+handling, file picker, settings, status bar, Bitcoin and P2Pool status
+views, API and WebSocket clients, config editor, theme and systemd module
+are the base of the modules here; each file says what it ports.
 
 This crate is licensed under the GNU Affero General Public License v3.0 or
 later, as PDM is: see [LICENSE](LICENSE). Every source file carries its

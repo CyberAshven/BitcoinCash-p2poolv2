@@ -18,6 +18,7 @@ pub mod pool;
 pub mod settings;
 
 use crate::remote::Remote;
+use crate::theme;
 use ratatui::{
     prelude::*,
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Row, Tabs, Wrap},
@@ -93,7 +94,7 @@ fn render_sidebar(frame: &mut Frame, area: Rect, selected: usize, focused: bool)
     let border_style = if focused {
         Style::default()
     } else {
-        Style::default().fg(Color::DarkGray)
+        theme::MUTED
     };
     let sidebar = List::new(items)
         .block(
@@ -102,7 +103,7 @@ fn render_sidebar(frame: &mut Frame, area: Rect, selected: usize, focused: bool)
                 .title(" P2Pool BCH ")
                 .border_style(border_style),
         )
-        .highlight_style(Style::default().bg(Color::Gray).fg(Color::Black));
+        .highlight_style(theme::HIGHLIGHT);
     let mut state = ListState::default();
     state.select(Some(selected));
     frame.render_stateful_widget(sidebar, area, &mut state);
@@ -110,27 +111,18 @@ fn render_sidebar(frame: &mut Frame, area: Rect, selected: usize, focused: bool)
 
 fn render_status_bar(frame: &mut Frame, area: Rect, hints: &[Hint], notice: Option<&str>) {
     let spans: Vec<Span> = match notice {
-        Some(notice) => vec![Span::styled(
-            format!(" ! {notice}  "),
-            Style::default().fg(Color::Red),
-        )],
+        Some(notice) => vec![Span::styled(format!(" ! {notice}  "), theme::ERROR)],
         None => hints
             .iter()
             .flat_map(|hint| {
                 [
-                    Span::styled(
-                        format!(" {} ", hint.key),
-                        Style::default().bg(Color::DarkGray).fg(Color::White),
-                    ),
-                    Span::styled(
-                        format!(" {}  ", hint.action),
-                        Style::default().fg(Color::DarkGray),
-                    ),
+                    Span::styled(format!(" {} ", hint.key), theme::KEY_HINT),
+                    Span::styled(format!(" {}  ", hint.action), theme::MUTED),
                 ]
             })
             .collect(),
     };
-    let bar = Paragraph::new(Line::from(spans)).style(Style::default().bg(Color::Black));
+    let bar = Paragraph::new(Line::from(spans));
     frame.render_widget(bar, area);
 }
 
@@ -139,7 +131,7 @@ pub(crate) fn tab_bar<'a>(titles: &[&'a str], selected: usize) -> Tabs<'a> {
     Tabs::new(titles.to_vec())
         .block(Block::default().borders(Borders::ALL).title(" Info "))
         .select(selected)
-        .highlight_style(Style::default().bg(Color::Gray).fg(Color::Black))
+        .highlight_style(theme::HIGHLIGHT)
 }
 
 /// Splits `area` into a tab bar and the content below it.
@@ -156,22 +148,24 @@ pub(crate) fn titled(title: &str) -> Block<'_> {
     Block::default().borders(Borders::ALL).title(title)
 }
 
-/// A line in grey, for hints and waiting.
+/// A dimmed line, for hints and waiting.
 pub(crate) fn muted(text: impl Into<String>) -> Line<'static> {
-    Line::from(Span::styled(
-        text.into(),
-        Style::default().fg(Color::DarkGray),
-    ))
+    Line::from(Span::styled(text.into(), theme::MUTED))
 }
 
 /// A line in red, for errors and warnings.
 pub(crate) fn alert(text: impl Into<String>) -> Line<'static> {
-    Line::from(Span::styled(text.into(), Style::default().fg(Color::Red)))
+    Line::from(Span::styled(text.into(), theme::ERROR))
 }
 
 /// A `label : value` line with the labels aligned.
 pub(crate) fn field(label: &str, value: impl Into<String>) -> Line<'static> {
     Line::from(format!("{label:<LABEL_WIDTH$} : {}", value.into()))
+}
+
+/// A [`field`] whose value keeps its own style.
+pub(crate) fn styled_field(label: &str, value: Span<'static>) -> Line<'static> {
+    Line::from(vec![Span::raw(format!("{label:<LABEL_WIDTH$} : ")), value])
 }
 
 /// The lines for a value read from the node or BCHN: `ready` draws it
@@ -218,11 +212,7 @@ pub(crate) fn render_message(frame: &mut Frame, area: Rect, title: &str, message
 /// A table's header row.
 pub(crate) fn header_row(titles: &[&'static str]) -> Row<'static> {
     Row::new(titles.to_vec())
-        .style(
-            Style::default()
-                .fg(Color::Gray)
-                .add_modifier(Modifier::BOLD),
-        )
+        .style(theme::EMPHASIS)
         .bottom_margin(1)
 }
 

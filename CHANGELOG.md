@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+The terminal UI follows upstream's PDM through `b7d97c34` (2026-11-04). A
+System tab on P2Pool Status starts, stops and restarts the node when it
+runs as the systemd user service `p2poolv2@<instance>`, from PDM's unit,
+now in `p2poolv2_tui/systemd/user`, with its config at
+`~/.config/p2poolv2/config-<instance>.toml`; `systemctl` runs off the
+screen's thread, since a stop waits for the node to close its store. The
+colours come from PDM's theme, readable on light and dark terminals.
+
 A share a peer sent is relayed once its header checks out, before its body
 is validated, as BIP152 high-bandwidth peers relay compact blocks (#128).
 Uncles are now chosen from fully validated shares only. No share-chain rule,
