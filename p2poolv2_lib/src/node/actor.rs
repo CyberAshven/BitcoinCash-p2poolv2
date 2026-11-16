@@ -25,6 +25,7 @@ use crate::node::p2p_health::P2pHealth;
 use crate::node::p2p_message_handlers::receivers::block_receiver::{
     BlockReceiver, create_block_receiver_channel,
 };
+use crate::node::p2p_message_handlers::receivers::share_without_payouts::CoinbaseRebuilder;
 use crate::node::p2p_message_handlers::senders::build_getheaders_message;
 use crate::node::p2p_message_handlers::senders::send_share_block_broadcast;
 use crate::node::p2p_message_handlers::senders::share_block::weak_shares_to_prefill;
@@ -843,9 +844,16 @@ impl NodeActor {
             .id();
         worker_names.insert(emission_worker_id, "Emission worker");
 
+        // Bitcoin Cash: rebuild the coinbases of the shares peers relay
+        // without their payouts from the window validation reads.
+        let mut node = node;
+        if chain == Chain::BitcoinCash {
+            node.request_response_handler
+                .set_coinbase_rebuilder(CoinbaseRebuilder::new(pplns_window.clone()));
+        }
+
         // Bitcoin Cash P2Pool: check weak shares from stratum and peers, pool
         // the ones that pass and relay them (`node::weak_share_worker`).
-        let mut node = node;
         let weak_share_relay = weak_shares.map(|network| {
             node.request_response_handler
                 .set_weak_share_sender(network.events_tx);

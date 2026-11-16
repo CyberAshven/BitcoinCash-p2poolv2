@@ -12,6 +12,9 @@ use crate::node::SwarmSend;
 use crate::node::behaviour::request_response::RequestResponseEvent;
 use crate::node::messages::{GetData, InventoryMessage, Message};
 use crate::node::p2p_message_handlers::receivers::block_receiver::BlockReceiverHandle;
+use crate::node::p2p_message_handlers::receivers::share_without_payouts::{
+    CoinbaseRebuilder, RebuildCounts,
+};
 use crate::node::p2p_message_handlers::senders::share_block::ShareRelayBytes;
 use crate::node::request_sender::RequestSender;
 use crate::node::response_worker::{ResponseWorkerEvent, ResponseWorkerSender};
@@ -82,6 +85,9 @@ pub struct RequestResponseHandler<C: Send + Sync> {
     /// Bitcoin Cash P2Pool: where relayed weak shares go to be checked
     /// (`node::weak_share_worker`). `None` on Bitcoin and in Hydrapool mode.
     weak_share_tx: Option<WeakShareEventSender>,
+    /// Bitcoin Cash: what rebuilds the coinbase of a share relayed without
+    /// its payouts. `None` on Bitcoin.
+    coinbase_rebuilder: Option<CoinbaseRebuilder>,
 }
 
 /// Implementation of ResponseChannel<Message>, used in production.
@@ -118,7 +124,14 @@ impl RequestResponseHandler<ResponseChannel<Message>> {
             share_relay: ShareRelayBytes::default(),
             share_transaction_pool,
             weak_share_tx: None,
+            coinbase_rebuilder: None,
         }
+    }
+
+    /// Rebuild the coinbases of shares peers relay without their payouts
+    /// with `coinbase_rebuilder`. Without it such a share is asked for whole.
+    pub fn set_coinbase_rebuilder(&mut self, coinbase_rebuilder: CoinbaseRebuilder) {
+        self.coinbase_rebuilder = Some(coinbase_rebuilder);
     }
 
     /// Send the weak shares peers relay to `weak_share_tx`, the weak share
@@ -259,6 +272,15 @@ impl<C: Send + Sync + 'static> RequestResponseHandler<C> {
         self.share_relay
     }
 
+    /// How the rebuilds of shares relayed without their payouts went, since
+    /// start; none on Bitcoin.
+    pub fn share_rebuilds(&self) -> RebuildCounts {
+        self.coinbase_rebuilder
+            .as_ref()
+            .map(CoinbaseRebuilder::counts)
+            .unwrap_or_default()
+    }
+
     /// The weak pool relayed weak shares go to, which a share about to be
     /// relayed asks how long it has held each weak share. `None` on Bitcoin
     /// and in Hydrapool mode.
@@ -313,7 +335,7 @@ impl<C: Send + Sync + 'static> RequestResponseHandler<C> {
                 self.peer_block_knowledge
                     .record_block_known(peer, block.block_hash());
             }
-            Message::ShareWithWeakHashes(share, _) => {
+            Message::ShareWithoutPayouts(share, _) => {
                 self.peer_block_knowledge
                     .record_block_known(peer, share.block_hash());
             }
@@ -357,6 +379,7 @@ impl<C: Send + Sync + 'static> RequestResponseHandler<C> {
             share_validator: self.share_validator.clone(),
             share_transaction_pool: self.share_transaction_pool.clone(),
             weak_share_tx: self.weak_share_tx.clone(),
+            coinbase_rebuilder: self.coinbase_rebuilder.clone(),
         };
 
         let peer_handle = match self.peer_handles.get(&peer) {

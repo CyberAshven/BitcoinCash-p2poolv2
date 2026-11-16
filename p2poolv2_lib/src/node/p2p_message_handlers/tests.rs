@@ -78,6 +78,7 @@ async fn test_handle_request_getheaders() {
         share_validator: Arc::new(MockDefaultShareValidator::default()),
         share_transaction_pool: None,
         weak_share_tx: None,
+        coinbase_rebuilder: None,
     };
 
     let result = handle_request(ctx).await;
@@ -134,6 +135,7 @@ async fn test_handle_get_share_blocks() {
         share_validator: Arc::new(MockDefaultShareValidator::default()),
         share_transaction_pool: None,
         weak_share_tx: None,
+        coinbase_rebuilder: None,
     };
 
     let result = handle_request(ctx).await;
@@ -195,6 +197,7 @@ async fn test_handle_request_inventory_for_blocks() {
         share_validator: Arc::new(MockDefaultShareValidator::default()),
         share_transaction_pool: None,
         weak_share_tx: None,
+        coinbase_rebuilder: None,
     };
 
     let result = handle_request(ctx).await;
@@ -251,6 +254,7 @@ async fn test_handle_request_inventory_for_txns() {
         share_validator: Arc::new(MockDefaultShareValidator::default()),
         share_transaction_pool: None,
         weak_share_tx: None,
+        coinbase_rebuilder: None,
     };
 
     let result = handle_request(ctx).await;
@@ -289,6 +293,7 @@ async fn test_handle_request_not_found() {
         share_validator: Arc::new(MockDefaultShareValidator::default()),
         share_transaction_pool: None,
         weak_share_tx: None,
+        coinbase_rebuilder: None,
     };
 
     let result = handle_request(ctx).await;
@@ -334,6 +339,7 @@ async fn test_handle_request_get_data_for_block_confirmed() {
         share_validator: Arc::new(MockDefaultShareValidator::default()),
         share_transaction_pool: None,
         weak_share_tx: None,
+        coinbase_rebuilder: None,
     };
 
     let result = handle_request(ctx).await;
@@ -382,6 +388,7 @@ async fn test_handle_request_get_data_for_block_not_found() {
         share_validator: Arc::new(MockDefaultShareValidator::default()),
         share_transaction_pool: None,
         weak_share_tx: None,
+        coinbase_rebuilder: None,
     };
 
     let result = handle_request(ctx).await;
@@ -425,6 +432,7 @@ async fn test_handle_request_get_data_for_txn() {
         share_validator: Arc::new(MockDefaultShareValidator::default()),
         share_transaction_pool: None,
         weak_share_tx: None,
+        coinbase_rebuilder: None,
     };
 
     let result = handle_request(ctx).await;
@@ -457,6 +465,7 @@ async fn test_handle_request_transaction() {
         share_validator: Arc::new(MockDefaultShareValidator::default()),
         share_transaction_pool: None,
         weak_share_tx: None,
+        coinbase_rebuilder: None,
     };
 
     let result = handle_request(ctx).await;
@@ -503,6 +512,7 @@ async fn test_handle_request_share_headers() {
         share_validator: Arc::new(MockDefaultShareValidator::default()),
         share_transaction_pool: None,
         weak_share_tx: None,
+        coinbase_rebuilder: None,
     };
 
     let result = handle_request(ctx).await;
@@ -547,6 +557,7 @@ async fn test_handle_request_share_block_sends_ack_and_processes() {
         share_validator: Arc::new(MockDefaultShareValidator::default()),
         share_transaction_pool: None,
         weak_share_tx: None,
+        coinbase_rebuilder: None,
     };
 
     let result = handle_request(ctx).await;
@@ -613,6 +624,7 @@ async fn test_handle_request_share_block_missing_parent_sends_getheaders() {
         share_validator: Arc::new(MockDefaultShareValidator::default()),
         share_transaction_pool: None,
         weak_share_tx: None,
+        coinbase_rebuilder: None,
     };
 
     let result = handle_request(ctx).await;
@@ -696,6 +708,7 @@ async fn test_a_peer_relaying_a_share_whose_header_checks_out_is_kept_one_failin
         share_validator: Arc::new(share_validator),
         share_transaction_pool: None,
         weak_share_tx: None,
+        coinbase_rebuilder: None,
     })
     .await;
 
@@ -739,6 +752,7 @@ async fn test_a_peer_relaying_a_share_whose_header_checks_out_is_kept_one_failin
         share_validator: Arc::new(share_validator),
         share_transaction_pool: None,
         weak_share_tx: None,
+        coinbase_rebuilder: None,
     })
     .await;
 

@@ -13,6 +13,7 @@ pub mod request_missing_blocks;
 pub mod share_blocks;
 pub mod share_headers;
 pub mod share_with_weak_hashes;
+pub mod share_without_payouts;
 
 pub use getblocks::handle_getblocks;
 pub use getdata::handle_getdata_block;
@@ -22,3 +23,4 @@ pub use inventory::handle_inventory;
 pub use share_blocks::handle_share_block;
 pub use share_headers::handle_share_headers;
 pub use share_with_weak_hashes::{handle_get_carried_weak_shares, handle_share_with_weak_hashes};
+pub use share_without_payouts::{CoinbaseRebuilder, handle_share_without_payouts};

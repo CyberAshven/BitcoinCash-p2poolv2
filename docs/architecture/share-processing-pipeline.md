@@ -156,16 +156,35 @@ ancestry, and an uncle's `expected_height` may be absent. Until a re-delivery
 arrives, such a block stalls, and in the PPLNS zone a stalled candidate stops
 confirmation at its height.
 
+### Shares relayed without their payouts
+
+`send_share_block_broadcast` relays a new Bitcoin Cash share as
+`Message::ShareWithoutPayouts`: its Bitcoin Cash coinbase keeps its input
+and loses every output, and the message carries the outputs' total.
+`handle_share_without_payouts` (`receivers/share_without_payouts.rs`) hands
+a stored share, or one failing the header or coinbase proof check, to
+`handle_share_block` as it came. For any other it rebuilds the outputs from
+the PPLNS window at the share's parent and the header, through the same
+`rebuild_coinbase_paying_window` a weak share's coinbase check uses, on the
+blocking thread pool with a small payout cache (`CoinbaseRebuilder`), and
+goes on only when the rebuilt coinbase's txid is the one the header's
+coinbase proof gives. A share it cannot rebuild that way (parent or window
+not here yet, or another txid, which a share relayed before its body was
+validated may give) is never stored or validated and costs no peer its
+connection: the block fetcher fetches it whole. `p2p_share_rebuild_*`
+series count the rebuilds, their time and the whole fetches. Header sync
+and `GetData::Block` still send the coinbase whole.
+
 ### Shares relayed with their weak shares by hash
 
-`send_share_block_broadcast` relays a new Bitcoin Cash share that carries
-weak shares as `Message::ShareWithWeakHashes`: the share with its weak
-shares listed by proof-of-work hash, which the peer has from the weak share
-gossip, and whole beside the list the ones it may not have yet
+Inside `ShareWithoutPayouts`, a share's weak shares are listed by
+proof-of-work hash (`ShareWithWeakHashes`), which the peer has from the weak
+share gossip, and whole beside the list the ones it may not have yet
 (`weak_shares_to_prefill`: those the weak pool took less than
 `PREFILL_WEAK_SHARE_MILLIS`, 400 ms, ago, or does not hold).
-`handle_share_with_weak_hashes` (`receivers/share_with_weak_hashes.rs`)
-hands a stored share, or one failing the header or coinbase proof check, to
+`handle_share_with_weak_hashes` (`receivers/share_with_weak_hashes.rs`),
+handed the share once its coinbase is rebuilt, hands a stored share, or one
+failing the header or coinbase proof check, to
 `handle_share_block` as it came. Any other share must list exactly
 `weak_count` hashes, each once, and prefill only listed ones, each once, or
 the peer is refused as for a bad copy. The handler fills the list from the
@@ -946,6 +965,7 @@ recursive over the DAG and needs its own bounding; it is not implemented.
 - `p2poolv2_lib/src/node/actor.rs`
 - `p2poolv2_lib/src/node/request_response_handler/block_fetcher.rs` (BlockFetcher)
 - `p2poolv2_lib/src/node/p2p_message_handlers/receivers/share_blocks.rs` (handle_share_block, dependency fetching)
+- `p2poolv2_lib/src/node/p2p_message_handlers/receivers/share_without_payouts.rs` (shares relayed without their coinbase outputs, rebuilt from the PPLNS window)
 - `p2poolv2_lib/src/node/p2p_message_handlers/receivers/share_with_weak_hashes.rs` (shares relayed with weak shares by hash, and the answer to `GetCarriedWeakShares`)
 - `p2poolv2_lib/src/node/weak_share_fill.rs` (shares waiting for the weak shares their sender was asked for)
 - `p2poolv2_lib/src/shares/handle_stratum_share.rs`

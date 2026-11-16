@@ -33,7 +33,7 @@ Mainnet and chipnet run the same rules; only the network setting differs.
 Nodes only talk to nodes on the same chain and rules. Every libp2p protocol
 string carries the Bitcoin Cash network, the share chain's genesis and, on
 Bitcoin Cash, a tag for each share-chain rule and last a tag for the P2P
-messages, `weak-by-hash` today (`protocol_string` in
+messages, `weak-by-hash/without-payouts` today (`protocol_string` in
 `p2poolv2_lib/src/node/behaviour/request_response.rs`). A node on another
 chain or rule fails the handshake instead of exchanging shares the other
 side would reject, and a node speaking other messages fails it instead of
@@ -46,6 +46,15 @@ receives one validates it before relaying it further (see
 [Share validation](sharechain/validation.md)). The network runs on libp2p:
 Kademlia for peer discovery, Identify, Ping, and a request-response protocol
 for share announcements, headers, blocks and share transactions.
+
+A new Bitcoin Cash share is relayed without the outputs of its Bitcoin Cash
+coinbase (`ShareWithoutPayouts`): one output per payee, most of a share's
+bytes. Every node rebuilds them from its own PPLNS window at the share's
+parent to validate the share anyway, so the receiver rebuilds them first and
+goes on only with a coinbase whose txid is the one the header's coinbase
+proof gives. A share it cannot rebuild that way, its parent or window not
+here yet, is fetched whole, never refused. Sync and block requests still
+send shares whole.
 
 Bitcoin Cash has no P2Poolv2 DNS seeds yet: a new node needs at least one
 peer in `[network] dial_peers`, given by IP address (`/ip4/`, `/ip6/`) or

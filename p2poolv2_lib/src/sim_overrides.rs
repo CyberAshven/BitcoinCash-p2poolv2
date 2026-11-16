@@ -320,8 +320,9 @@ fn alter_weak_copy(share_block: &mut ShareBlock) {
     }
 }
 
-/// Whether a new share relayed to peers lists its carried weak shares by
-/// proof-of-work hash (`ShareWithWeakHashes`).
+/// Whether a new Bitcoin Cash share relayed to peers lists its carried weak
+/// shares by proof-of-work hash, without its coinbase's outputs
+/// (`ShareWithoutPayouts`).
 ///
 /// Production: always.
 /// Sim: unless this copy was altered ([`alter_weak_copy`]): an altered weak

@@ -32,9 +32,8 @@ use receivers::inventory::handle_inventory;
 use receivers::request_missing_blocks::request_headers_for_missing_blocks;
 use receivers::share_blocks::handle_share_block;
 use receivers::share_headers::handle_share_headers;
-use receivers::share_with_weak_hashes::{
-    handle_get_carried_weak_shares, handle_share_with_weak_hashes,
-};
+use receivers::share_with_weak_hashes::handle_get_carried_weak_shares;
+use receivers::share_without_payouts::handle_share_without_payouts;
 use std::error::Error;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -195,17 +194,17 @@ pub async fn handle_request<C: Send + Sync + 'static, T: TimeProvider + Send + S
             )
             .await
         }
-        Message::ShareWithWeakHashes(share, bch_headers) => {
+        Message::ShareWithoutPayouts(share, bch_headers) => {
             if let Err(err) = ctx
                 .swarm_tx
                 .send(SwarmSend::Response(ctx.response_channel, Message::Ack))
                 .await
             {
                 error!(
-                    "Failed to send ShareWithWeakHashes ack to peer {}: {err}",
+                    "Failed to send ShareWithoutPayouts ack to peer {}: {err}",
                     ctx.peer
                 );
-                return Err(format!("Failed to send ShareWithWeakHashes ack: {err}").into());
+                return Err(format!("Failed to send ShareWithoutPayouts ack: {err}").into());
             }
             learn_carried_bch_headers(
                 &bch_headers,
@@ -217,7 +216,7 @@ pub async fn handle_request<C: Send + Sync + 'static, T: TimeProvider + Send + S
             let ancestors: Vec<BlockHash> = std::iter::once(header.prev_share_blockhash)
                 .chain(header.uncles.iter().copied())
                 .collect();
-            handle_share_with_weak_hashes(
+            handle_share_without_payouts(
                 share,
                 ctx.peer,
                 &ctx.chain_store_handle,
@@ -226,6 +225,7 @@ pub async fn handle_request<C: Send + Sync + 'static, T: TimeProvider + Send + S
                 &ctx.block_fetcher_handle,
                 &ctx.share_validator,
                 ctx.weak_share_tx.as_ref(),
+                ctx.coinbase_rebuilder.as_ref(),
                 ctx.swarm_tx.clone(),
             )
             .await?;

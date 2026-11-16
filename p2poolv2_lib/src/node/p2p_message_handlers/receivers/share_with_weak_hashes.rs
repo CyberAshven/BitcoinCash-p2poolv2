@@ -3,8 +3,9 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 //! A new share relayed with the weak shares it carries listed by hash
-//! (`Message::ShareWithWeakHashes`), and the answer to a peer that asks for
-//! the ones it lacks (`Message::GetCarriedWeakShares`).
+//! (`ShareWithWeakHashes`, inside `Message::ShareWithoutPayouts` once its
+//! coinbase is rebuilt), and the answer to a peer that asks for the ones it
+//! lacks (`Message::GetCarriedWeakShares`).
 //!
 //! The receiver fills each listed hash from its weak pool, then from the
 //! weak shares the sender prefilled, asks the sender for the rest, and hands
@@ -385,8 +386,9 @@ async fn complete_share(
 
 /// Ask the block fetcher for the share `block_hash` whole, from `peer`
 /// first and by round robin if it does not answer in time, as a share a
-/// peer announced by its header is fetched.
-async fn fetch_share_whole(
+/// peer announced by its header is fetched. With `pool`, it counts as a
+/// share whose weak shares could not be filled.
+pub(crate) async fn fetch_share_whole(
     block_hash: BlockHash,
     peer: PeerId,
     block_fetcher_handle: &BlockFetcherHandle,
