@@ -7,30 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-A share a peer sent is relayed to this node's peers as soon as its header
-checks out, before its body is validated, as BIP152's high-bandwidth compact
-blocks are. The header check is what a share passes before it is stored:
-its proof of work, header fields, coinbase proof and the body they bind at
-the admission gate, then, with its parent and uncles stored (the parent need
-not be validated), the ASERT minimum, difficulty band and weak ratio from the
-parent's header, the timestamp rules, the uncle rules and a known Bitcoin
-Cash prev. A share is relayed once, when its body is first stored, never
-when it or its parent is invalid, and only while the chain is current. A
-node still validates a share its own miners found before sending it, and
-mines on, confirms and now names as an uncle only fully validated shares
-(uncle selection took header-validated shares too). Peers are scored as
-before: a share failing the header check closes the sender's connection,
-and a body that fails full validation closes none, since its sender may only
-have forwarded it. The network simulation put this alone at 3.99% stale
-against 4.23% on 1,000 nodes at 10-second shares, and as one of three pieces
-with shares sent without payouts and more peers. On a 12-node swarm, four
-runs a side, every node ended on one tip, no peer was disconnected, and the
-shares that missed the chain stayed within the runs' spread (11.0% before,
-9.9% after); the swarm is nearly a full mesh, so propagation did not change,
-while about 6% more share messages crossed and the copies that reach a node
-before it confirms the share added about one validation a share and node to
-the six it already makes. No share-chain rule changes, no message changes
-and no store change; old and new nodes peer as before.
+A share a peer sent is relayed once its header checks out, before its body
+is validated, as BIP152 high-bandwidth peers relay compact blocks (#128).
+Uncles are now chosen from fully validated shares only. No share-chain rule,
+message or store change.
 
 P2Poolv2 takes templates from a node that serves no long polling, such as
 Knuth. Every Knuth template failed to parse ("missing field `longpollid`"),
