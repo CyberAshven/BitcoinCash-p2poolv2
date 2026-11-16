@@ -153,6 +153,17 @@ taken from every client, since the node checks their templates. A refused client
 `flags` set to `DECLARE_TX_DATA` (`0x1`), the flag it must set (sv2-spec
 3.x). It may set up again in Full-Template mode on the same connection.
 
+**A node behind a Tor onion service or an I2P server tunnel.** Miners reach
+the Stratum V2 port through an onion service (`HiddenServicePort 3336
+127.0.0.1:3336` in `torrc`) or an I2P server tunnel with no change to the
+node. Every such miner then connects from this computer's own address, the
+one Tor or the I2P router forwards from. With the default
+`sv2_coinbase_only_from`, that gives every one of them Coinbase-Only. Set
+`sv2_coinbase_only_from = []` on such a node, or point the onion service at
+an address of this computer that is not in the list. Job tokens and declared
+jobs are counted for each connection, never for a client address, so
+miners behind the same onion service do not use up each other's.
+
 Once a job is active, its target and credited difficulty remain fixed.
 Vardiff and `UpdateChannel` change later jobs. Device maximum targets apply
 when each job is assigned; zero maximum targets are rejected.

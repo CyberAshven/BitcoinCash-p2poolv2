@@ -17,6 +17,21 @@ authorizing. Debug logs carry each notify and the address of a stratum
 timeout. Testnet5's new genesis is not taken, as testnet5 is not, and the
 fork stays at 0.0.1-alpha.
 
+A node can take its block templates from a Stratum V2 Template Provider
+behind Tor or I2P. `template_provider_proxy` names a SOCKS5 proxy, Tor's
+SOCKS port for a `.onion` provider or an I2P router's SOCKS proxy for a
+`.b32.i2p` one, and every connection to the provider, a redirected one
+included, goes through it. The provider's name goes to the proxy unresolved
+and nothing is dialed directly, also when the proxy fails. Each connection
+sends its own random SOCKS username, so Tor puts it on its own circuit. A
+provider behind a proxy has 20 seconds to accept a connection and 15 for
+each setup answer (an I2P name 90 and 45), where a direct one has 10 for
+each. A proxy needs the provider's authority key, and a `.onion` or `.i2p`
+address needs a proxy. The Job Declaration page says what a node behind an
+onion service must change: every miner then connects from this computer's
+own address, which the default `sv2_coinbase_only_from` lets declare
+Coinbase-Only jobs.
+
 The network and payout simulators model one-minute Bitcoin Cash blocks
 (CHIP-2025-03): a block every minute paying a tenth of a ten-minute block,
 and a tenth of the ABLA floors (3.2 MB on mainnet, 200 kB on chipnet, 25.6
