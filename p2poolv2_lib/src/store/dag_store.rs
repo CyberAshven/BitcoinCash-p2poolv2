@@ -460,8 +460,11 @@ impl Store {
     /// header-only blocks (received via header sync without a body), which
     /// would create shares that reference uncle data no node can serve.
     ///
-    /// Selected uncles must also be at least header-validated, which skips
-    /// `Invalid` and `Pending` blocks.
+    /// Selected uncles must also be fully validated (`BlockValid`), which
+    /// skips `HeaderValid`, `Invalid` and `Pending` blocks. A peer's share
+    /// reaches this node once its header checks out, before any node has
+    /// validated its body (`BlockReceiver::should_relay`), so a share only
+    /// header-validated may be one whose body no node has checked.
     pub fn find_uncles(&self, base_hash: &BlockHash) -> Result<Vec<BlockHash>, StoreError> {
         let mut ancestors: Vec<BlockHash> = Vec::with_capacity(MAX_UNCLES_DEPTH as usize);
         let mut ancestry: HashSet<BlockHash> =
@@ -507,9 +510,7 @@ impl Store {
             .filter_map(|(_, blockhash)| {
                 self.get_block_metadata(&blockhash)
                     .ok()
-                    .filter(|metadata| {
-                        matches!(metadata.status, Status::HeaderValid | Status::BlockValid)
-                    })
+                    .filter(|metadata| metadata.status == Status::BlockValid)
                     .map(|metadata| (blockhash, metadata.chain_work))
             })
             .collect();

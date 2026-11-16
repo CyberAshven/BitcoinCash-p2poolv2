@@ -818,6 +818,17 @@ impl Store {
         self.commit_batch(batch).unwrap();
     }
 
+    /// `store_with_valid_metadata`, then mark the share `BlockValid`, as
+    /// full validation does: for shares a test needs selectable as uncles
+    /// (`find_uncles` takes only fully validated shares).
+    pub fn store_with_block_valid_metadata(&self, share: &ShareBlock) {
+        self.store_with_valid_metadata(share);
+        let mut batch = Store::get_write_batch();
+        self.mark_block_valid(&share.block_hash(), &mut batch)
+            .unwrap();
+        self.commit_batch(batch).unwrap();
+    }
+
     /// Create Valid metadata for a share without storing its block data.
     ///
     /// Also stores the header in the Header CF so that downstream

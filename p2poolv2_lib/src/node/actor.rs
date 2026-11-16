@@ -799,7 +799,8 @@ impl NodeActor {
             block_fetcher_tx_for_receiver,
             validation_tx_for_worker.clone(),
         )
-        .with_depths(ChainDepths::for_chain(chain));
+        .with_depths(ChainDepths::for_chain(chain))
+        .with_relay(node.swarm_tx.clone());
         let block_receiver_id = workers
             .spawn(async move {
                 block_receiver.run().await;

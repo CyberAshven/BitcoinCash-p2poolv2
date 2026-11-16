@@ -567,6 +567,13 @@ impl OrganiseWorker {
     /// depth -- can confirm them. Returns `Advanced(height)` when the
     /// block becomes BlockValid or is promoted, so its dependents can
     /// be drained.
+    ///
+    /// A block already BlockValid passed these checks when it was marked, as
+    /// `validate_share_block` already takes it in the validation worker: a
+    /// block delivered again, or drained again from the buffer, goes straight
+    /// to promotion, which may still advance the confirmed chain, without its
+    /// chain-context checks, the coinbases of its weak shares among them,
+    /// running again.
     async fn validate_mark_promote(
         &mut self,
         share_block: ShareBlock,
@@ -576,37 +583,45 @@ impl OrganiseWorker {
         let blockhash = share_block.block_hash();
         debug!("Organising block: {blockhash:?}");
 
-        let in_pplns_zone =
-            match check_pplns_zone(&blockhash, &self.chain_store_handle, self.depths) {
-                Ok(result) => result,
-                Err(error_message) => {
-                    error!("Error checking for zone, will retry {blockhash}: {error_message}");
-                    self.buffer_block(parent_height, share_block, content_validated);
-                    return Ok(ProcessOutcome::NotAdvanced);
-                }
-            };
-
-        let validation_result = if !in_pplns_zone {
+        let validation_result = if self
+            .chain_store_handle
+            .has_status(&blockhash, Status::BlockValid)
+        {
+            debug!("Block {blockhash} is already BlockValid, promoting it without checking again");
             Ok(())
-        } else if content_validated {
-            self.share_validator.validate_with_chain_context(
-                &share_block,
-                &self.chain_store_handle,
-                Arc::clone(&self.pplns_window),
-            )
         } else {
-            // The candidate tip shortened back across the boundary since stage
-            // 1 tiered this block below the zone. Run the content checks it
-            // skipped before the chain-context ones.
-            self.share_validator
-                .validate_share_block(&share_block, &self.chain_store_handle)
-                .and_then(|()| {
-                    self.share_validator.validate_with_chain_context(
-                        &share_block,
-                        &self.chain_store_handle,
-                        Arc::clone(&self.pplns_window),
-                    )
-                })
+            let in_pplns_zone =
+                match check_pplns_zone(&blockhash, &self.chain_store_handle, self.depths) {
+                    Ok(result) => result,
+                    Err(error_message) => {
+                        error!("Error checking for zone, will retry {blockhash}: {error_message}");
+                        self.buffer_block(parent_height, share_block, content_validated);
+                        return Ok(ProcessOutcome::NotAdvanced);
+                    }
+                };
+
+            if !in_pplns_zone {
+                Ok(())
+            } else if content_validated {
+                self.share_validator.validate_with_chain_context(
+                    &share_block,
+                    &self.chain_store_handle,
+                    Arc::clone(&self.pplns_window),
+                )
+            } else {
+                // The candidate tip shortened back across the boundary since stage
+                // 1 tiered this block below the zone. Run the content checks it
+                // skipped before the chain-context ones.
+                self.share_validator
+                    .validate_share_block(&share_block, &self.chain_store_handle)
+                    .and_then(|()| {
+                        self.share_validator.validate_with_chain_context(
+                            &share_block,
+                            &self.chain_store_handle,
+                            Arc::clone(&self.pplns_window),
+                        )
+                    })
+            }
         };
 
         if let Err(validation_error) = validation_result {
