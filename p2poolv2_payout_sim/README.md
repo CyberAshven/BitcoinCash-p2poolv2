@@ -941,8 +941,8 @@ What the storage table shows:
    month, so with a million payees all at level 1 it would keep about 15 GB
    of trees a month.
 2. **The coinbase is most of what a node keeps:** 8.3 GB for 28 days with
-   1,000 payees, 82.5 GB with 10,000, 148 GB at the default level's ceiling
-   and 242 GB when every coinbase is a full 1 MB. A 30-day cap doubles each.
+   1,000 payees, 82.6 GB with 10,000, 148 GB at the default level's ceiling
+   and 243 GB when every coinbase is a full 1 MB. A 30-day cap doubles each.
    Never pruned, they would grow by 108 GB to 3.2 TB a year.
 3. **Stored without its payouts it takes 367 bytes,** 0.09 GB for 28 days.
    Every node can rebuild the payouts from the chain, as it already does to
@@ -954,7 +954,7 @@ What the storage table shows:
 
 With coinbases stored without their payouts and weak shares kept for one
 payout depth, a node at part 6's ceiling with a million payees keeps about
-31 GB and 3 GB more a year, against 62 GB of weak shares and 148 to 242 GB
+31 GB and 3 GB more a year, against 62 GB of weak shares and 148 to 243 GB
 of coinbases now. Fees are left out: at level 5 each 1 BCH of fees adds
 about 5,700 outputs.
 
@@ -1948,16 +1948,16 @@ difficulty, to push the cap up.
 |---|---|---|---|---|---|---|---|---|
 | 10 | 5 (17,472 sat) | 10 | 0 | 0.707 | 0.171 | 0.367 | 2.23 | 0 |
 | 10 | 1 (1,092 sat) | 10 | 0 | 0.707 | 0.171 | 0.367 | 2.23 | 0 |
-| 100 | 5 (17,472 sat) | 100 | 0 | 3.77 | 0.913 | 1.95 | 11.9 | 0 |
-| 100 | 1 (1,092 sat) | 100 | 0 | 3.77 | 0.913 | 1.95 | 11.9 | 0 |
-| 1,000 | 5 (17,472 sat) | 1,000 | 0 | 34.4 | 8.33 | 17.8 | 108 | 0 |
-| 1,000 | 1 (1,092 sat) | 1,000 | 0 | 34.4 | 8.33 | 17.8 | 108 | 0 |
-| 10,000 | 5 (17,472 sat) | 10,000 | 0 | 340 | 82.5 | 177 | 1,073 | 0 |
-| 10,000 | 1 (1,092 sat) | 10,000 | 0 | 340 | 82.5 | 177 | 1,073 | 0 |
+| 100 | 5 (17,472 sat) | 100 | 0 | 3.77 | 0.914 | 1.96 | 11.9 | 0 |
+| 100 | 1 (1,092 sat) | 100 | 0 | 3.77 | 0.914 | 1.96 | 11.9 | 0 |
+| 1,000 | 5 (17,472 sat) | 1,000 | 0 | 34.4 | 8.34 | 17.8 | 108 | 0 |
+| 1,000 | 1 (1,092 sat) | 1,000 | 0 | 34.4 | 8.34 | 17.8 | 108 | 0 |
+| 10,000 | 5 (17,472 sat) | 10,000 | 0 | 340 | 82.6 | 177 | 1,073 | 0 |
+| 10,000 | 1 (1,092 sat) | 10,000 | 0 | 340 | 82.6 | 177 | 1,073 | 0 |
 | 100,000 | 5 (17,472 sat) | 17,885 | 0 | 608 | 148 | 316 | 1,919 | 0 |
-| 100,000 | 1 (1,092 sat) | 100,000 | 70,600 | 1,000 | 242 | 519 | 3,153 | 3.18 |
+| 100,000 | 1 (1,092 sat) | 100,000 | 70,600 | 1,000 | 243 | 519 | 3,153 | 3.18 |
 | 1,000,000 | 5 (17,472 sat) | 17,885 | 0 | 608 | 148 | 316 | 1,919 | 0 |
-| 1,000,000 | 1 (1,092 sat) | 286,172 | 256,772 | 1,000 | 242 | 519 | 3,153 | 11.6 |
+| 1,000,000 | 1 (1,092 sat) | 286,172 | 256,772 | 1,000 | 243 | 519 | 3,153 | 11.6 |
 
 | Stored | GB for two payout depths, 14-day cap | GB for two payout depths, 30-day cap | GB for one payout depth, 14-day cap | GB for one payout depth, 30-day cap | GB a year |
 |---|---|---|---|---|---|

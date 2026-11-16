@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+A syncing Bitcoin Cash node no longer marks an honest share invalid over a
+weak share paid from shares it never fetched: the body prune depth adds
+`WEAK_DEPTH` (242,174 shares, 414 in the sim). No share-chain rule change.
+
 A share a peer sent is relayed once its header checks out, before its body
 is validated, as BIP152 high-bandwidth peers relay compact blocks (#128).
 Uncles are now chosen from fully validated shares only. No share-chain rule,
