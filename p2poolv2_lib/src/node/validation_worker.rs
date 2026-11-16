@@ -12,6 +12,17 @@
 //! block receiver once its header checked out, before it reached this worker.
 //! Runs in a dedicated tokio task, decoupled from the P2P message handler hot
 //! path.
+//!
+//! A share is checked once at a time. Peers relay a share to every peer, and
+//! a share stored but not yet confirmed is sent here again on each delivery
+//! (`handle_share_block`), so the same hash often arrives several times while
+//! its first check runs. The worker keeps the shares it has received and not
+//! finished checking ([`CheckQueue`]): a delivery of one already queued keeps
+//! its place, and a delivery of one being checked is only noted. When that
+//! check ends without settling the share (a `Recoverable` or store failure),
+//! the noted delivery queues it once more, as the delivery itself would have.
+//! A delivery after the check ended is checked as before, which is also how
+//! a node that restarted before checking a stored share checks it.
 
 use crate::accounting::payout::sharechain_pplns::pplns_window::ChainDepths;
 use crate::config::{BitcoinCashNetwork, Chain};
@@ -35,12 +46,15 @@ use crate::shares::validation::{DefaultShareValidator, FailureKind, ShareValidat
 use crate::utils::cpu::available_cpus;
 use bitcoin::{BlockHash, CompactTarget};
 use libp2p::request_response::ResponseChannel;
+use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::sync::Arc;
-use tokio::sync::{Semaphore, mpsc};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 use tracing::{debug, error, info, warn};
 
-/// Channel capacity for blocks pending validation.
+/// Channel capacity for blocks pending validation. The worker's own queue of
+/// shares waiting for a permit is bounded by it too, so a full queue leaves
+/// the channel to fill and its senders to wait, as before the queue.
 const VALIDATION_CHANNEL_CAPACITY: usize = 8192;
 
 /// Events for the validation worker.
@@ -81,6 +95,133 @@ impl fmt::Display for ValidationWorkerError {
 
 impl std::error::Error for ValidationWorkerError {}
 
+/// What a finished check leaves to decide about its share.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CheckOutcome {
+    /// Valid, invalid, or never decidable on this node: checking it again
+    /// gives the same.
+    Settled,
+    /// Undecided for now (`Recoverable`, a store failure, the block not
+    /// readable): a later check may decide it.
+    Unsettled,
+}
+
+/// A share the worker has received and not finished checking.
+enum Check {
+    /// Waiting for a permit, with the block when its event carried it.
+    Queued(Option<Box<ShareBlock>>),
+    /// Being checked; `delivered_again` notes a delivery since it started.
+    Running { delivered_again: bool },
+}
+
+/// The shares the worker has received and not finished checking, each once,
+/// the queued ones in the order they first arrived.
+///
+/// Owned by the worker's loop alone; checks report their end through the
+/// loop's channel rather than touching it, so it needs no lock.
+struct CheckQueue {
+    order: VecDeque<BlockHash>,
+    checks: HashMap<BlockHash, Check>,
+}
+
+impl CheckQueue {
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            order: VecDeque::with_capacity(capacity),
+            checks: HashMap::with_capacity(capacity),
+        }
+    }
+
+    /// How many shares wait for a permit.
+    fn queued_len(&self) -> usize {
+        self.order.len()
+    }
+
+    /// Take in a delivery of `block_hash`. A share not queued or running is
+    /// queued last. A queued one keeps its place, taking the block if its
+    /// first event lacked it. A running one is noted as delivered again.
+    fn receive(&mut self, block_hash: BlockHash, block: Option<ShareBlock>) {
+        match self.checks.get_mut(&block_hash) {
+            None => {
+                self.checks
+                    .insert(block_hash, Check::Queued(block.map(Box::new)));
+                self.order.push_back(block_hash);
+            }
+            Some(Check::Queued(queued_block)) => {
+                debug!("Share block {block_hash} is already queued for validation");
+                if queued_block.is_none() {
+                    *queued_block = block.map(Box::new);
+                }
+            }
+            Some(Check::Running { delivered_again }) => {
+                debug!("Share block {block_hash} is being validated, noting the delivery");
+                *delivered_again = true;
+            }
+        }
+    }
+
+    /// The first queued share, now running, with its block if its event
+    /// carried it.
+    fn start_next(&mut self) -> Option<(BlockHash, Option<ShareBlock>)> {
+        let block_hash = self.order.pop_front()?;
+        let block = match self.checks.insert(
+            block_hash,
+            Check::Running {
+                delivered_again: false,
+            },
+        ) {
+            Some(Check::Queued(block)) => block.map(|block| *block),
+            _ => None,
+        };
+        Some((block_hash, block))
+    }
+
+    /// A check of `block_hash` ended. A share delivered again while its check
+    /// ran is queued once more when that check left it unsettled.
+    fn finish(&mut self, block_hash: BlockHash, outcome: CheckOutcome) {
+        let delivered_again = matches!(
+            self.checks.remove(&block_hash),
+            Some(Check::Running {
+                delivered_again: true
+            })
+        );
+        if delivered_again && outcome == CheckOutcome::Unsettled {
+            debug!(
+                "Share block {block_hash} was delivered during an unsettled check, queuing it again"
+            );
+            self.receive(block_hash, None);
+        }
+    }
+}
+
+/// Reports a check's end to the worker's loop, and when dropped unreported,
+/// as by a check that panicked, reports it unsettled, so its share is never
+/// left marked running. A send fails only once the loop has stopped, when
+/// nobody needs to know.
+struct FinishedNotice {
+    block_hash: BlockHash,
+    finished_tx: Option<mpsc::UnboundedSender<(BlockHash, CheckOutcome)>>,
+}
+
+impl FinishedNotice {
+    /// Report that the check ended with `outcome`.
+    fn report(mut self, outcome: CheckOutcome) {
+        self.send(outcome);
+    }
+
+    fn send(&mut self, outcome: CheckOutcome) {
+        if let Some(finished_tx) = self.finished_tx.take() {
+            let _ = finished_tx.send((self.block_hash, outcome));
+        }
+    }
+}
+
+impl Drop for FinishedNotice {
+    fn drop(&mut self) {
+        self.send(CheckOutcome::Unsettled);
+    }
+}
+
 /// Worker that validates share blocks in capped concurrent tasks.
 ///
 /// Receives `ValidationEvent` values containing block hashes, reads
@@ -102,6 +243,9 @@ pub struct ValidationWorker {
     target_ceiling: CompactTarget,
     /// The Bitcoin Cash network whose ASERT checks token shares' headers.
     bitcoin_cash_network: Option<BitcoinCashNetwork>,
+    /// The validator to check with; `None` builds the default one from the
+    /// settings above when the worker runs. Tests put a mock here.
+    share_validator: Option<Arc<dyn ShareValidator + Send + Sync>>,
 }
 
 impl ValidationWorker {
@@ -125,7 +269,18 @@ impl ValidationWorker {
                 crate::shares::share_block::MAX_POOL_TARGET,
             ),
             bitcoin_cash_network: None,
+            share_validator: None,
         }
+    }
+
+    /// Check with `share_validator` instead of the default validator.
+    #[cfg(test)]
+    fn with_share_validator(
+        mut self,
+        share_validator: Arc<dyn ShareValidator + Send + Sync>,
+    ) -> Self {
+        self.share_validator = Some(share_validator);
+        self
     }
 
     /// Select the Bitcoin Cash network whose ASERT parameters check a token
@@ -147,56 +302,95 @@ impl ValidationWorker {
         self
     }
 
-    /// Runs the validation worker until the channel closes.
+    /// Runs the validation worker until the channel closes and every share
+    /// it received has started its check.
     ///
     /// Returns `Ok(())` on clean shutdown (channel closed).
     /// Returns `Err(ValidationWorkerError)` on fatal failure.
-    pub async fn run(mut self) -> Result<(), ValidationWorkerError> {
+    pub async fn run(self) -> Result<(), ValidationWorkerError> {
         info!("Validation worker started");
-        let depths = ChainDepths::for_chain(self.chain);
+        let ValidationWorker {
+            mut validation_rx,
+            chain_store_handle,
+            organise_tx,
+            swarm_tx,
+            semaphore,
+            pool_difficulty,
+            chain,
+            target_ceiling,
+            bitcoin_cash_network,
+            share_validator,
+        } = self;
+        let depths = ChainDepths::for_chain(chain);
 
-        let share_validator: Arc<dyn ShareValidator + Send + Sync> = Arc::new(
-            DefaultShareValidator::new(self.pool_difficulty)
-                .for_chain(self.chain)
-                .with_target_ceiling(self.target_ceiling)
-                .with_bitcoin_cash_network(self.bitcoin_cash_network),
-        );
-
-        while let Some(event) = self.validation_rx.recv().await {
-            let (block_hash, prefetched_block) = match event {
-                ValidationEvent::ValidateBlockHash(hash) => (hash, None),
-                ValidationEvent::ValidateShareBlock(share_block) => {
-                    (share_block.block_hash(), Some(share_block))
-                }
-            };
-
-            let permit = match self.semaphore.clone().acquire_owned().await {
-                Ok(permit) => permit,
-                Err(_) => {
-                    error!("Validation semaphore closed");
-                    return Err(ValidationWorkerError {
-                        message: "Validation semaphore closed".to_string(),
-                    });
-                }
-            };
-            let chain_store_handle = self.chain_store_handle.clone();
-            let organise_tx = self.organise_tx.clone();
-            let swarm_tx = self.swarm_tx.clone();
-            let validator = Arc::clone(&share_validator);
-
-            tokio::spawn(async move {
-                let _permit = permit;
-                validate_and_emit(
-                    block_hash,
-                    prefetched_block,
-                    validator,
-                    chain_store_handle,
-                    organise_tx,
-                    swarm_tx,
-                    depths,
+        let share_validator: Arc<dyn ShareValidator + Send + Sync> = share_validator
+            .unwrap_or_else(|| {
+                Arc::new(
+                    DefaultShareValidator::new(pool_difficulty)
+                        .for_chain(chain)
+                        .with_target_ceiling(target_ceiling)
+                        .with_bitcoin_cash_network(bitcoin_cash_network),
                 )
-                .await;
             });
+
+        let (finished_tx, mut finished_rx) = mpsc::unbounded_channel();
+        let spawn_check =
+            |permit: OwnedSemaphorePermit, block_hash: BlockHash, prefetched_block| {
+                let chain_store_handle = chain_store_handle.clone();
+                let organise_tx = organise_tx.clone();
+                let swarm_tx = swarm_tx.clone();
+                let validator = Arc::clone(&share_validator);
+                let notice = FinishedNotice {
+                    block_hash,
+                    finished_tx: Some(finished_tx.clone()),
+                };
+                tokio::spawn(async move {
+                    let _permit = permit;
+                    let outcome = validate_and_emit(
+                        block_hash,
+                        prefetched_block,
+                        validator,
+                        chain_store_handle,
+                        organise_tx,
+                        swarm_tx,
+                        depths,
+                    )
+                    .await;
+                    notice.report(outcome);
+                });
+            };
+
+        //* Apply finished checks first, so a delivery after a check ended is
+        //* a new one; then start queued checks as permits free; then receive.
+        let mut queue = CheckQueue::with_capacity(available_cpus());
+        let mut receiving = true;
+        while receiving || queue.queued_len() > 0 {
+            let has_queued = queue.queued_len() > 0;
+            let can_receive = receiving && queue.queued_len() < VALIDATION_CHANNEL_CAPACITY;
+            tokio::select! {
+                biased;
+                Some((block_hash, outcome)) = finished_rx.recv() => queue.finish(block_hash, outcome),
+                permit = Arc::clone(&semaphore).acquire_owned(), if has_queued => {
+                    let permit = permit.map_err(|_| {
+                        error!("Validation semaphore closed");
+                        ValidationWorkerError {
+                            message: "Validation semaphore closed".to_string(),
+                        }
+                    })?;
+                    if let Some((block_hash, prefetched_block)) = queue.start_next() {
+                        spawn_check(permit, block_hash, prefetched_block);
+                    }
+                }
+                event = validation_rx.recv(), if can_receive => match event {
+                    Some(ValidationEvent::ValidateBlockHash(block_hash)) => {
+                        queue.receive(block_hash, None);
+                    }
+                    Some(ValidationEvent::ValidateShareBlock(share_block)) => {
+                        queue.receive(share_block.block_hash(), Some(share_block));
+                    }
+                    None => receiving = false,
+                },
+            }
         }
         info!("Validation worker stopped - channel closed");
         Ok(())
@@ -219,6 +413,11 @@ impl ValidationWorker {
 /// Duplicate validation of already-confirmed blocks is handled by
 /// `validate_share_block` which returns Ok immediately for blocks
 /// with `BlockValid` status.
+///
+/// Returns whether the check settled the share: `Unsettled` when the block
+/// could not be read, the zone not decided, or the check failed
+/// `Recoverable` or on a store read, so a delivery of the share during the
+/// check queues it again ([`CheckQueue::finish`]).
 async fn validate_and_emit(
     block_hash: BlockHash,
     prefetched_block: Option<ShareBlock>,
@@ -227,7 +426,7 @@ async fn validate_and_emit(
     organise_tx: OrganiseSender,
     swarm_tx: mpsc::Sender<SwarmSend<ResponseChannel<Message>>>,
     depths: ChainDepths,
-) {
+) -> CheckOutcome {
     let locally_mined = prefetched_block.is_some();
     let share_block = match prefetched_block {
         Some(block) => block,
@@ -235,7 +434,7 @@ async fn validate_and_emit(
             Some(share_block) => share_block,
             None => {
                 error!("Share block {block_hash} not found in store for validation");
-                return;
+                return CheckOutcome::Unsettled;
             }
         },
     };
@@ -244,7 +443,7 @@ async fn validate_and_emit(
         Ok(result) => result,
         Err(error_message) => {
             error!("Error checking for pplns zone: {error_message}");
-            return;
+            return CheckOutcome::Unsettled;
         }
     };
 
@@ -289,7 +488,10 @@ async fn validate_and_emit(
                 warn!("Share block {block_hash} cannot be resolved: {validation_error}");
             }
         }
-        return;
+        return match validation_error.kind() {
+            FailureKind::Recoverable | FailureKind::StoreAccess => CheckOutcome::Unsettled,
+            FailureKind::Consensus | FailureKind::Unresolvable => CheckOutcome::Settled,
+        };
     }
 
     debug!("Share block {block_hash} validated successfully");
@@ -319,6 +521,7 @@ async fn validate_and_emit(
             "Not broadcasting {block_hash} from a peer: relaying it was decided at its header check"
         );
     }
+    CheckOutcome::Settled
 }
 
 #[cfg(test)]
@@ -331,6 +534,7 @@ mod tests {
     use crate::test_utils::TestShareBlockBuilder;
 
     use bitcoin::Work;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
     /// Build a BlockMetadata value that places the block inside the PPLNS zone.
@@ -901,5 +1105,286 @@ mod tests {
         }
 
         worker_handle.abort();
+    }
+
+    /// A share delivered twice more while its first check runs, as peers
+    /// relaying it do, is checked once: the later deliveries queue nothing.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+    async fn test_deliveries_during_a_check_queue_nothing() {
+        let share_block = TestShareBlockBuilder::new().build();
+        let block_hash = share_block.block_hash();
+        let checks = Arc::new(AtomicUsize::new(0));
+        let (started_tx, mut started_rx) = mpsc::unbounded_channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let mut mock_validator = MockDefaultShareValidator::new();
+        let counted = Arc::clone(&checks);
+        mock_validator
+            .expect_validate_share_block()
+            .returning(move |_, _| {
+                counted.fetch_add(1, Ordering::SeqCst);
+                let _ = started_tx.send(());
+                let _ = release_rx.recv();
+                Ok(())
+            });
+        let mut mock_chain_handle = MockChainStoreHandle::new();
+        mock_chain_handle.expect_clone().returning(move || {
+            let mut mock_clone = MockChainStoreHandle::new();
+            let stored_block = share_block.clone();
+            mock_clone
+                .expect_get_share()
+                .returning(move |_| Some(stored_block.clone()));
+            mock_clone
+                .expect_get_block_metadata()
+                .returning(|_| Ok(pplns_zone_metadata()));
+            mock_clone
+                .expect_get_candidate_tip_height()
+                .returning(|| Ok(Some(1)));
+            mock_clone.expect_is_current().returning(|| false);
+            mock_clone
+        });
+        let (validation_tx, validation_rx) = create_validation_channel();
+        let (organise_tx, mut organise_rx) = organise_worker::create_organise_channel();
+        let (swarm_tx, _swarm_rx) = mpsc::channel(32);
+        let worker = ValidationWorker::new(
+            validation_rx,
+            mock_chain_handle,
+            organise_tx,
+            swarm_tx,
+            PoolDifficulty::default(),
+        )
+        .with_share_validator(Arc::new(mock_validator));
+        let worker_handle = tokio::spawn(worker.run());
+
+        validation_tx
+            .send(ValidationEvent::ValidateBlockHash(block_hash))
+            .await
+            .unwrap();
+        started_rx.recv().await.expect("the first check starts");
+        validation_tx
+            .send(ValidationEvent::ValidateBlockHash(block_hash))
+            .await
+            .unwrap();
+        validation_tx
+            .send(ValidationEvent::ValidateBlockHash(block_hash))
+            .await
+            .unwrap();
+        // Let the worker take both deliveries in while the check still runs.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        drop(release_tx);
+
+        let organise_event = tokio::time::timeout(Duration::from_secs(2), organise_rx.recv()).await;
+        assert!(
+            matches!(organise_event, Ok(Some(OrganiseEvent::Block { .. }))),
+            "the check reports the share valid"
+        );
+        let another = tokio::time::timeout(Duration::from_millis(500), organise_rx.recv()).await;
+        assert!(another.is_err(), "the deliveries queue no second check");
+        assert_eq!(checks.load(Ordering::SeqCst), 1);
+
+        worker_handle.abort();
+    }
+
+    /// A share whose check fails `Recoverable` is checked again: at the end
+    /// of that check when it was delivered meanwhile, and on its next
+    /// delivery otherwise, as `handle_share_block`'s re-send intends.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+    async fn test_a_recoverable_share_is_checked_again() {
+        let share_block = TestShareBlockBuilder::new().build();
+        let block_hash = share_block.block_hash();
+        let checks = Arc::new(AtomicUsize::new(0));
+        let (call_tx, mut call_rx) = mpsc::unbounded_channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let mut mock_validator = MockDefaultShareValidator::new();
+        let counted = Arc::clone(&checks);
+        mock_validator
+            .expect_validate_share_block()
+            .returning(move |_, _| {
+                let call = counted.fetch_add(1, Ordering::SeqCst) + 1;
+                let _ = call_tx.send(call);
+                if call == 1 {
+                    let _ = release_rx.recv();
+                }
+                if call <= 2 {
+                    Err(ValidationError::recoverable("uncle not found in store"))
+                } else {
+                    Ok(())
+                }
+            });
+        let mut mock_chain_handle = MockChainStoreHandle::new();
+        mock_chain_handle.expect_clone().returning(move || {
+            let mut mock_clone = MockChainStoreHandle::new();
+            let stored_block = share_block.clone();
+            mock_clone
+                .expect_get_share()
+                .returning(move |_| Some(stored_block.clone()));
+            mock_clone
+                .expect_get_block_metadata()
+                .returning(|_| Ok(pplns_zone_metadata()));
+            mock_clone
+                .expect_get_candidate_tip_height()
+                .returning(|| Ok(Some(1)));
+            mock_clone.expect_is_current().returning(|| false);
+            mock_clone
+        });
+        let (validation_tx, validation_rx) = create_validation_channel();
+        let (organise_tx, mut organise_rx) = organise_worker::create_organise_channel();
+        let (swarm_tx, _swarm_rx) = mpsc::channel(32);
+        let worker = ValidationWorker::new(
+            validation_rx,
+            mock_chain_handle,
+            organise_tx,
+            swarm_tx,
+            PoolDifficulty::default(),
+        )
+        .with_share_validator(Arc::new(mock_validator));
+        let worker_handle = tokio::spawn(worker.run());
+
+        validation_tx
+            .send(ValidationEvent::ValidateBlockHash(block_hash))
+            .await
+            .unwrap();
+        assert_eq!(call_rx.recv().await, Some(1));
+        validation_tx
+            .send(ValidationEvent::ValidateBlockHash(block_hash))
+            .await
+            .unwrap();
+        // Let the worker take the delivery in while the first check runs.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        drop(release_tx);
+
+        let second = tokio::time::timeout(Duration::from_secs(2), call_rx.recv()).await;
+        assert_eq!(
+            second,
+            Ok(Some(2)),
+            "the delivery during a Recoverable check queues it again"
+        );
+        let none_yet = tokio::time::timeout(Duration::from_millis(500), call_rx.recv()).await;
+        assert!(
+            none_yet.is_err(),
+            "with no delivery during it, a Recoverable check waits for the next"
+        );
+        validation_tx
+            .send(ValidationEvent::ValidateBlockHash(block_hash))
+            .await
+            .unwrap();
+        let third = tokio::time::timeout(Duration::from_secs(2), call_rx.recv()).await;
+        assert_eq!(third, Ok(Some(3)), "the next delivery checks it again");
+        let organise_event = tokio::time::timeout(Duration::from_secs(2), organise_rx.recv()).await;
+        assert!(
+            matches!(organise_event, Ok(Some(OrganiseEvent::Block { .. }))),
+            "the third check reports the share valid"
+        );
+
+        worker_handle.abort();
+    }
+
+    /// A node that stops while a stored share's check runs checks it again
+    /// after the restart: the new worker keeps nothing of the old one's
+    /// queue, so the share's re-send is checked though the old worker had
+    /// taken it in.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+    async fn test_a_restart_checks_a_share_the_stopped_worker_was_checking() {
+        let share_block = TestShareBlockBuilder::new().build();
+        let block_hash = share_block.block_hash();
+        let (started_tx, mut started_rx) = mpsc::unbounded_channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let mut stopped_validator = MockDefaultShareValidator::new();
+        stopped_validator
+            .expect_validate_share_block()
+            .returning(move |_, _| {
+                let _ = started_tx.send(());
+                let _ = release_rx.recv();
+                Err(ValidationError::recoverable("stopped before it ended"))
+            });
+        let mut restarted_validator = MockDefaultShareValidator::new();
+        restarted_validator
+            .expect_validate_share_block()
+            .times(1)
+            .returning(|_, _| Ok(()));
+        let stored_block = share_block.clone();
+        let mut stopped_chain_handle = MockChainStoreHandle::new();
+        stopped_chain_handle.expect_clone().returning(move || {
+            let mut mock_clone = MockChainStoreHandle::new();
+            let stored_block = stored_block.clone();
+            mock_clone
+                .expect_get_share()
+                .returning(move |_| Some(stored_block.clone()));
+            mock_clone
+                .expect_get_block_metadata()
+                .returning(|_| Ok(pplns_zone_metadata()));
+            mock_clone
+                .expect_get_candidate_tip_height()
+                .returning(|| Ok(Some(1)));
+            mock_clone
+        });
+        let mut restarted_chain_handle = MockChainStoreHandle::new();
+        restarted_chain_handle.expect_clone().returning(move || {
+            let mut mock_clone = MockChainStoreHandle::new();
+            let stored_block = share_block.clone();
+            mock_clone
+                .expect_get_share()
+                .returning(move |_| Some(stored_block.clone()));
+            mock_clone
+                .expect_get_block_metadata()
+                .returning(|_| Ok(pplns_zone_metadata()));
+            mock_clone
+                .expect_get_candidate_tip_height()
+                .returning(|| Ok(Some(1)));
+            mock_clone.expect_is_current().returning(|| false);
+            mock_clone
+        });
+
+        let (stopped_tx, stopped_rx) = create_validation_channel();
+        let (stopped_organise_tx, _stopped_organise_rx) =
+            organise_worker::create_organise_channel();
+        let (stopped_swarm_tx, _stopped_swarm_rx) = mpsc::channel(32);
+        let stopped_worker = tokio::spawn(
+            ValidationWorker::new(
+                stopped_rx,
+                stopped_chain_handle,
+                stopped_organise_tx,
+                stopped_swarm_tx,
+                PoolDifficulty::default(),
+            )
+            .with_share_validator(Arc::new(stopped_validator))
+            .run(),
+        );
+        stopped_tx
+            .send(ValidationEvent::ValidateBlockHash(block_hash))
+            .await
+            .unwrap();
+        started_rx
+            .recv()
+            .await
+            .expect("the stopped worker starts its check");
+        stopped_worker.abort();
+
+        let (restarted_tx, restarted_rx) = create_validation_channel();
+        let (organise_tx, mut organise_rx) = organise_worker::create_organise_channel();
+        let (swarm_tx, _swarm_rx) = mpsc::channel(32);
+        let restarted_worker = tokio::spawn(
+            ValidationWorker::new(
+                restarted_rx,
+                restarted_chain_handle,
+                organise_tx,
+                swarm_tx,
+                PoolDifficulty::default(),
+            )
+            .with_share_validator(Arc::new(restarted_validator))
+            .run(),
+        );
+        restarted_tx
+            .send(ValidationEvent::ValidateBlockHash(block_hash))
+            .await
+            .unwrap();
+
+        let organise_event = tokio::time::timeout(Duration::from_secs(2), organise_rx.recv()).await;
+        assert!(
+            matches!(organise_event, Ok(Some(OrganiseEvent::Block { .. }))),
+            "the restarted worker checks the share"
+        );
+
+        drop(release_tx);
+        restarted_worker.abort();
     }
 }
