@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+A share a peer sent is relayed to this node's peers as soon as its header
+checks out, before its body is validated, as BIP152's high-bandwidth compact
+blocks are. The header check is what a share passes before it is stored:
+its proof of work, header fields, coinbase proof and the body they bind at
+the admission gate, then, with its parent and uncles stored (the parent need
+not be validated), the ASERT minimum, difficulty band and weak ratio from the
+parent's header, the timestamp rules, the uncle rules and a known Bitcoin
+Cash prev. A share is relayed once, when its body is first stored, never
+when it or its parent is invalid, and only while the chain is current. A
+node still validates a share its own miners found before sending it, and
+mines on, confirms and now names as an uncle only fully validated shares
+(uncle selection took header-validated shares too). Peers are scored as
+before: a share failing the header check closes the sender's connection,
+and a body that fails full validation closes none, since its sender may only
+have forwarded it. The network simulation put this alone at 3.99% stale
+against 4.23% on 1,000 nodes at 10-second shares, and as one of three pieces
+with shares sent without payouts and more peers. No share-chain rule changes,
+no message changes and no store change; old and new nodes peer as before.
+
 P2Poolv2 takes templates from a node that serves no long polling, such as
 Knuth. Every Knuth template failed to parse ("missing field `longpollid`"),
 so the pool gave its miners no work. BIP 22 makes `longpollid` part of long

@@ -41,6 +41,8 @@ The share processing pipeline is designed to:
 |   Block to validation  |     |   sends FetchBlocks,      |
 |                        |     |   defers validation       |
 +---+----------+---------+     | - If deps present:        |
+    |          |               |   checks the header,      |
+    |          |               |   relays it to peers,     |
     |          |               |   sends ValidateBlock     |
     |          |               +----------+----------------+
     |          |                          |
@@ -58,7 +60,7 @@ The share processing pipeline is designed to:
     |   |   validates uncles in store              |
     |   | - On success:                            |
     |   |   sends Block to organise                |
-    |   |   sends Inv to swarm                     |
+    |   |   broadcasts a locally mined share       |
     |   | - On Consensus failure:                  |
     |   |   sends InvalidBlock to organise         |
     |   | - On Recoverable failure:                |
@@ -229,6 +231,63 @@ that is evicted or expires while still on the candidate chain is fetched again
 by the block fetcher's missing-data scan. Upstream's design diagram
 (`receive_block.puml`, "No cap. No TTL. No eviction.") still describes the
 unbounded buffer.
+
+### Relay after the header check
+
+A share from a peer is relayed to this node's peers as soon as its header
+checks out and it is stored, before its body is validated
+(`BlockReceiver::store_and_emit_validation`), as BIP152's high-bandwidth
+compact blocks are relayed before full validation. The header check is
+everything a share passes before the BlockReceiver stores it:
+
+- at the admission gate (`handle_share_block`): the proof of work against
+  the share's own target, a target no easier than the ceiling, the share
+  owner, payout cuts and scripts, at most `MAX_UNCLES` uncles, the share
+  version on its own, the token share ASERT check, the coinbase proof that
+  binds the header to its proof of work, the body's size, and the body the
+  header binds (`validate_body_matches_header`: the share transactions'
+  witness root, the share coinbase, the bitcoin coinbase's txid, and the weak
+  shares: exactly `weak_count`, none twice, the header's weak root);
+- in the BlockReceiver (`validate_header_before_storing`), once the parent
+  and uncles are stored: the minimum target ASERT gives from the parent's
+  header, the difficulty band and weak ratio one step from the parent's, the
+  timestamp rules, the uncle rules, and a known Bitcoin Cash prev.
+
+The parent need only be stored and header-checked itself, not validated. This
+is the same set header sync applies to a header, plus the body binding. Full
+validation follows: the payouts, the share transactions and their inputs, the
+carried weak shares' headers and coinbases, and the share version vote.
+
+A share is relayed once (`BlockReceiver::should_relay`): when its body is
+first stored (a later copy finds the body stored and is not relayed), not
+when it or its parent is `Invalid`, and only while the chain is current. A
+share whose header check fails is never stored, so never relayed. The
+validation worker broadcasts only shares this node mined, once validated, as
+upstream decided (p2poolv2#573).
+
+Nothing a node builds on changes. It mines only on `BlockValid` shares
+(`get_mining_base`), names only `BlockValid` shares as uncles (`find_uncles`),
+and confirms only `BlockValid` shares. The candidate chain is headers-first,
+as before: a node organises a share's header when it stores it, whoever sent
+it.
+
+There is no peer score. A request that fails a check at receipt (the gate,
+or a weak-hash list that does not hold exactly the weak shares the header
+counts) fails, and the peer's service disconnects the peer; that is
+unchanged. The full validation verdict comes later, in the validation
+worker, and never disconnects anyone: since every node relays a share once
+its header checks out, the peer that sent a share whose body fails may only
+have forwarded it, as a BIP152 high-bandwidth peer is not penalised for a
+block that fails after its header. A share failing the header check is
+relayed by no node, so only its miner sends one, and is refused as before.
+
+The proof of work bounds what a peer can make the network relay. Each relayed
+share carries a proof of work at its own target, which lies in the band at
+or below the share chain's minimum from its parent's header, and the coinbase
+proof and body binding fix the header and body to it: a changed body fails
+the gate as a bad copy, and a copy of a stored share is dropped. Relaying
+invalid bodies therefore costs as much work a share as mining valid ones,
+and every node relays each once and marks it `Invalid` after validating it.
 
 ### OrganiseEvent::InvalidBlock(BlockHash)
 - **Purpose**: Record that a block failed pre-context validation
@@ -579,9 +638,11 @@ Within a single `WriteBatch`, reads from the DB return pre-batch (committed) sta
      `validate_below_pplns_depth()`. Both return Ok early if the block already
      has `BlockValid` status
   3. On success: sends `OrganiseEvent::Block` always. Sends
-     `SwarmSend::BroadcastBlock` for locally mined blocks always, and for
-     blocks from peers only when `is_current()` is true (suppresses relay of
-     historic blocks during initial sync). The task holds its semaphore
+     `SwarmSend::BroadcastBlock` for locally mined blocks only: the
+     BlockReceiver relayed each block from a peer once its header checked
+     out, before this validation, and only when `is_current()` was true
+     (suppresses relay of historic blocks during initial sync; see "Relay
+     after the header check"). The task holds its semaphore
      permit through the broadcast, so the permits also bound how many
      validated blocks can wait on `swarm_tx`; the node actor loop always
      drains `swarm_tx` without blocking, so that wait is ordinary
@@ -852,10 +913,15 @@ would accept the nephew while a node that had would reject it, and since
 nodes agree as long as they agree on which blocks are in the chain.
 
 **Selection** (`Store::find_uncles`) is node-local policy and carries none of
-that risk, so it is stricter: candidates must be at least header-validated,
-skipping `Invalid` and `Pending`. Every node validates our produced share the
+that risk, so it is stricter: candidates must be `BlockValid`, skipping
+`HeaderValid`, `Invalid` and `Pending`. Every node validates our produced share the
 same way regardless of what we chose, so declining to reference a block we
-judged invalid cannot diverge anything.
+judged invalid cannot diverge anything. Upstream takes `HeaderValid`
+candidates too; this fork does not, because a peer relays a share once its
+header checks out (see "Relay after the header check"), so a share only
+header-validated may be one whose body no node has checked. An honest
+sibling is validated within milliseconds of arriving, so it is named one
+job later at most, while it is still within `MAX_UNCLES_DEPTH`.
 
 The cost of the gap this leaves is bounded, because an uncle contributes
 **nothing to chain state**. `put_confirmed_entry` applies `add_spends_for_block`
