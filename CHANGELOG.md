@@ -15,6 +15,21 @@ run also starts from upstream's shared corpus for the same decoder target
 (`p2poolv2/fuzz-corpus`). Upstream's website, docs and difficulty analysis
 repositories have nothing new to port.
 
+The network and payout simulators model one-minute Bitcoin Cash blocks
+(CHIP-2025-03): a block every minute paying a tenth of a ten-minute block,
+and a tenth of the ABLA floors (3.2 MB on mainnet, 200 kB on chipnet, 25.6
+MB to start on scalenet). Every block-time value is derived from
+`BCH_BLOCK_INTERVAL_SECONDS`. A month's reward and a miner's fair income
+are unchanged, but the PPLNS window, three blocks of the pool's work, is a
+tenth as long, so the 120,960-share cap binds only below about 0.015% of
+Bitcoin Cash; the node default aims a miner at ten times the shares a
+month, so the band changes nothing in a pool at 10% of Bitcoin Cash or
+more; and a coinbase at the default payout level pays at most 1,788
+outputs, while no level reaches the payout tree from the reward alone. The
+documented tables are regenerated, and where a conclusion moved the text
+says so. The study of the weak ratio's path with the asks (#124) is still
+the ten-minute run. No node code changes.
+
 A share a peer sent is relayed once its header checks out, before its body
 is validated, as BIP152 high-bandwidth peers relay compact blocks (#128).
 Uncles are now chosen from fully validated shares only. No share-chain rule,
@@ -33,9 +48,11 @@ the share that carries them: a node pushes the ones its miners find to every
 peer and announces the ones it takes by hash, each fetched once. The share
 message still carried every one of them whole, so a node downloaded each
 weak share twice and the share message grew with every weak share in it. On
-1,000 nodes at 10-second shares the network simulation put stale shares at
-5.27% with 32 weak shares a share carried whole, 8.66% with 160 and 14.11%
-with 320, against 4.20% when they travel only beside the shares; the weak
+1,000 nodes at 10-second shares and one-minute blocks the network
+simulation put stale shares at 5.53% with 32 weak shares a share carried
+whole, 9.99% with 160 and 14.99% with 320, against 4.91% when they travel
+only beside the shares (5.27%, 8.66% and 14.11% against 4.20% with
+ten-minute blocks); the weak
 shares that follow the asks (#117, #118) let a share carry 320. A share
 carrying weak shares now goes as `ShareWithWeakHashes`: every weak share it
 carries listed by proof-of-work hash, 32 bytes each, and the ones its peers
@@ -98,24 +115,28 @@ today's. The payout simulator runs it share by share in four tables
 (`weak-asks`, `weak-asks-mixes`, `weak-asks-constants`,
 `weak-asks-attacks`): a pool whose small miners find enough weak shares
 stays near today's count, and one at 30% of a Bitcoin Cash ten times today's
-opens to the ceiling, where a Bitaxe's months without a payment go from 41%
-to 2.7%. An attacker can hold the count at the ceiling or at the floor, no
-further. The section lists what the ceiling costs a node and what has to be
-built first.
+opens to the ceiling, where a Bitaxe's months without a payment go from
+40.5% to 2.8% with one-minute blocks (41% to 2.7% with ten-minute ones). An
+attacker can hold the count at the ceiling or at the floor, no further. The
+section lists what the ceiling costs a node and what has to be built first.
 
 The payout simulator has a `window-cap` table and a `storage` table. The
 first runs pools at 0.01 to 1% of Bitcoin Cash with the PPLNS window capped
-at 14, 30 and 60 days: the cap binds only under about 0.15%, and a longer
-one leaves a miner that keeps mining as often without a payment (63%, 66%
-and 65% of its months at 0.01%), since each block pays it its part of the
-window's work; it only lets more single shares be paid, at the cost of a
-longer payout depth and twice the bodies kept. The 14-day cap stays. The
-second is arithmetic of what a node keeps: the payout level bounds a
-coinbase (17,885 outputs, 608 KB, at the default level, with 100,000 payees
-or 1,000,000); coinbases are most of the store, 8.3 GB for 28 days at 1,000
-payees up to 242 GB when every one is a full 1 MB; stored without their
-payouts they take 0.09 GB; weak shares take 6.2 GB at 32 a share and 62 GB
-at 320, half that kept for one payout depth; headers take 3.15 GB a year.
+at 14, 30 and 60 days: with one-minute blocks the cap binds only under
+about 0.015% (0.15% with ten-minute ones), and a longer one leaves a miner
+that keeps mining as often without a payment (0.9% of its months at 0.01%
+with every cap; 63%, 66% and 65% with ten-minute blocks), since each block
+pays it its part of the window's work; it only lets more single shares be
+paid, at the cost of a longer payout depth and twice the bodies kept. The
+14-day cap stays. The second is arithmetic of what a node
+keeps: the payout level bounds a coinbase (1,788 outputs, 61 KB, at the
+default level, with 10,000 payees or more; 17,885 and 608 KB with
+ten-minute blocks), and even the lowest level, 28,617 outputs, no longer
+reaches the payout tree from the reward alone; coinbases are most of the
+store, 8.3 GB for 28 days at 1,000 payees up to 236 GB at the lowest
+level's ceiling; stored without their payouts they take 0.09 GB; weak
+shares take 6.2 GB at 32 a share and 62 GB at 320, half that kept for one
+payout depth; headers take 3.15 GB a year.
 `Scenario` gains `window_cap_seconds`, 14 days everywhere else.
 
 The payout simulator has a `scale-levers` table for part 5 of the small
@@ -123,7 +144,9 @@ miners design, the dynamic share period: pools at 10 and 30% of a Bitcoin
 Cash at 1, 10, 100 and 270 times today's hashrate, with share periods of 5,
 2 and 1 seconds and with 10-second shares that carry 2, 5 and 10 times the
 weak shares. Both pay a small miner the same, and only the shorter period
-adds stale shares: 7.8%, 17.8% and 30.7% on 1,000 nodes against 4.2%. A
+adds stale shares: 8.0%, 17.9% and 30.4% on 1,000 nodes against 3.8% with
+one-minute Bitcoin Cash blocks (7.8%, 17.8% and 30.7% against 4.2% with
+ten-minute ones). A
 Bitaxe first needs more weak shares when the pool itself holds about 3.7
 EH/s, as much as all of Bitcoin Cash has today. Section 5 of the design page
 records it and stays an outline.

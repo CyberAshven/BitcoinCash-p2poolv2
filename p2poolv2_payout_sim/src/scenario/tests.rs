@@ -3,6 +3,10 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 use super::*;
+use crate::constants::{
+    BCH_PPLNS_WINDOW_BLOCKS, BCH_TEN_MINUTE_BLOCK_SECONDS, NODE_DEFAULT_SHARES_PER_POOL_BLOCK,
+    TEN_MINUTE_BLOCK_REWARD_SATOSHIS,
+};
 
 #[test]
 fn the_stale_rate_is_the_network_simulations_at_ten_seconds() {
@@ -22,9 +26,18 @@ fn the_stale_rate_holds_beyond_the_measured_periods() {
 
 #[test]
 fn a_bitaxe_fair_income_is_its_share_of_the_months_blocks() {
-    // 1.2 TH/s of 3.7 EH/s, 4,320 blocks of 3.125 BCH, less 1%.
+    // 1.2 TH/s of 3.7 EH/s, 43,200 blocks of 0.3125 BCH, less 1%: what
+    // 4,320 ten-minute blocks of 3.125 BCH paid.
     let income = fair_income_per_month(1.2e12, 3.7e18);
     assert!((income - 433_459.459).abs() < 0.01, "{income}");
+}
+
+#[test]
+fn a_months_reward_does_not_depend_on_the_block_interval() {
+    let per_month = BCH_BLOCKS_PER_MONTH * BLOCK_REWARD_SATOSHIS;
+    let ten_minute =
+        MONTH_SECONDS / BCH_TEN_MINUTE_BLOCK_SECONDS * TEN_MINUTE_BLOCK_REWARD_SATOSHIS as f64;
+    assert!((per_month / ten_minute - 1.0).abs() < 1e-12);
 }
 
 #[test]
@@ -136,9 +149,15 @@ fn at_one_difficulty_expected_income_is_fair() {
 
 #[test]
 fn under_the_band_light_shares_collect_the_nephew_tenth_of_heavy_uncles() {
-    // Heavy and light shares go stale alike, but light shares are most of
-    // the chain, so they name most uncles and take 1/10 of heavy uncles'
-    // work: about 0.1 * 2.1% of the farms' work moves to the home miners.
+    // Heavy and light shares go stale alike, but every chain share names
+    // uncles of the mean found share's work, so a share lighter than that
+    // mean gains and a heavier one pays: a miner whose shares are `m` times
+    // the minimum is credited `1 + 0.1 * s * (mean / m - 1)` times its work,
+    // with `s` the stale rate. At 1% of BCH with 90% industrial the mean
+    // share is about 8.3 times the minimum: the Bitaxe at the minimum gets
+    // about 1.5% more than fair, and the farms (34 and 64 times) a little
+    // less. The 100 TH/s ASIC, at 3.4 times, now gains too: with one-minute
+    // blocks the node default aims it at 1,728 shares a month, not 300.
     let scenario = Scenario {
         design: Design::Band,
         mix: MinerMix::MostlyIndustrial,
@@ -146,15 +165,36 @@ fn under_the_band_light_shares_collect_the_nephew_tenth_of_heavy_uncles() {
         ..Scenario::default()
     };
     let report = scenario.run();
+    let chain = report.home_chain();
+    let pool_hashrate = report.pool_fraction * scenario.network_hashrate();
+    let mean_multiple =
+        pool_hashrate / chain.found_share_rate / (chain.asert_difficulty * HASHES_PER_DIFFICULTY);
+    let credited = |multiple: f64| {
+        1.0 + (1.0 - UNCLE_PAID_FRACTION) * scenario.stale_rate * (mean_multiple / multiple - 1.0)
+    };
+    let ratio = |miner: &MinerReport| miner.expected_income_per_month / miner.fair_income_per_month;
     let bitaxe = &report.miners[0];
     let asic = &report.miners[1];
-    let bitaxe_ratio = bitaxe.expected_income_per_month / bitaxe.fair_income_per_month;
-    let asic_ratio = asic.expected_income_per_month / asic.fair_income_per_month;
+    assert!((ratio(bitaxe) / credited(1.0) - 1.0).abs() < 1e-9);
+    assert!((ratio(asic) / credited(asic.difficulty_multiple) - 1.0).abs() < 1e-9);
     assert!(
-        bitaxe_ratio > 1.005 && bitaxe_ratio < 1.03,
-        "{bitaxe_ratio}"
+        ratio(bitaxe) > 1.005 && ratio(bitaxe) < 1.03,
+        "{}",
+        ratio(bitaxe)
     );
-    assert!(asic_ratio > 0.995 && asic_ratio < 1.0, "{asic_ratio}");
+    assert!(
+        ratio(asic) > 1.0 && ratio(asic) < ratio(bitaxe),
+        "{}",
+        ratio(asic)
+    );
+    report
+        .classes
+        .iter()
+        .filter(|class| class.kind == MinerKind::Industrial)
+        .for_each(|class| {
+            let farm = class.expected_income_per_month / class.fair_income_per_month;
+            assert!(farm > 0.995 && farm < 1.0, "{} {farm}", class.name);
+        });
 }
 
 #[test]
@@ -191,8 +231,9 @@ fn crediting_shares_on_minimum_jobs_at_the_weak_work_is_fair() {
     let asic = &report.miners[1];
     assert!((bitaxe.expected_income_per_month / bitaxe.fair_income_per_month - 1.0).abs() < 0.02);
     assert!((asic.expected_income_per_month / asic.fair_income_per_month - 1.0).abs() < 0.02);
-    // The window is three blocks of real work again: 50 hours at 1%.
-    assert!((report.home_chain().window.span_seconds / 180_000.0 - 1.0).abs() < 0.02);
+    // The window is three blocks of real work again: 5 hours at 1%.
+    let span = BCH_PPLNS_WINDOW_BLOCKS * BCH_BLOCK_INTERVAL_SECONDS / 0.01;
+    assert!((report.home_chain().window.span_seconds / span - 1.0).abs() < 0.02);
 }
 
 #[test]
@@ -351,8 +392,11 @@ fn at_the_ceiling_weak_shares_at_the_minimum_pay_exactly_as_one_chain() {
 
 #[test]
 fn at_the_ceiling_the_node_default_still_makes_shares_heavier() {
-    // Every miner would make far more than 300 shares a month at the
-    // ceiling, so the node default gives them the band's whole cap.
+    // At the ceiling the small miner would make about 33,000 shares a
+    // month. A 1 GH/s pool on a 37 GH/s network finds 1,168 one-minute
+    // blocks a month, and four shares each is 4,670, so the node default
+    // makes its shares about 7.1 times the minimum, inside the band's cap of
+    // 64. (Ten-minute blocks gave 467 a month and the whole cap.)
     let report = Scenario {
         design: Design::Band,
         hashrate_multiple: 1.0e-8,
@@ -368,7 +412,15 @@ fn at_the_ceiling_the_node_default_still_makes_shares_heavier() {
         ..Scenario::default()
     }
     .run();
-    assert_eq!(report.miners[0].difficulty_multiple, 64.0);
+    let at_ceiling = 0.25e9 / (MINI_CEILING_DIFFICULTY * HASHES_PER_DIFFICULTY) * MONTH_SECONDS;
+    let target = NODE_DEFAULT_SHARES_PER_POOL_BLOCK * 1.0e9 / 3.7e10 * BCH_BLOCKS_PER_MONTH;
+    let multiple = report.miners[0].difficulty_multiple;
+    assert!(
+        (multiple / (at_ceiling / target) - 1.0).abs() < 1e-9,
+        "{multiple}"
+    );
+    assert!(multiple > 1.0 && multiple < DEFAULT_BAND_CAP, "{multiple}");
+    assert!((multiple - 7.10).abs() < 0.01, "{multiple}");
 }
 
 #[test]

@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 use super::*;
+use crate::constants::scaled_to_block_interval;
 
 #[test]
 fn the_default_scenario_is_valid() {
@@ -36,13 +37,25 @@ fn a_pool_fraction_above_one_is_refused() {
     assert!(scenario.validate().is_err());
 }
 
-/// The thousand miners, and the donation key every share's default donation
-/// pays.
+/// The miners with a share in the window, and the donation key every
+/// share's default donation pays.
 #[test]
-fn a_thousand_miners_in_an_18000_share_window_are_all_paid() {
+fn the_payees_are_the_miners_expected_in_the_window_and_the_donation_key() {
     let scenario = Scenario::default();
-    assert_eq!(scenario.window_shares(), 18_000);
-    assert_eq!(scenario.payees(), 1_001);
+    let miners = expected_payees(1_000, HashrateSpread::Equal, scenario.window_shares());
+    assert_eq!(scenario.payees(), miners.round() as u64 + 1);
+}
+
+/// With one-minute blocks the default window of 1% of BCH holds 1,800
+/// shares, so a thousand equal miners are not all in it:
+/// 1,000 * (1 - exp(1,800 * ln(1 - 1/1,000))) = 834.8 of them are, with
+/// the donation key 836 payees. (Ten-minute blocks gave an 18,000 share
+/// window that paid all thousand.)
+#[test]
+fn a_thousand_miners_in_an_1800_share_window_make_836_payees() {
+    let scenario = Scenario::default();
+    assert_eq!(scenario.window_shares(), 1_800);
+    assert_eq!(scenario.payees(), 836);
 }
 
 #[test]
@@ -52,9 +65,10 @@ fn a_million_miners_at_a_tenth_of_bch_fill_at_most_the_window() {
         pool_fraction_of_bch: 0.1,
         ..Scenario::default()
     };
-    // 1e6 * (1 - exp(1,800 * ln(1 - 1e-6))) = 1,798.4 miners, and the
-    // donation key.
-    assert_eq!(scenario.payees(), 1_799);
+    // 1e6 * (1 - exp(180 * ln(1 - 1e-6))) = 180.0 miners in a 180 share
+    // window, and the donation key.
+    assert_eq!(scenario.window_shares(), 180);
+    assert_eq!(scenario.payees(), 181);
 }
 
 /// Under the cap-11 rule the donation was an output of its own, not a payee.
@@ -64,7 +78,7 @@ fn the_cap_11_rule_counts_only_miners_as_payees() {
         layout: CoinbaseLayout::cap_11(),
         ..Scenario::default()
     };
-    assert_eq!(scenario.payees(), 1_000);
+    assert_eq!(scenario.payees(), 835);
 }
 
 #[test]
@@ -77,13 +91,13 @@ fn a_payee_override_wins_over_the_miners() {
 }
 
 #[test]
-fn the_default_share_pays_a_thousand_payees_directly() {
+fn the_default_share_pays_its_836_payees_directly() {
     let sizes = Scenario::default().share_sizes();
-    assert_eq!(sizes.split.direct_outputs, 1_001);
-    // 321 + 1,001 * 34 + 2 more bytes of output count.
-    assert_eq!(sizes.coinbase_bytes(), 34_357);
-    // 32 MB / 226 = 141,592 transactions: an 18-hash branch.
-    assert_eq!(sizes.merkle_branch_hashes, 18);
+    assert_eq!(sizes.split.direct_outputs, 836);
+    // 321 + 836 * 34 + 2 more bytes of output count.
+    assert_eq!(sizes.coinbase_bytes(), 28_747);
+    // 3.2 MB / 226 = 14,159 transactions: a 14-hash branch.
+    assert_eq!(sizes.merkle_branch_hashes, 14);
 }
 
 #[test]
@@ -124,8 +138,31 @@ fn both_ends_of_a_link_see_the_same_latency() {
     assert_eq!(mismatched, 0);
 }
 
+/// Blocks carrying 2 GB every ten minutes: 200 MB one-minute blocks, about
+/// 48 Mbit/s of BCHN relay each way.
+fn two_gigabytes_every_ten_minutes() -> Scenario {
+    Scenario {
+        block_bytes: scaled_to_block_interval(2_000_000_000),
+        ..Scenario::default()
+    }
+}
+
 #[test]
-fn bchn_relay_at_two_gigabytes_leaves_some_mixed_links_short() {
+fn bchn_relay_of_two_gigabytes_every_ten_minutes_leaves_some_mixed_links_short() {
+    let scenario = two_gigabytes_every_ten_minutes();
+    let load = scenario.bchn_load(782);
+    let mut random = SimulationRandom::from_seed(3);
+    let (_, summary) = scenario.build_network(load.relay_bytes_per_second, &mut random);
+    assert!(
+        summary.nodes_short_for_bchn > 10 && summary.nodes_short_for_bchn < 100,
+        "short {}",
+        summary.nodes_short_for_bchn
+    );
+}
+
+#[test]
+fn bchn_relay_at_two_gigabyte_one_minute_blocks_leaves_every_mixed_link_short() {
+    // About 479 Mbit/s each way, past every node of the default link mix.
     let scenario = Scenario {
         block_bytes: 2_000_000_000,
         ..Scenario::default()
@@ -133,19 +170,12 @@ fn bchn_relay_at_two_gigabytes_leaves_some_mixed_links_short() {
     let load = scenario.bchn_load(782);
     let mut random = SimulationRandom::from_seed(3);
     let (_, summary) = scenario.build_network(load.relay_bytes_per_second, &mut random);
-    assert!(
-        summary.nodes_short_for_bchn > 10,
-        "short {}",
-        summary.nodes_short_for_bchn
-    );
+    assert_eq!(summary.nodes_short_for_bchn, 100);
 }
 
 #[test]
 fn nodes_short_for_bchn_mine_none_of_the_pools_hashrate() {
-    let scenario = Scenario {
-        block_bytes: 2_000_000_000,
-        ..Scenario::default()
-    };
+    let scenario = two_gigabytes_every_ten_minutes();
     let load = scenario.bchn_load(782);
     let mut random = SimulationRandom::from_seed(3);
     let (network, summary) = scenario.build_network(load.relay_bytes_per_second, &mut random);
@@ -223,7 +253,7 @@ fn the_default_scenario_forwards_after_validation_names_three_uncles_and_has_no_
     assert_eq!(parameters.max_uncles, 3);
     assert_eq!(parameters.forwarding, Forwarding::AfterValidation);
     assert_eq!(parameters.weak_shares, None);
-    assert_eq!(parameters.share_wire_bytes, 36_423);
+    assert_eq!(parameters.share_wire_bytes, 30_525);
 }
 
 #[test]
@@ -253,7 +283,7 @@ fn gossiped_weak_shares_leave_the_share_as_it_was() {
     };
     let sizes = scenario.share_sizes();
     let parameters = scenario.parameters(&sizes, &scenario.bchn_load(sizes.coinbase_bytes()));
-    assert_eq!(parameters.share_wire_bytes, 36_423);
+    assert_eq!(parameters.share_wire_bytes, 30_525);
 }
 
 #[test]
