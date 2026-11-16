@@ -35,7 +35,8 @@ use crate::sim::timing::{
 use crate::stratum::emission::EmissionSender;
 use crate::stratum::work::prepared_notify::PreparedNotifyParams;
 use crate::stratum::work::tracker::{JobTracker, start_tracker_actor};
-use bitcoin::Target;
+use bitcoin::hashes::Hash;
+use bitcoin::{Address, Network, PubkeyHash, Target};
 use bitcoindrpc::BitcoindRpcClient;
 use p2poolv2_wallet::payout_address::PayoutAddress;
 use rand::rngs::StdRng;
@@ -44,6 +45,22 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::watch;
 use tracing::{debug, info, warn};
+
+/// Miner `index` of the node seeded `seed` (`[sim] virtual_miners`): a
+/// Bitcoin Cash P2PKH payout address and the share owner of the same key
+/// hash. The hash is `0x76`, the seed and the index, so every node's miners
+/// differ and no key opens them.
+fn virtual_miner(seed: u64, index: u32) -> (PayoutAddress, ShareOwner) {
+    let mut key_hash = [0u8; 20];
+    key_hash[0] = 0x76;
+    key_hash[1..9].copy_from_slice(&seed.to_le_bytes());
+    key_hash[9..13].copy_from_slice(&index.to_le_bytes());
+    let address = Address::p2pkh(PubkeyHash::from_byte_array(key_hash), Network::Regtest);
+    (
+        PayoutAddress::from(address),
+        ShareOwner::CashP2pkh(key_hash),
+    )
+}
 
 /// A synthetic share emitter modeling a single miner.
 pub struct SimEmitter {
@@ -157,6 +174,19 @@ impl SimEmitter {
         }
     }
 
+    /// The miner this proof is found by: the node's one miner, or with
+    /// `[sim] virtual_miners` on Bitcoin Cash one of that many, picked at
+    /// random ([`virtual_miner`]).
+    fn proof_miner(&self, rng: &mut StdRng) -> (PayoutAddress, ShareOwner) {
+        match (self.config.virtual_miners, self.share_owner) {
+            (Some(count), ShareOwner::CashP2pkh(_)) if count > 1 => virtual_miner(
+                self.config.seed.unwrap_or(0xC0FFEE),
+                rng.random_range(0..count),
+            ),
+            _ => (self.miner_address.clone(), self.share_owner),
+        }
+    }
+
     /// Run the emission loop until the notify channel or emissions channel
     /// closes. Intended to be raced against a shutdown signal by the caller.
     pub async fn run(mut self) {
@@ -224,11 +254,12 @@ impl SimEmitter {
                 .map(|d| d.as_secs() as u32)
                 .unwrap_or(0);
             let is_full_share = self.proof_is_full_share(&prepared, &mut rng);
+            let (miner_address, share_owner) = self.proof_miner(&mut rng);
 
             let params = SimShareParams {
                 prepared: &prepared,
-                miner_address: &self.miner_address,
-                share_owner: self.share_owner,
+                miner_address: &miner_address,
+                share_owner,
                 tracker: &self.tracker,
                 enonce1_hex: &enonce1_hex,
                 enonce2_hex: &enonce2_hex,
@@ -303,5 +334,34 @@ impl SimEmitter {
         }
 
         info!("Sim emitter stopped");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn virtual_miners_differ_by_index_and_by_node_seed() {
+        let (first_address, first_owner) = virtual_miner(1, 0);
+        let (second_address, second_owner) = virtual_miner(1, 1);
+        let (other_node_address, other_node_owner) = virtual_miner(2, 0);
+
+        assert_ne!(first_address, second_address);
+        assert_ne!(first_owner, second_owner);
+        assert_ne!(first_address, other_node_address);
+        assert_ne!(first_owner, other_node_owner);
+        assert_eq!(virtual_miner(1, 0), (first_address, first_owner));
+    }
+
+    #[test]
+    fn a_virtual_miner_is_paid_to_the_key_hash_it_owns_shares_with() {
+        let (address, owner) = virtual_miner(7, 3);
+        let ShareOwner::CashP2pkh(key_hash) = owner else {
+            panic!("a virtual miner owns shares with a P2PKH key hash");
+        };
+
+        assert!(address.script_pubkey().is_p2pkh());
+        assert_eq!(&address.script_pubkey().as_bytes()[3..23], &key_hash);
     }
 }

@@ -50,9 +50,14 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends libatomic1 \
     && rm -rf /var/lib/apt/lists/*
 
-RUN useradd --system --home-dir /data --shell /usr/sbin/nologin bchn \
+# bchn-rpc (gid 2001) may read the RPC password in /run/bchn-rpc. P2Poolv2's
+# image puts its user in a group of the same id.
+RUN groupadd --gid 2001 bchn-rpc \
+    && useradd --system --groups bchn-rpc --home-dir /data --shell /usr/sbin/nologin bchn \
     && mkdir -p /data /etc/bchn /run/bchn-rpc \
-    && chown bchn:bchn /data /run/bchn-rpc
+    && chown bchn:bchn /data \
+    && chown bchn:bchn-rpc /run/bchn-rpc \
+    && chmod 0750 /run/bchn-rpc
 
 COPY bitcoin-regtest.conf bitcoin-chipnet.conf bitcoin-mainnet.conf /etc/bchn/
 COPY bcli bootstrap.sh entrypoint.sh healthcheck.sh /usr/local/bin/

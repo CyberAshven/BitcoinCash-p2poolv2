@@ -5,6 +5,8 @@
 //! The named tables of the default run: which scenarios each runs and how
 //! it prints them.
 
+use crate::ask_paths;
+use crate::ask_study;
 use crate::constants::{HASHES_PER_DIFFICULTY, SHARE_INTERVAL_SECONDS};
 use crate::levels::level_amount;
 use crate::miners::{MinerMix, TrackedMiner};
@@ -14,6 +16,7 @@ use crate::report::{
     two_decimals,
 };
 use crate::scenario::{Design, Report, Scenario, WeakCredit, stale_rate_for_period};
+use crate::study;
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
@@ -38,8 +41,9 @@ const WEAK_CONSTANTS: [(u64, u64); 6] =
 /// `INCLUDER_CUT` values of its sweep.
 const INCLUDER_CUTS: [f64; 4] = [0.0, 0.01, 0.02, 0.05];
 
-/// Payout levels of the level sweep; levels 0 to 2 pay as level 3 does in
-/// every pool size tested, so they are left out.
+/// Payout levels of the level sweep. Level 0 is not a level, and the levels
+/// below 3 pay as level 3 does in every pool size tested, so they are left
+/// out.
 const LEVELS_SWEPT: [u32; 5] = [3, 4, 5, 6, 7];
 
 /// Share periods of the period table, seconds.
@@ -66,7 +70,7 @@ const VARIANTS: [(Design, WeakCredit); 7] = [
 
 /// A design's name in tables, marked when shares on minimum jobs are
 /// credited at the weak work.
-fn variant_name(scenario: &Scenario) -> String {
+pub(crate) fn variant_name(scenario: &Scenario) -> String {
     if scenario.design.has_weak_shares() && scenario.weak_credit == WeakCredit::WeakWork {
         format!("{}, weak work", scenario.design.name())
     } else {
@@ -101,11 +105,61 @@ pub enum Table {
     AttackSpam,
     /// How a share on a minimum job is credited with weak shares.
     WeakCredit,
+    /// Study #85: a refusing coalition with share races and weak work in
+    /// fork choice.
+    RefusingRaces,
+    /// Study #85: Zipf and medium miner mixes.
+    Mixes,
+    /// Study #85: a big miner joining or leaving at once.
+    Arrivals,
+    /// Study #85: a tiny pool at the ceiling.
+    TinyPool,
+    /// Study #85: large miners filling the weak slots.
+    Floods,
+    /// Study #85: a miner steering the level draw.
+    DrawSteering,
+    /// Study #85: weak shares lost to stale parents and uncle carriers.
+    Losses,
+    /// Study #85 constants: `WEAK_DEPTH` against a refusing coalition.
+    WeakDepth,
+    /// Study #85 constants: `R_MAX` and the start from genesis.
+    RatioMax,
+    /// Study #85 constants: `R_MAX` in every miner mix.
+    RatioMaxMixes,
+    /// Constants: the band cap's step, and hashrate that overstates its wish.
+    BandStep,
+    /// Bigger pools on a bigger Bitcoin Cash, levels as a node sets them.
+    Scale,
+    /// A shorter share period against more weak shares a share, as the
+    /// hashrate grows.
+    ScaleLevers,
+    /// Proposal: weak shares that follow the asks, where they settle.
+    WeakAsks,
+    /// Proposal: the asks in every miner mix.
+    WeakAsksMixes,
+    /// Proposal: the asks' constants.
+    WeakAsksConstants,
+    /// Proposal: attacks on the asks.
+    WeakAsksAttacks,
+    /// Study: the weak ratio's path from genesis under each rule.
+    WeakAsksGenesis,
+    /// Study: a big miner joining or leaving at the minimum under each rule.
+    WeakAsksBigMiner,
+    /// Study: where each rule settles.
+    WeakAsksRules,
+    /// Study: where the rules that bound the start settle in every mix.
+    WeakAsksRuleMixes,
+    /// Study: the attacks on the asks under each rule.
+    WeakAsksRuleAttacks,
+    /// The PPLNS window's cap, 14 days against 30 and 60, in small pools.
+    WindowCap,
+    /// What a node stores, by payees, payout level and window cap.
+    Storage,
 }
 
 impl Table {
     /// Every table, in the order of the default run.
-    pub const ALL: [Table; 12] = [
+    pub const ALL: [Table; 36] = [
         Table::Designs,
         Table::Hashrate,
         Table::Pool,
@@ -118,6 +172,30 @@ impl Table {
         Table::AttackMinimum,
         Table::AttackCarriers,
         Table::AttackSpam,
+        Table::RefusingRaces,
+        Table::Mixes,
+        Table::Arrivals,
+        Table::TinyPool,
+        Table::Floods,
+        Table::DrawSteering,
+        Table::Losses,
+        Table::WeakDepth,
+        Table::RatioMax,
+        Table::RatioMaxMixes,
+        Table::BandStep,
+        Table::Scale,
+        Table::ScaleLevers,
+        Table::WeakAsks,
+        Table::WeakAsksMixes,
+        Table::WeakAsksConstants,
+        Table::WeakAsksAttacks,
+        Table::WindowCap,
+        Table::Storage,
+        Table::WeakAsksGenesis,
+        Table::WeakAsksBigMiner,
+        Table::WeakAsksRules,
+        Table::WeakAsksRuleMixes,
+        Table::WeakAsksRuleAttacks,
     ];
 
     /// Name on the command line.
@@ -135,6 +213,30 @@ impl Table {
             Table::AttackCarriers => "attack-carriers",
             Table::AttackSpam => "attack-spam",
             Table::WeakCredit => "weak-credit",
+            Table::RefusingRaces => "refusing-races",
+            Table::Mixes => "mixes",
+            Table::Arrivals => "arrivals",
+            Table::TinyPool => "tiny-pool",
+            Table::Floods => "floods",
+            Table::DrawSteering => "draw-steering",
+            Table::Losses => "losses",
+            Table::WeakDepth => "weak-depth",
+            Table::RatioMax => "r-max",
+            Table::RatioMaxMixes => "r-max-mixes",
+            Table::BandStep => "band-step",
+            Table::Scale => "scale",
+            Table::ScaleLevers => "scale-levers",
+            Table::WeakAsks => "weak-asks",
+            Table::WeakAsksMixes => "weak-asks-mixes",
+            Table::WeakAsksConstants => "weak-asks-constants",
+            Table::WeakAsksAttacks => "weak-asks-attacks",
+            Table::WeakAsksGenesis => "weak-asks-genesis",
+            Table::WeakAsksBigMiner => "weak-asks-big-miner",
+            Table::WeakAsksRules => "weak-asks-rules",
+            Table::WeakAsksRuleMixes => "weak-asks-rule-mixes",
+            Table::WeakAsksRuleAttacks => "weak-asks-rule-attacks",
+            Table::WindowCap => "window-cap",
+            Table::Storage => "storage",
         }
     }
 
@@ -172,6 +274,72 @@ impl Table {
             Table::WeakCredit => {
                 "Weak share credit: as the page writes it and credited once (band-weak-levels)"
             }
+            Table::RefusingRaces => {
+                "Study: a refusing coalition with share races (band-weak-levels, weak work, 50% industrial)"
+            }
+            Table::Mixes => "Study: miner mixes (INCLUDER_CUT 1%)",
+            Table::Arrivals => "Study: a big miner joining or leaving at once (50% industrial)",
+            Table::TinyPool => {
+                "Study: a tiny pool at the ceiling (1 GH/s on a 37 GH/s test network)"
+            }
+            Table::Floods => {
+                "Study: large miners filling the weak slots (band-weak-levels, weak work)"
+            }
+            Table::DrawSteering => {
+                "Study: steering the level draw (band-weak-levels, weak work, 50% industrial)"
+            }
+            Table::Losses => {
+                "Study: weak shares lost to stale parents and uncle carriers (band-weak-levels, weak work, 50% industrial)"
+            }
+            Table::WeakDepth => {
+                "Study constants: WEAK_DEPTH and INCLUDER_CUT against a refusing coalition (band-weak-levels, weak work, 50% industrial)"
+            }
+            Table::RatioMax => "Study constants: R_MAX and the start from genesis (50% industrial)",
+            Table::RatioMaxMixes => {
+                "Study constants: R_MAX 256 and 4,096 in every miner mix (band-weak-levels, weak work)"
+            }
+            Table::BandStep => {
+                "Constants: the band cap's step from genesis, and hashrate overstating its wish (50% industrial)"
+            }
+            Table::Scale => {
+                "Scale: bigger pools on a bigger Bitcoin Cash, levels as a node sets them (band-weak-levels, weak work, 50% industrial)"
+            }
+            Table::ScaleLevers => {
+                "Scale levers: a shorter share period against more weak shares a share (band-weak-levels, weak work, 50% industrial)"
+            }
+            Table::WeakAsks => {
+                "Proposal: weak shares that follow the asks, where they settle (band-weak-levels, weak work, 50% industrial)"
+            }
+            Table::WeakAsksMixes => {
+                "Proposal: the asks in every miner mix, at ten times today's hashrate (band-weak-levels, weak work)"
+            }
+            Table::WeakAsksConstants => {
+                "Proposal: the asks' constants, each varied alone (pool 30% of ten times today's hashrate)"
+            }
+            Table::WeakAsksAttacks => {
+                "Proposal: attacks on the asks (band-weak-levels, weak work, 50% industrial)"
+            }
+            Table::WeakAsksGenesis => {
+                "Study: the weak ratio's path from genesis, by rule (band-weak-levels, weak work, 50% industrial)"
+            }
+            Table::WeakAsksBigMiner => {
+                "Study: a big miner joining or leaving at the minimum, by rule (band-weak-levels, weak work)"
+            }
+            Table::WeakAsksRules => {
+                "Study: where each rule settles (band-weak-levels, weak work, 50% industrial)"
+            }
+            Table::WeakAsksRuleMixes => {
+                "Study: the rules that bound the start in every miner mix, at ten times today's hashrate (band-weak-levels, weak work)"
+            }
+            Table::WeakAsksRuleAttacks => {
+                "Study: the attacks on the asks under each rule (band-weak-levels, weak work, 50% industrial)"
+            }
+            Table::WindowCap => {
+                "Window cap: 14 days against 30 and 60 in small pools (band-weak-levels, weak work, medium miners, levels as a node sets them)"
+            }
+            Table::Storage => {
+                "Storage: what a node keeps, by payees, payout level and window cap (arithmetic, no fees)"
+            }
         }
     }
 
@@ -191,6 +359,30 @@ impl Table {
             Table::AttackCarriers => attack_carriers(base),
             Table::AttackSpam => attack_spam(base),
             Table::WeakCredit => weak_credit(base),
+            Table::RefusingRaces => study::refusing_races(base),
+            Table::Mixes => study::mixes(base),
+            Table::Arrivals => study::arrivals(base),
+            Table::TinyPool => study::tiny_pool(base),
+            Table::Floods => study::floods(base),
+            Table::DrawSteering => study::draw_steering(base),
+            Table::Losses => study::losses(base),
+            Table::WeakDepth => study::weak_depth(base),
+            Table::RatioMax => study::ratio_max(base),
+            Table::RatioMaxMixes => study::ratio_max_mixes(base),
+            Table::BandStep => study::band_step(base),
+            Table::Scale => study::scale(base),
+            Table::ScaleLevers => study::scale_levers(base),
+            Table::WeakAsks => ask_study::weak_asks(base),
+            Table::WeakAsksMixes => ask_study::weak_asks_mixes(base),
+            Table::WeakAsksConstants => ask_study::weak_asks_constants(base),
+            Table::WeakAsksAttacks => ask_study::weak_asks_attacks(base),
+            Table::WeakAsksGenesis => ask_paths::genesis(base),
+            Table::WeakAsksBigMiner => ask_paths::big_miner(base),
+            Table::WeakAsksRules => ask_paths::steady(base),
+            Table::WeakAsksRuleMixes => ask_paths::mixes(base),
+            Table::WeakAsksRuleAttacks => ask_paths::attacks(base),
+            Table::WindowCap => study::window_cap(base),
+            Table::Storage => crate::storage::storage(),
         };
         format!("## {}\n\n{body}", self.title())
     }
@@ -200,34 +392,50 @@ impl Table {
 /// depends only on its own scenario, so the result does not depend on the
 /// number of threads.
 pub fn run_scenarios(scenarios: &[Scenario]) -> Vec<Report> {
+    parallel_map(scenarios, Scenario::run)
+}
+
+/// `work` applied to every item on every core, the results in the items'
+/// order. Each result must depend only on its own item, so the outcome does
+/// not depend on the number of threads.
+pub fn parallel_map<Item, Output>(
+    items: &[Item],
+    work: impl Fn(&Item) -> Output + Sync,
+) -> Vec<Output>
+where
+    Item: Sync,
+    Output: Send,
+{
     let threads = thread::available_parallelism()
         .map(NonZeroUsize::get)
         .unwrap_or(1)
-        .min(scenarios.len().max(1));
+        .min(items.len().max(1));
     let next = AtomicUsize::new(0);
     let (sender, receiver) = mpsc::channel();
     thread::scope(|scope| {
         (0..threads).for_each(|_| {
             let sender = sender.clone();
             let next = &next;
+            let work = &work;
             scope.spawn(move || {
                 let mut index = next.fetch_add(1, Ordering::Relaxed);
-                while index < scenarios.len() {
+                while index < items.len() {
                     // The receiver outlives the scope, so a send cannot fail.
-                    let _ = sender.send((index, scenarios[index].run()));
+                    let _ = sender.send((index, work(&items[index])));
                     index = next.fetch_add(1, Ordering::Relaxed);
                 }
             });
         });
     });
     drop(sender);
-    let mut slots: Vec<Option<Report>> = vec![None; scenarios.len()];
-    receiver.into_iter().for_each(|(index, report)| {
-        slots[index] = Some(report);
+    let mut slots: Vec<Option<Output>> = Vec::with_capacity(items.len());
+    slots.resize_with(items.len(), || None);
+    receiver.into_iter().for_each(|(index, output)| {
+        slots[index] = Some(output);
     });
     slots
         .into_iter()
-        .map(|slot| slot.expect("every scenario ran"))
+        .map(|slot| slot.expect("every item ran"))
         .collect()
 }
 
@@ -238,13 +446,13 @@ fn headers_with_miners(leading: &[&str]) -> Vec<String> {
     headers
 }
 
-fn table_from(headers: &[String], rows: &[Vec<String>]) -> String {
+pub(crate) fn table_from(headers: &[String], rows: &[Vec<String>]) -> String {
     let header_cells: Vec<&str> = headers.iter().map(String::as_str).collect();
     markdown_table(&header_cells, rows)
 }
 
 /// The weak ratio `R` a report's first chain settled at, or a dash.
-fn weak_ratio(report: &Report) -> String {
+pub(crate) fn weak_ratio(report: &Report) -> String {
     optional(
         report.home_chain().weak.map(|outcome| outcome.mean_ratio),
         rounded,
@@ -252,7 +460,7 @@ fn weak_ratio(report: &Report) -> String {
 }
 
 /// The uniform share difficulty of a pool of `fraction` of Bitcoin Cash.
-fn uniform_difficulty(report: &Report) -> f64 {
+pub(crate) fn uniform_difficulty(report: &Report) -> f64 {
     let scenario = &report.scenario;
     scenario.network_hashrate()
         * report.pool_fraction
@@ -506,7 +714,7 @@ fn weak_constants(base: &Scenario) -> String {
 /// The tracked miners of the carrying-node tables: the Bitaxe, the ASIC on a
 /// carrying node and the ASIC on a node that never carries others' weak
 /// shares.
-fn tracked_with_non_carrying_asic() -> Vec<TrackedMiner> {
+pub(crate) fn tracked_with_non_carrying_asic() -> Vec<TrackedMiner> {
     vec![
         TrackedMiner::bitaxe(),
         TrackedMiner::asic(),

@@ -22,6 +22,12 @@ cargo netsim run --tokens --miners 1000000
 cargo netsim sweep payees
 cargo netsim sweep all
 
+# The scaling study (issue #85): each idea at 100 and 1,000 nodes and
+# 10, 5, 2 and 1-second shares, and the shortest share interval at which
+# 1,000 nodes stay within today's stale rate at 10-second shares
+cargo netsim sweep scaling --threads 10
+cargo netsim interval-limit scaling --nodes 1000 --threads 10
+
 # The payee counts at which a coinbase meets each limit
 cargo netsim limits
 ```
@@ -33,8 +39,10 @@ cargo netsim limits
 hashrate is spread, payees, the pool's share of BCH, share interval, block
 size, payout rule and tokens, bandwidth and latency distributions
 (`50`, `uniform:10:100`, `lognormal:50:0.8`), validation and work-switch
-delays, Stratum protocol, duration and seed. A run is a pure function of its
-inputs and seed.
+delays, Stratum protocol, duration and seed, and the studied changes that
+are not built: weak shares (`--weak-shares`, `--weak-share-carriage`),
+forwarding after the header check (`--forward after-header-check`) and the
+uncle cap (`--max-uncles`). A run is a pure function of its inputs and seed.
 
 ## Credit and licence
 

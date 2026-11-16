@@ -6,7 +6,7 @@
 
 use crate::api::{FoundBlock, ShareDetail};
 use crate::app::{ctx, fetched};
-use crate::format::{UNKNOWN, short, url_component};
+use crate::format::{UNKNOWN, fmt_weak_ratio, short, url_component, weak_difficulty};
 use crate::layout::{Crumb, ErrorPage, dashboard_crumb, loading, miner_link, share_link, stat};
 use crate::route::{Route, Tab, looks_like_hash, miner_href};
 use leptos::prelude::*;
@@ -52,6 +52,78 @@ fn share_view(share: ShareDetail, is_block: bool) -> impl IntoView {
         }
         .into_any()
     };
+    // The weak-share details only render for a share that carries weak
+    // shares: three stat rows and a panel between the share panel and the
+    // uncles, as the node's page does. Nothing renders when the count is 0.
+    let carries_weak = share.weak_count > 0;
+    let weak_stats = carries_weak.then(|| {
+        view! {
+            {stat("Weak shares", view! { {share.weak_count.to_string()} }.into_any())}
+            {stat(
+                "Weak ratio",
+                view! { {fmt_weak_ratio(share.weak_ratio)} }.into_any(),
+            )}
+            {stat(
+                "Weak root",
+                view! { <span class="mono">{share.weak_root}</span> }.into_any(),
+            )}
+        }
+        .into_any()
+    });
+    let weak_panel = carries_weak.then(|| {
+        let body = if share.weak_shares.is_empty() {
+            view! {
+                <p class="empty-state">
+                    {format!(
+                        "The carried weak share bodies were pruned. Only the count of {} is kept.",
+                        share.weak_count
+                    )}
+                </p>
+            }
+            .into_any()
+        } else {
+            let rows = share
+                .weak_shares
+                .iter()
+                .map(|weak| {
+                    view! {
+                        <tr>
+                            <td class="mono">{weak.pow_hash.clone()}</td>
+                            <td>{miner_link(&weak.miner_bitcoin_address)}</td>
+                            <td>{weak.time.clone()}</td>
+                            <td class="mono">{weak_difficulty(&weak.bits)}</td>
+                        </tr>
+                    }
+                })
+                .collect_view();
+            view! {
+                <div class="table-x">
+                    <table class="table">
+                        <thead>
+                            <tr>
+                                <th>"PoW hash"</th>
+                                <th>"Miner"</th>
+                                <th>"Time"</th>
+                                <th>"Difficulty"</th>
+                            </tr>
+                        </thead>
+                        <tbody>{rows}</tbody>
+                    </table>
+                </div>
+            }
+            .into_any()
+        };
+        view! {
+            <div class="panel">
+                <h2>
+                    "Weak shares"
+                    <span class="panel-note">{format!("{} carried", share.weak_count)}</span>
+                </h2>
+                {body}
+            </div>
+        }
+        .into_any()
+    });
     view! {
         <a class="back-link" href=miner_href(&owner)>
             {format!("\u{2190} Miner {}", short(&owner))}
@@ -60,6 +132,13 @@ fn share_view(share: ShareDetail, is_block: bool) -> impl IntoView {
             <h2>
                 "Share"
                 {is_block.then(|| view! { " " <span class="badge-block">"found a block"</span> })}
+                {carries_weak
+                    .then(|| {
+                        view! {
+                            " "
+                            <span class="badge-weak">{format!("{} weak", share.weak_count)}</span>
+                        }
+                    })}
                 <span class="panel-note">
                     {format!("{} \u{b7} {}", share.validation_status, share.chain)}
                 </span>
@@ -72,8 +151,10 @@ fn share_view(share: ShareDetail, is_block: bool) -> impl IntoView {
                 {stat("Share chain address", miner_link(&share.miner_address).into_any())}
                 {stat("Share bits", view! { <span class="mono">{share.bits}</span> }.into_any())}
                 {stat("Time", view! { {share.time} }.into_any())}
+                {weak_stats}
             </div>
         </div>
+        {weak_panel}
         <div class="panel">
             <h2>
                 "Uncles"

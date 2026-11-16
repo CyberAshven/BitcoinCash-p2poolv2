@@ -257,3 +257,11 @@ pub const SHARE_HEADER_BYTES_PER_UNCLE: u64 = 32;
 /// count, 36 outpoint, 1 + 33 scriptSig, 4 sequence, 1 output count,
 /// 34 output, 4 locktime.
 pub const SHARE_COINBASE_BYTES: u64 = 118;
+
+/// Payload bytes of one weak share message, an estimate: the design counts
+/// the share header as mined (about 300 to 450 bytes), the coinbase
+/// scriptSig (at most 100), the coinbase's total value (8) and the coinbase
+/// merkle branch (32 bytes a level), about 0.5 to 1.2 KB in all
+/// (`docs/sharechain/small-miners-design.md`, "What a weak share message
+/// holds"). The format is not built.
+pub const WEAK_SHARE_PAYLOAD_BYTES: u64 = 800;

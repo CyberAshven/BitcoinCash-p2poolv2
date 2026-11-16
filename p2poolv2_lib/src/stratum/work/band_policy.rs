@@ -15,6 +15,15 @@
 //! pool makes fewer shares in all, and ASERT lowers the minimum for everyone
 //! else.
 //!
+//! The minimum can only ease as far as the chain's ceiling, so no miner gets
+//! more than the room left: as many times the minimum's work as the minimum
+//! is times the ceiling's. At the ceiling that is one, and every miner is at
+//! the minimum. A pool too small for the ceiling's 10-second shares then
+//! keeps every share it can make, where heavier shares would only slow its
+//! chain further and ease no one's minimum, and the room shrinks smoothly to
+//! nothing as a growing pool's minimum nears the ceiling, so ASERT settles
+//! on one minimum instead of switching heavier jobs on and off around it.
+//!
 //! Hashes are counted as difficulty times 2^32, as the metrics actor counts a
 //! miner's submissions.
 
@@ -78,11 +87,22 @@ pub(crate) fn share_rate_limit(pool_hashrate: f64, block_bits: CompactTarget) ->
         .max(SHARES_PER_MONTH / MONTH_SECONDS)
 }
 
+/// How many times the minimum's work a heavier job may be before the
+/// minimum's room to ease runs out: the minimum's work over the `ceiling`'s,
+/// at least one, or unbounded without a ceiling.
+fn room_above_ceiling(minimum: CompactTarget, ceiling: Option<CompactTarget>) -> f64 {
+    ceiling.map_or(f64::INFINITY, |ceiling| {
+        (expected_hashes(minimum) / expected_hashes(ceiling)).max(1.0)
+    })
+}
+
 /// The band of the next job for a miner hashing at `miner_hashrate`, hashes
 /// a second, on `prepared`: `None`, the minimum, unless the miner would make
 /// more shares at the minimum than `prepared`'s share rate limit; then the
-/// multiple of the minimum's work that brings it down to that rate, capped
-/// at the band ([`heavier_job_band`]).
+/// multiple of the minimum's work that brings it down to that rate, at most
+/// the minimum's room above the chain's ceiling ([`room_above_ceiling`]) and
+/// capped at the band ([`heavier_job_band`]). The room bounds what the node
+/// wants, so a job held back by it does not push the band cap up.
 pub(crate) fn miner_job_band(
     prepared: &PreparedNotifyParams,
     miner_hashrate: Option<f64>,
@@ -90,11 +110,15 @@ pub(crate) fn miner_job_band(
     let limit = prepared.share_rate_limit()?;
     let hashrate = miner_hashrate.filter(|hashrate| *hashrate > 0.0)?;
     let share_rate = hashrate / expected_hashes(prepared.bits());
-    if share_rate <= limit {
+    let multiple = (share_rate / limit).min(room_above_ceiling(
+        prepared.bits(),
+        prepared.target_ceiling(),
+    ));
+    if multiple <= 1.0 {
         None
     } else {
         //* `as` saturates, so a huge multiple stays at u64::MAX.
-        let wanted_multiple = (share_rate / limit * f64::from(BAND_CAP_UNIT)) as u64;
+        let wanted_multiple = (multiple * f64::from(BAND_CAP_UNIT)) as u64;
         Some(heavier_job_band(
             prepared.bits(),
             prepared.band_cap(),
@@ -298,5 +322,114 @@ mod tests {
 
         assert_eq!(band.bits, CompactTarget::from_consensus(0x1c10_0000));
         assert_eq!(band.wanted_bits, CompactTarget::from_consensus(0x1c08_0000));
+    }
+
+    /// A tiny pool: the minimum is at the ceiling, so the chain already
+    /// makes shares slower than it should and the minimum cannot ease. A
+    /// miner far above the share rate limit still mines at the minimum.
+    #[test]
+    fn a_miner_at_the_ceiling_gets_the_minimum() {
+        let template: BlockTemplate = serde_json::from_str(include_str!(
+            "../../../../bitcoindrpc/test_data/bchn-regtest-template.json"
+        ))
+        .unwrap();
+        let prepared = PreparedNotifyParamsBuilder::new(
+            Arc::new(template),
+            vec![OutputPair {
+                address: crate::test_utils::make_test_address(1),
+                amount: Amount::from_sat(1),
+            }],
+            b"test",
+            false,
+        )
+        .prev_share_blockhash(BlockHash::from_byte_array([1; 32]))
+        .bits(CompactTarget::from_consensus(0x1c40_0000))
+        .band_cap(65_536)
+        .share_rate_limit(Some(1.0))
+        .target_ceiling(Some(CompactTarget::from_consensus(0x1c40_0000)))
+        .build()
+        .unwrap();
+        let minimum_hashes = expected_hashes(CompactTarget::from_consensus(0x1c40_0000));
+
+        assert_eq!(
+            miner_job_band(&prepared, Some(1_000.0 * minimum_hashes)),
+            None
+        );
+    }
+
+    /// The minimum at twice the ceiling's work can ease twice before the
+    /// ceiling, so a miner that would want eight times the minimum's work
+    /// gets two, and wants no more: its share does not push the band cap up.
+    #[test]
+    fn a_miner_near_the_ceiling_gets_only_the_room_left() {
+        let template: BlockTemplate = serde_json::from_str(include_str!(
+            "../../../../bitcoindrpc/test_data/bchn-regtest-template.json"
+        ))
+        .unwrap();
+        let prepared = PreparedNotifyParamsBuilder::new(
+            Arc::new(template),
+            vec![OutputPair {
+                address: crate::test_utils::make_test_address(1),
+                amount: Amount::from_sat(1),
+            }],
+            b"test",
+            false,
+        )
+        .prev_share_blockhash(BlockHash::from_byte_array([1; 32]))
+        .bits(CompactTarget::from_consensus(0x1c40_0000))
+        .band_cap(65_536)
+        .share_rate_limit(Some(1.0))
+        .target_ceiling(Some(CompactTarget::from_consensus(0x1c7f_ffff)))
+        .build()
+        .unwrap();
+        let minimum_hashes = expected_hashes(CompactTarget::from_consensus(0x1c40_0000));
+
+        let band = miner_job_band(&prepared, Some(8.0 * minimum_hashes)).unwrap();
+
+        let room = room_above_ceiling(
+            CompactTarget::from_consensus(0x1c40_0000),
+            Some(CompactTarget::from_consensus(0x1c7f_ffff)),
+        );
+        assert!((room - 2.0).abs() < 1e-6, "{room}");
+        assert_eq!(
+            band,
+            heavier_job_band(
+                CompactTarget::from_consensus(0x1c40_0000),
+                65_536,
+                (room * f64::from(BAND_CAP_UNIT)) as u64
+            )
+        );
+        assert_eq!(band.wanted_bits, band.bits);
+    }
+
+    /// Far from the ceiling the room does not bind: the miner gets the
+    /// multiple its share rate asks for.
+    #[test]
+    fn a_miner_far_from_the_ceiling_gets_its_full_multiple() {
+        let template: BlockTemplate = serde_json::from_str(include_str!(
+            "../../../../bitcoindrpc/test_data/bchn-regtest-template.json"
+        ))
+        .unwrap();
+        let prepared = PreparedNotifyParamsBuilder::new(
+            Arc::new(template),
+            vec![OutputPair {
+                address: crate::test_utils::make_test_address(1),
+                amount: Amount::from_sat(1),
+            }],
+            b"test",
+            false,
+        )
+        .prev_share_blockhash(BlockHash::from_byte_array([1; 32]))
+        .bits(CompactTarget::from_consensus(0x1c40_0000))
+        .band_cap(4096)
+        .share_rate_limit(Some(1.0))
+        .target_ceiling(Some(CompactTarget::from_consensus(0x1d00_ffff)))
+        .build()
+        .unwrap();
+        let minimum_hashes = expected_hashes(CompactTarget::from_consensus(0x1c40_0000));
+
+        let band = miner_job_band(&prepared, Some(2.0 * minimum_hashes)).unwrap();
+
+        assert_eq!(band.bits, CompactTarget::from_consensus(0x1c20_0000));
     }
 }

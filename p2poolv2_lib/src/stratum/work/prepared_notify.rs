@@ -256,6 +256,10 @@ pub struct PreparedNotifyParams {
     /// shares (`stratum::work::band_policy`). `None` without an estimate of
     /// the pool's block rate, or on Bitcoin: every job is at the minimum.
     share_rate_limit: Option<f64>,
+    /// The chain's target ceiling, the easiest the minimum can be: heavier
+    /// jobs go no further than the room the minimum has to ease before it
+    /// (`stratum::work::band_policy`). `None` leaves them uncapped by it.
+    target_ceiling: Option<CompactTarget>,
     /// The pool's hashrate, in hashes a second, from its newest confirmed
     /// shares, for the node's payout level policy
     /// (`stratum::work::level_policy`). `None` without an estimate, or on
@@ -274,7 +278,8 @@ pub struct PreparedNotifyParams {
     /// node's weak pool when the params were built; committed after the
     /// payout level.
     weak_shares: Arc<[WeakShare]>,
-    /// The merkle root of `weak_shares`' proof-of-work hashes.
+    /// The merkle root of `weak_shares`' whole encodings
+    /// (`shares::weak::weak_root`).
     weak_root: sha256d::Hash,
     /// The weak target of the mining base (`shares::weak::parent_weak_target`):
     /// a submission on a job at the minimum that meets it but not the share
@@ -457,6 +462,7 @@ impl PreparedNotifyParams {
         .share_version(self.share_version)
         .band_cap(self.band_cap)
         .share_rate_limit(self.share_rate_limit)
+        .target_ceiling(self.target_ceiling)
         .pool_hashrate(self.pool_hashrate)
         .payout_level(self.payout_level)
         .spend_cost(self.spend_cost)
@@ -587,6 +593,12 @@ impl PreparedNotifyParams {
     /// shares; `None` when every job is at the minimum.
     pub(crate) fn share_rate_limit(&self) -> Option<f64> {
         self.share_rate_limit
+    }
+
+    /// The chain's target ceiling, which bounds how heavy a job gets;
+    /// `None` when it does not.
+    pub(crate) fn target_ceiling(&self) -> Option<CompactTarget> {
+        self.target_ceiling
     }
 
     /// The band of a job at the minimum: its bits are the minimum, and it
@@ -799,6 +811,7 @@ pub(crate) struct PreparedNotifyParamsBuilder {
     share_version: ShareVersion,
     band_cap: u32,
     share_rate_limit: Option<f64>,
+    target_ceiling: Option<CompactTarget>,
     pool_hashrate: Option<f64>,
     payout_level: u8,
     spend_cost: u64,
@@ -836,6 +849,7 @@ impl PreparedNotifyParamsBuilder {
             share_version: ShareVersion::CURRENT,
             band_cap: BAND_CAP_UNIT,
             share_rate_limit: None,
+            target_ceiling: None,
             pool_hashrate: None,
             payout_level: DEFAULT_PAYOUT_LEVEL,
             spend_cost: DEFAULT_SPEND_COST,
@@ -968,6 +982,15 @@ impl PreparedNotifyParamsBuilder {
     /// every job at the minimum.
     pub fn share_rate_limit(mut self, share_rate_limit: Option<f64>) -> Self {
         self.share_rate_limit = share_rate_limit;
+        self
+    }
+
+    /// The chain's target ceiling: a heavier job is at most as many times
+    /// the minimum's work as the minimum is times the ceiling's
+    /// (`stratum::work::band_policy`); `None`, the default, leaves heavier
+    /// jobs uncapped by it.
+    pub fn target_ceiling(mut self, target_ceiling: Option<CompactTarget>) -> Self {
+        self.target_ceiling = target_ceiling;
         self
     }
 
@@ -1184,6 +1207,7 @@ impl PreparedNotifyParamsBuilder {
             bits: self.bits,
             band_cap: self.band_cap,
             share_rate_limit: self.share_rate_limit,
+            target_ceiling: self.target_ceiling,
             pool_hashrate: self.pool_hashrate,
             payout_level: self.payout_level,
             spend_cost: self.spend_cost,

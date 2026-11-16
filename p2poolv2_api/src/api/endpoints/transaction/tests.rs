@@ -41,7 +41,7 @@ async fn build_test_state() -> (Arc<AppState>, tempfile::TempDir) {
         metrics_handle,
         tracker_handle,
         node_handle,
-        monitoring_event_sender: create_monitoring_event_channel().0,
+        monitoring_event_sender: create_monitoring_event_channel(),
         auth_user: None,
         auth_token: None,
         pplns_window: None,

@@ -23,9 +23,11 @@
 pub mod constants;
 pub mod distribution;
 pub mod engine;
+pub mod limits;
 pub mod payees;
 pub mod random;
 pub mod report;
+pub mod scaling;
 pub mod scenario;
 pub mod sizes;
 pub mod sweep;

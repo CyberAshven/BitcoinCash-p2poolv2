@@ -29,12 +29,18 @@ share transaction root (`ShareCommitment::hash` in
   `0x24`, then its wanted bits, band cap and minimum, four bytes each
   ([Share validation](validation.md#the-difficulty-band-bitcoin-cash));
 - on Bitcoin Cash, right after the band, the share's payout level: tag
-  `0x25`, then the one-byte level `k`, 0 to 7
+  `0x25`, then the one-byte level `k`, 1 to 7
   ([Coinbase payouts](../payouts/coinbase.md#payout-levels));
 - on Bitcoin Cash, after the payout level, the share's weak shares: tag
   `0x26`, then its 4-byte weak ratio, the 2-byte count of the weak shares
-  its body carries and the 32-byte merkle root of their proof-of-work
-  hashes, so the proof of work fixes the list
+  its body carries and the 32-byte merkle root of their whole encodings, in
+  the order carried: each leaf is the SHA-256d of one weak share as it is
+  sent, its share header (with its coinbase proof), its Bitcoin Cash
+  coinbase scriptSig, the coinbase's total value and its merkle branch. So
+  the proof of work fixes every byte of every carried weak share, not only
+  which proofs of work they are. Until 2026-11-12 the leaves were the weak
+  shares' proof-of-work hashes, which left the rest of each weak share
+  unbound: a peer could alter it in an honest share's body
   ([Share validation](validation.md#weak-shares-follow-the-rules-bitcoin-cash));
 - the miner payout address (with its network class) and the miner share
   address.

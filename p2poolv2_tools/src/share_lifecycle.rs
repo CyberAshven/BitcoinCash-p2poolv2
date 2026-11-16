@@ -118,7 +118,7 @@ static PATTERNS: LazyLock<Vec<(Regex, Pattern)>> = LazyLock::new(|| {
             Pattern::ValidFail,
         ),
         (
-            r"Promoted block ([0-9a-f]{64}) to confirmed height (Some\(\d+\)|None)",
+            r"Promoted block ([0-9a-f]{64}) to confirmed height (-?\d+):",
             Pattern::Confirmed,
         ),
         (r"Confirmed reorg needed", Pattern::Reorg),
@@ -215,10 +215,12 @@ fn build_event(pattern: Pattern, captures: &regex::Captures<'_>, timestamp: &str
             format!("Block {} FAILED: {second}", short(first)),
         ),
         Pattern::Confirmed => {
-            let height = second
-                .strip_prefix("Some(")
-                .and_then(|rest| rest.strip_suffix(')'))
-                .unwrap_or("none");
+            // The node logs an uncle's height as -1.
+            let height = if second.starts_with('-') {
+                "none"
+            } else {
+                second
+            };
             (
                 EventKind::Confirmed,
                 Some(first),

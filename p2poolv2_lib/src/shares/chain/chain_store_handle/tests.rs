@@ -1,6 +1,7 @@
 use crate::config::PoolMode;
 use crate::pool_difficulty::AsertParent;
 use crate::store::Store;
+use crate::store::script_history::{ScriptHistoryEntry, ScriptHistoryPage, script_hash};
 use crate::store::writer::StoreError;
 use crate::test_utils::{
     TestShareBlockBuilder, build_confirmed_test_chain, genesis_for_tests,
@@ -479,7 +480,7 @@ async fn test_get_mining_base_and_uncles_returns_sibling_uncle() {
         .nonce(0xe9695793)
         .work(1)
         .build();
-    store.store_with_valid_metadata(&sibling);
+    store.store_with_block_valid_metadata(&sibling);
 
     // With no BlockValid block, the mining base is the confirmed tip. The
     // sibling is returned as an uncle, and the mining base is never listed
@@ -515,7 +516,7 @@ async fn test_get_mining_base_and_uncles_excludes_fork_ancestry() {
         .nonce(0xe9695793)
         .work(5)
         .build();
-    store.store_with_valid_metadata(&fork);
+    store.store_with_block_valid_metadata(&fork);
     let mut batch = Store::get_write_batch();
     store
         .mark_block_valid(&fork.block_hash(), &mut batch)
@@ -529,7 +530,7 @@ async fn test_get_mining_base_and_uncles_excludes_fork_ancestry() {
         .nonce(0xe9695794)
         .work(1)
         .build();
-    store.store_with_valid_metadata(&sibling);
+    store.store_with_block_valid_metadata(&sibling);
 
     let (base, uncles) = chain_handle.get_mining_base_and_uncles().unwrap();
     // The mining base is the validated block above the confirmed tip; it
@@ -1217,6 +1218,52 @@ async fn test_prune_block_bodies_if_due_skips_when_not_current() {
     );
 }
 
+/// A current node moves the script history compaction threshold to its
+/// confirmed tip on every run, even when no bodies are due.
+#[tokio::test]
+async fn test_prune_block_bodies_if_due_updates_gc_threshold_when_current() {
+    let (chain_store_handle, _temp_dir) = setup_test_chain_store_handle(true).await;
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as u32;
+    let genesis = TestShareBlockBuilder::new().time(now_secs).build();
+    chain_store_handle
+        .init_or_setup_genesis(genesis)
+        .await
+        .unwrap();
+    assert!(chain_store_handle.is_current());
+    let store = chain_store_handle.store_handle().store();
+    store.set_script_history_gc_threshold(7);
+    let mut next_prune_start = None;
+
+    chain_store_handle
+        .prune_block_bodies_if_due(&mut next_prune_start)
+        .await
+        .unwrap();
+
+    assert_eq!(store.script_history_gc_threshold(), 0);
+}
+
+/// A node that is not current never raises the threshold, so a syncing
+/// node never drops script history.
+#[tokio::test]
+async fn test_prune_block_bodies_if_due_keeps_gc_threshold_when_not_current() {
+    let (chain_store_handle, _temp_dir) = setup_test_chain_store_handle(true).await;
+    build_confirmed_test_chain(&chain_store_handle, 4).await;
+    assert!(!chain_store_handle.is_current());
+    let store = chain_store_handle.store_handle().store();
+    store.set_script_history_gc_threshold(7);
+    let mut next_prune_start = None;
+
+    chain_store_handle
+        .prune_block_bodies_if_due(&mut next_prune_start)
+        .await
+        .unwrap();
+
+    assert_eq!(store.script_history_gc_threshold(), 7);
+}
+
 #[tokio::test]
 async fn test_get_confirmed_block_for_txid_returns_block_and_height() {
     let (chain_store_handle, _temp_dir) = setup_test_chain_store_handle(true).await;
@@ -1269,4 +1316,78 @@ async fn test_get_confirmed_block_for_txid_unknown_txid_is_none() {
         .unwrap();
 
     assert_eq!(confirmed, None);
+}
+
+#[tokio::test]
+async fn test_get_script_history_returns_whole_history_from_genesis() {
+    let (chain_store_handle, _temp_dir) = setup_test_chain_store_handle(true).await;
+    let blocks = build_confirmed_test_chain(&chain_store_handle, 2).await;
+    let payout = script_hash(&blocks[1].transactions[0].0.output[0].script_pubkey);
+
+    let history = chain_store_handle
+        .get_script_history(&payout, 0, 10)
+        .unwrap();
+
+    assert_eq!(
+        history,
+        ScriptHistoryPage {
+            entries: vec![
+                ScriptHistoryEntry {
+                    height: 0,
+                    txid: blocks[0].transactions[0].0.compute_txid(),
+                },
+                ScriptHistoryEntry {
+                    height: 1,
+                    txid: blocks[1].transactions[0].0.compute_txid(),
+                },
+                ScriptHistoryEntry {
+                    height: 2,
+                    txid: blocks[2].transactions[0].0.compute_txid(),
+                },
+            ],
+            has_more: false,
+        }
+    );
+}
+
+/// Both the start height and the page size reach the store: the page
+/// starts at height 1, holds one entry, and reports the row after it.
+#[tokio::test]
+async fn test_get_script_history_passes_start_height_and_max_rows() {
+    let (chain_store_handle, _temp_dir) = setup_test_chain_store_handle(true).await;
+    let blocks = build_confirmed_test_chain(&chain_store_handle, 2).await;
+    let payout = script_hash(&blocks[1].transactions[0].0.output[0].script_pubkey);
+
+    let history = chain_store_handle
+        .get_script_history(&payout, 1, 1)
+        .unwrap();
+
+    assert_eq!(
+        history,
+        ScriptHistoryPage {
+            entries: vec![ScriptHistoryEntry {
+                height: 1,
+                txid: blocks[1].transactions[0].0.compute_txid(),
+            }],
+            has_more: true,
+        }
+    );
+}
+
+#[tokio::test]
+async fn test_get_script_history_unknown_scripthash_is_empty() {
+    let (chain_store_handle, _temp_dir) = setup_test_chain_store_handle(true).await;
+    build_confirmed_test_chain(&chain_store_handle, 2).await;
+
+    let history = chain_store_handle
+        .get_script_history(&[9; 32], 0, 10)
+        .unwrap();
+
+    assert_eq!(
+        history,
+        ScriptHistoryPage {
+            entries: Vec::new(),
+            has_more: false,
+        }
+    );
 }

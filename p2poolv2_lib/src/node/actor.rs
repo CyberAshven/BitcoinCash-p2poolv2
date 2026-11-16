@@ -19,7 +19,7 @@ use crate::node::bch_header_feeder::{BchHeaderFeeder, FIRST_SYNC_LIMIT};
 use crate::node::dns_seeds;
 use crate::node::emission_worker::EmissionWorker;
 use crate::node::found_block_verifier::FoundBlockVerifier;
-use crate::node::messages::Message;
+use crate::node::messages::{InventoryMessage, Message};
 use crate::node::organise_worker::{OrganiseWorker, create_organise_channel};
 use crate::node::p2p_health::P2pHealth;
 use crate::node::p2p_message_handlers::receivers::block_receiver::{
@@ -27,6 +27,7 @@ use crate::node::p2p_message_handlers::receivers::block_receiver::{
 };
 use crate::node::p2p_message_handlers::senders::build_getheaders_message;
 use crate::node::p2p_message_handlers::senders::send_share_block_broadcast;
+use crate::node::p2p_message_handlers::senders::share_block::weak_shares_to_prefill;
 use crate::node::payout_tree_executor::{
     PayoutTreeExecutor, PayoutTreeSender, payout_tree_channel,
 };
@@ -52,18 +53,22 @@ use crate::shares::transaction_pool::{
     TransactionSource,
 };
 use crate::shares::validation::{DefaultShareValidator, ShareValidator};
-use crate::shares::weak_pool::{RelayWeakShare, WeakRelayReceiver};
+use crate::shares::weak::{WEAK_CAP, WeakShare};
+use crate::shares::weak_pool::{
+    MAX_POOL_WEAK_SHARES, RelayWeakShare, WeakPool, WeakPoolStats, WeakRelayReceiver, now_millis,
+};
 use crate::stratum::emission::EmissionReceiver;
 use crate::stratum::work::notify::NotifySender;
 use bitcoin::BlockHash;
 use bitcoindrpc::BitcoindRpcClient;
+use libp2p::PeerId;
 use libp2p::futures::StreamExt;
 use libp2p::request_response::ResponseChannel;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::error::Error;
 use std::ops::ControlFlow;
 use std::sync::{Arc, RwLock};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinSet;
 use tracing::{debug, error, info};
@@ -77,6 +82,10 @@ pub struct NodeHandle {
     /// Bitcoin Cash: the share transaction pool the node relays and mines
     /// from. `None` on Bitcoin.
     share_transaction_pool: Option<ShareTransactionPool>,
+    /// Bitcoin Cash P2Pool: the weak pool the node checks, relays and carries
+    /// weak shares from, read for `/metrics`. `None` on Bitcoin and in
+    /// Hydrapool mode.
+    weak_pool: Option<WeakPool>,
 }
 
 /// Why `NodeHandle::submit_share_transaction` did not take a transaction.
@@ -114,6 +123,7 @@ impl NodeHandle {
             Some((pool, relay_rx)) => (Some(pool), Some(relay_rx)),
             None => (None, None),
         };
+        let weak_pool = weak_shares.as_ref().map(|network| network.pool.clone());
         // Mining on the current chain: learn BCHN's headers before dialing
         // peers, so the share bodies they send find their BCH prevs known.
         if config.stratum.chain == Chain::BitcoinCash {
@@ -149,9 +159,18 @@ impl NodeHandle {
             Self {
                 command_tx,
                 share_transaction_pool,
+                weak_pool,
             },
             stopping_rx,
         ))
+    }
+
+    /// Bitcoin Cash P2Pool: what the weak pool has done since the node
+    /// started and how many weak shares it holds. Read under the pool's own
+    /// lock, never through the node actor. `None` on Bitcoin and in Hydrapool
+    /// mode, which keep no weak pool.
+    pub fn weak_pool_stats(&self) -> Option<WeakPoolStats> {
+        self.weak_pool.as_ref().map(WeakPool::stats)
     }
 
     /// Hand a signed share transaction to this node's pool, which checks it
@@ -286,6 +305,7 @@ impl NodeHandle {
         Self {
             command_tx,
             share_transaction_pool: None,
+            weak_pool: None,
         }
     }
 
@@ -296,6 +316,14 @@ impl NodeHandle {
     ) -> Self {
         Self {
             share_transaction_pool: Some(share_transaction_pool),
+            ..Self::new_for_test()
+        }
+    }
+
+    /// A stub NodeHandle, as `new_for_test`, whose weak pool is `weak_pool`.
+    pub fn new_for_test_with_weak_pool(weak_pool: WeakPool) -> Self {
+        Self {
+            weak_pool: Some(weak_pool),
             ..Self::new_for_test()
         }
     }
@@ -323,6 +351,8 @@ impl NodeHandle {
                 address: "/ip4/127.0.0.1/tcp/46884".to_string(),
                 direction: ConnectionDirection::Outbound,
                 connected_secs: 0,
+                version: None,
+                latency_ms: None,
             })
             .collect();
         let (command_tx, mut command_rx) = mpsc::channel::<Command>(32);
@@ -364,6 +394,7 @@ impl NodeHandle {
             Self {
                 command_tx,
                 share_transaction_pool: None,
+                weak_pool: None,
             },
             peer_id_strings,
         )
@@ -387,6 +418,126 @@ mock! {
         fn clone(&self) -> Self {
             Self { command_tx: self.command_tx.clone() }
         }
+    }
+}
+
+/// Peer-sourced weak-share hashes waiting to be announced.
+///
+/// The pool holds at most [`MAX_POOL_WEAK_SHARES`]. Announcing more than
+/// that cannot be served for long, so the oldest hash is dropped. One hash
+/// is queued once.
+const MAX_PENDING_WEAK_ANNOUNCEMENTS: usize = MAX_POOL_WEAK_SHARES;
+
+/// How often pending weak-share hashes are announced.
+///
+/// One inventory carries [`WEAK_CAP`] hashes. At 200ms that is 320 hashes
+/// a second per peer, enough for a chain finding weak shares 256 times as
+/// fast as shares.
+pub(crate) const WEAK_ANNOUNCE_INTERVAL: Duration = Duration::from_millis(200);
+
+struct PendingWeakAnnouncement {
+    hash: BlockHash,
+    source: PeerId,
+}
+
+struct PendingWeakAnnouncements {
+    order: VecDeque<PendingWeakAnnouncement>,
+    queued: HashSet<BlockHash>,
+}
+
+/// What to do with a weak share the pool accepted.
+#[allow(clippy::large_enum_variant)]
+enum WeakShareRelayPlan {
+    /// This node found it. Send the body to every connected peer.
+    Push(WeakShare),
+    /// A peer sent it. The hash is queued for the next inventory.
+    Announce,
+}
+
+impl PendingWeakAnnouncements {
+    fn new() -> Self {
+        Self {
+            order: VecDeque::new(),
+            queued: HashSet::new(),
+        }
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.order.len()
+    }
+
+    #[cfg(test)]
+    fn contains(&self, hash: &BlockHash) -> bool {
+        self.queued.contains(hash)
+    }
+
+    /// Queue `hash` from `source`. A hash already queued is left where it is.
+    /// Past [`MAX_PENDING_WEAK_ANNOUNCEMENTS`], the oldest hash is dropped.
+    /// The share stays in the pool either way.
+    fn enqueue(&mut self, hash: BlockHash, source: PeerId) {
+        if self.queued.contains(&hash) {
+            return;
+        }
+        while self.order.len() >= MAX_PENDING_WEAK_ANNOUNCEMENTS {
+            let Some(oldest) = self.order.pop_front() else {
+                break;
+            };
+            self.queued.remove(&oldest.hash);
+        }
+        self.queued.insert(hash);
+        self.order
+            .push_back(PendingWeakAnnouncement { hash, source });
+    }
+
+    /// Drain at most [`WEAK_CAP`] hashes. For each peer, the hashes that peer
+    /// did not send. An empty list is omitted: that peer already has every
+    /// hash in this batch. Drained hashes are not announced again.
+    fn flush(&mut self, peers: &[PeerId]) -> Vec<(PeerId, Vec<BlockHash>)> {
+        // Nobody is connected, so keep the hashes for a later tick. Draining
+        // them here would drop announcements that a peer joining this
+        // interval could still receive.
+        if peers.is_empty() {
+            return Vec::new();
+        }
+        let mut batch = Vec::new();
+        while batch.len() < WEAK_CAP {
+            let Some(announcement) = self.order.pop_front() else {
+                break;
+            };
+            self.queued.remove(&announcement.hash);
+            batch.push(announcement);
+        }
+        peers
+            .iter()
+            .filter_map(|peer| {
+                let hashes: Vec<BlockHash> = batch
+                    .iter()
+                    .filter(|announcement| announcement.source != *peer)
+                    .map(|announcement| announcement.hash)
+                    .collect();
+                if hashes.is_empty() {
+                    None
+                } else {
+                    Some((*peer, hashes))
+                }
+            })
+            .collect()
+    }
+}
+
+/// A weak share this node found is pushed whole. One a peer sent is queued
+/// by its proof-of-work hash, so the body is not sent again.
+fn plan_weak_share_relay(
+    pending: &mut PendingWeakAnnouncements,
+    relay: RelayWeakShare,
+) -> WeakShareRelayPlan {
+    match relay.source {
+        Some(peer) => {
+            pending.enqueue(relay.weak_share.pow_hash(), peer);
+            WeakShareRelayPlan::Announce
+        }
+        None => WeakShareRelayPlan::Push(relay.weak_share),
     }
 }
 
@@ -423,6 +574,8 @@ struct NodeActor {
     /// Bitcoin Cash P2Pool: weak shares the weak pool accepted, to send to
     /// peers. `None` on Bitcoin, in Hydrapool mode, or once the pool is gone.
     weak_share_relay: Option<WeakRelayReceiver>,
+    /// Peer-sourced weak-share hashes waiting for the next announce.
+    pending_weak_announcements: PendingWeakAnnouncements,
 }
 
 /// The next weak share to relay, or never when there is no relay.
@@ -646,7 +799,8 @@ impl NodeActor {
             block_fetcher_tx_for_receiver,
             validation_tx_for_worker.clone(),
         )
-        .with_depths(ChainDepths::for_chain(chain));
+        .with_depths(ChainDepths::for_chain(chain))
+        .with_relay(node.swarm_tx.clone());
         let block_receiver_id = workers
             .spawn(async move {
                 block_receiver.run().await;
@@ -697,10 +851,12 @@ impl NodeActor {
                 .set_weak_share_sender(network.events_tx);
             let weak_share_worker = WeakShareWorker::new(
                 network.events_rx,
+                network.fetch_rx,
                 network.pool,
                 chain_store_handle.clone(),
                 share_validator.clone(),
                 pplns_window.clone(),
+                node.swarm_tx.clone(),
             );
             let weak_share_worker_id = workers.spawn(weak_share_worker.run()).id();
             worker_names.insert(weak_share_worker_id, "Weak share worker");
@@ -720,6 +876,7 @@ impl NodeActor {
                 last_retry_confirmed_tip: None,
                 share_transaction_relay,
                 weak_share_relay,
+                pending_weak_announcements: PendingWeakAnnouncements::new(),
             },
             stopping_rx,
         ))
@@ -738,6 +895,12 @@ impl NodeActor {
         sync_retry_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         sync_retry_interval.tick().await;
         self.last_retry_confirmed_tip = self.chain_store_handle.get_chain_tip().ok();
+
+        let mut weak_announce_interval = tokio::time::interval(WEAK_ANNOUNCE_INTERVAL);
+        weak_announce_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // The first tick is ready immediately. Consume it so the first
+        // announce waits one interval and a burst can share one inventory.
+        weak_announce_interval.tick().await;
 
         const KADEMLIA_BOOTSTRAP_INTERVAL_SECS: u64 = 300;
         let mut kademlia_bootstrap_interval = tokio::time::interval(
@@ -820,6 +983,9 @@ impl NodeActor {
                         None => self.weak_share_relay = None,
                     }
                 }
+                _ = weak_announce_interval.tick() => {
+                    self.flush_weak_announcements();
+                }
             }
         };
 
@@ -867,21 +1033,49 @@ impl NodeActor {
         debug!("Relayed share transaction {txid} to {relayed} peers");
     }
 
-    /// Send a weak share the weak pool accepted to every connected peer but
-    /// the one it came from, as a `WeakShare` request each answers with `Ack`.
+    /// Send a weak share this node found to every connected peer, as a
+    /// `WeakShare` request each answers with `Ack`. A weak share a peer sent
+    /// is queued by hash and announced on the next interval.
     fn on_relay_weak_share(&mut self, relay: RelayWeakShare) {
-        let pow_hash = relay.weak_share.pow_hash();
+        match plan_weak_share_relay(&mut self.pending_weak_announcements, relay) {
+            WeakShareRelayPlan::Push(weak_share) => self.send_local_weak_share(weak_share),
+            WeakShareRelayPlan::Announce => {}
+        }
+    }
+
+    /// Push a weak share this node found. `source` is absent, so every
+    /// connected peer is told. Same send as a share transaction.
+    fn send_local_weak_share(&mut self, weak_share: WeakShare) {
+        let pow_hash = weak_share.pow_hash();
         let peers = self.node.connected_peers();
         let mut relayed = 0;
-        for peer in peers.iter().filter(|peer| Some(**peer) != relay.source) {
+        for peer in &peers {
             self.node
                 .swarm
                 .behaviour_mut()
                 .request_response
-                .send_request(peer, Message::WeakShare(relay.weak_share.clone()));
+                .send_request(peer, Message::WeakShare(weak_share.clone()));
             relayed += 1;
         }
         debug!("Relayed weak share {pow_hash} to {relayed} peers");
+    }
+
+    /// One inventory per connected peer, of at most [`WEAK_CAP`] hashes, each
+    /// omitting the hash that peer sent. `send_request` is the same call
+    /// `on_relay_transaction` makes.
+    fn flush_weak_announcements(&mut self) {
+        let peers = self.node.connected_peers();
+        let inventories = self.pending_weak_announcements.flush(&peers);
+        for (peer, hashes) in inventories {
+            self.node
+                .swarm
+                .behaviour_mut()
+                .request_response
+                .send_request(
+                    &peer,
+                    Message::Inventory(InventoryMessage::WeakShareHashes(hashes)),
+                );
+        }
     }
 
     /// Execute one outbound swarm operation. All calls are synchronous swarm
@@ -909,17 +1103,24 @@ impl NodeActor {
             }
             SwarmSend::BroadcastBlock(share_block, bch_headers) => {
                 let connected_peers = self.node.connected_peers();
+                let prefill = weak_shares_to_prefill(
+                    &share_block,
+                    self.node.request_response_handler.weak_pool().as_ref(),
+                    now_millis(),
+                );
                 let peer_knowledge = self
                     .node
                     .request_response_handler
                     .peer_block_knowledge_mut();
-                send_share_block_broadcast(
+                let sent = send_share_block_broadcast(
                     share_block,
                     bch_headers,
+                    &prefill,
                     &connected_peers,
                     peer_knowledge,
                     &mut self.node.swarm,
                 );
+                self.node.request_response_handler.record_share_relay(sent);
             }
             SwarmSend::Disconnect(peer_id) => {
                 if self.node.swarm.disconnect_peer_id(peer_id).is_err() {

@@ -56,6 +56,31 @@ pub struct ChainPayoutInputs {
     pub level_pots: Option<Vec<u64>>,
     /// Months to simulate.
     pub months: usize,
+    /// A tracked miner that steers the level draw in the blocks it finds,
+    /// if any.
+    pub steering: Option<Steering>,
+}
+
+/// A tracked miner that picks, of two parents it could build on, the one
+/// whose seed gives it the better level draw (design page, section 4,
+/// "Steering the seed"). It can steer only the draw of a block it finds
+/// itself, since the seed comes from the paying share's parent.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Steering {
+    /// Index of the steering miner among the chain's tracked miners.
+    pub tracked_index: usize,
+    /// Chance a pool block is its own: its hashrate over the chain's.
+    pub own_block_chance: f64,
+    /// Chance it has a second parent to pick from when it finds a block.
+    pub choice_chance: f64,
+}
+
+/// What a steering miner would get from one level draw under the paying
+/// share's parent it was on and under the other parent it could pick.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DrawChoice {
+    baseline: u64,
+    alternative: u64,
 }
 
 /// One tracked miner's simulated payouts.
@@ -71,6 +96,15 @@ pub struct TrackedOutcome {
     pub found_shares: u64,
     /// Credited weak shares during the simulated months.
     pub weak_shares: u64,
+    /// For a steering miner: the satoshis steering is expected to add over
+    /// the run, each block weighted by the chance it is the miner's own and
+    /// it has a choice.
+    pub steering_gain: f64,
+    /// For a steering miner: blocks in which it was in a level draw.
+    pub steering_draws: u64,
+    /// For a steering miner: draws in which the other parent's seed would
+    /// have paid it more.
+    pub steering_alternative_better: u64,
 }
 
 /// Event times with the running total of their weights, for summing a
@@ -232,6 +266,7 @@ pub fn simulate_chain_payouts(
             payments: Vec::with_capacity(64),
             found_shares: entry.shares.count_between(0.0, horizon),
             weak_shares: entry.weak.count_between(0.0, horizon),
+            ..TrackedOutcome::default()
         })
         .collect();
     let blocks = poisson_times(random, inputs.block_rate, 0.0, horizon);
@@ -255,10 +290,19 @@ pub fn simulate_chain_payouts(
                 }
             })
             .collect();
-        let paid = match &inputs.level_pots {
-            Some(pots) => apply_levels(&amounts, &inputs.tracked, pots, random),
-            None => amounts,
+        let (paid, choice) = match &inputs.level_pots {
+            Some(pots) => apply_levels(
+                &amounts,
+                &inputs.tracked,
+                pots,
+                inputs.steering.as_ref(),
+                random,
+            ),
+            None => (amounts, None),
         };
+        if let (Some(steering), Some(choice)) = (&inputs.steering, choice) {
+            record_steering(&mut outcomes[steering.tracked_index], steering, choice);
+        }
         let month = ((block_time / MONTH_SECONDS) as usize).min(inputs.months - 1);
         outcomes
             .iter_mut()
@@ -281,13 +325,19 @@ pub fn simulate_chain_payouts(
 /// running totals, so a tracked miner's outcome is exactly what it would be
 /// among the real payees with the same total in front of it. Each tracked
 /// miner's place in the order (its locking script) is uniform.
+///
+/// With a steering miner in a group, the group is also drawn with a second
+/// seed, the other parent's, and what the miner would get under each is
+/// returned beside the payments, which stay those of the first seed.
 fn apply_levels(
     amounts: &[u64],
     tracked: &[TrackedInputs],
     pots: &[u64],
+    steering: Option<&Steering>,
     random: &mut SimulationRandom,
-) -> Vec<u64> {
+) -> (Vec<u64>, Option<DrawChoice>) {
     let mut paid = amounts.to_vec();
+    let mut choice = None;
     (0..pots.len()).for_each(|level| {
         let threshold = level_amount(level as u32);
         let mut members: Vec<(u64, usize)> = amounts
@@ -313,9 +363,34 @@ fn apply_levels(
             members.iter().enumerate().for_each(|(member, (_, index))| {
                 paid[*index] = winnings[2 * member + 1];
             });
+            let steering_member = steering.and_then(|steering| {
+                members
+                    .iter()
+                    .position(|(_, index)| *index == steering.tracked_index)
+            });
+            if let Some(member) = steering_member {
+                let alternative = draw_level_group(&group, threshold, random.next_u64());
+                choice = Some(DrawChoice {
+                    baseline: winnings[2 * member + 1],
+                    alternative: alternative[2 * member + 1],
+                });
+            }
         }
     });
-    paid
+    (paid, choice)
+}
+
+/// Count one draw of a steering miner: the gain of picking the better of
+/// the two parents, weighted by the chance the block is its own and it had
+/// the choice.
+fn record_steering(outcome: &mut TrackedOutcome, steering: &Steering, choice: DrawChoice) {
+    outcome.steering_draws += 1;
+    if choice.alternative > choice.baseline {
+        outcome.steering_alternative_better += 1;
+        outcome.steering_gain += steering.own_block_chance
+            * steering.choice_chance
+            * (choice.alternative - choice.baseline) as f64;
+    }
 }
 
 #[cfg(test)]

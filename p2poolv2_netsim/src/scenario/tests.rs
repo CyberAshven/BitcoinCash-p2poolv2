@@ -214,3 +214,127 @@ fn a_shuffle_keeps_every_value() {
     values.sort_by(f64::total_cmp);
     assert_eq!(values, vec![1.0, 2.0, 3.0, 4.0, 5.0]);
 }
+
+#[test]
+fn the_default_scenario_forwards_after_validation_names_three_uncles_and_has_no_weak_shares() {
+    let scenario = Scenario::default();
+    let sizes = scenario.share_sizes();
+    let parameters = scenario.parameters(&sizes, &scenario.bchn_load(sizes.coinbase_bytes()));
+    assert_eq!(parameters.max_uncles, 3);
+    assert_eq!(parameters.forwarding, Forwarding::AfterValidation);
+    assert_eq!(parameters.weak_shares, None);
+    assert_eq!(parameters.share_wire_bytes, 36_423);
+}
+
+#[test]
+fn weak_shares_travel_as_framed_800_byte_messages_at_their_rate_per_share() {
+    let scenario = Scenario {
+        weak_shares_per_share: 32,
+        ..Scenario::default()
+    };
+    let sizes = scenario.share_sizes();
+    let parameters = scenario.parameters(&sizes, &scenario.bchn_load(sizes.coinbase_bytes()));
+    // 800 bytes, 64 of framing and one 40-byte TCP/IP header.
+    assert_eq!(
+        parameters.weak_shares,
+        Some(WeakShareLoad {
+            per_share: 32.0,
+            wire_bytes: 904,
+        })
+    );
+}
+
+#[test]
+fn gossiped_weak_shares_leave_the_share_as_it_was() {
+    let scenario = Scenario {
+        weak_shares_per_share: 64,
+        weak_share_carriage: WeakShareCarriage::GossipOnly,
+        ..Scenario::default()
+    };
+    let sizes = scenario.share_sizes();
+    let parameters = scenario.parameters(&sizes, &scenario.bchn_load(sizes.coinbase_bytes()));
+    assert_eq!(parameters.share_wire_bytes, 36_423);
+}
+
+#[test]
+fn weak_shares_carried_whole_add_their_payload_to_every_share() {
+    let scenario = Scenario {
+        weak_shares_per_share: 64,
+        weak_share_carriage: WeakShareCarriage::Whole,
+        ..Scenario::default()
+    };
+    let sizes = scenario.share_sizes();
+    let parameters = scenario.parameters(&sizes, &scenario.bchn_load(sizes.coinbase_bytes()));
+    let payload = sizes.message_payload_bytes(0) + 64 * 800;
+    assert_eq!(parameters.share_wire_bytes, wire_bytes(payload));
+    // The weak shares are checked when they arrive by gossip, so carrying
+    // them adds no validation time.
+    let gossiped = Scenario {
+        weak_share_carriage: WeakShareCarriage::GossipOnly,
+        ..scenario
+    };
+    let gossiped_parameters =
+        gossiped.parameters(&sizes, &gossiped.bchn_load(sizes.coinbase_bytes()));
+    assert_eq!(
+        parameters.validation_seconds,
+        gossiped_parameters.validation_seconds
+    );
+}
+
+#[test]
+fn shares_without_payouts_carry_whole_weak_shares_too() {
+    let scenario = Scenario {
+        relay: ShareRelay::WithoutPayouts,
+        weak_shares_per_share: 16,
+        weak_share_carriage: WeakShareCarriage::Whole,
+        ..Scenario::default()
+    };
+    let sizes = scenario.share_sizes();
+    let parameters = scenario.parameters(&sizes, &scenario.bchn_load(sizes.coinbase_bytes()));
+    let payload = sizes.message_payload_bytes_without_payouts(0) + 16 * 800;
+    assert_eq!(parameters.share_wire_bytes, wire_bytes(payload));
+}
+
+#[test]
+fn the_scenario_passes_its_uncle_cap_and_forwarding_to_the_engine() {
+    let scenario = Scenario {
+        max_uncles: 12,
+        forwarding: Forwarding::AfterHeaderCheck {
+            header_check_seconds: 0.002,
+        },
+        ..Scenario::default()
+    };
+    let sizes = scenario.share_sizes();
+    let parameters = scenario.parameters(&sizes, &scenario.bchn_load(sizes.coinbase_bytes()));
+    assert_eq!(parameters.max_uncles, 12);
+    assert_eq!(
+        parameters.forwarding,
+        Forwarding::AfterHeaderCheck {
+            header_check_seconds: 0.002,
+        }
+    );
+}
+
+#[test]
+fn a_header_check_taking_negative_time_is_refused() {
+    let scenario = Scenario {
+        forwarding: Forwarding::AfterHeaderCheck {
+            header_check_seconds: -0.001,
+        },
+        ..Scenario::default()
+    };
+    assert!(scenario.validate().is_err());
+}
+
+#[test]
+fn weak_share_carriage_parses_its_two_names() {
+    assert_eq!(
+        WeakShareCarriage::parse("gossip-only"),
+        Ok(WeakShareCarriage::GossipOnly)
+    );
+    assert_eq!(
+        WeakShareCarriage::parse("whole"),
+        Ok(WeakShareCarriage::Whole)
+    );
+    assert!(WeakShareCarriage::parse("hashes").is_err());
+}

@@ -71,3 +71,37 @@ fn parallel_runs_match_runs_one_by_one() {
     let sequential: Vec<Report> = scenarios.iter().map(Scenario::run).collect();
     assert_eq!(parallel, sequential);
 }
+
+#[test]
+fn scaling_sweeps_parse_by_name_and_stay_out_of_all() {
+    assert_eq!(
+        Sweep::parse("scaling-combined"),
+        Ok(Sweep::Scaling(Idea::Combined))
+    );
+    assert!(Sweep::Scaling(Idea::Today).is_scaling());
+    assert!(!Sweep::Nodes.is_scaling());
+    assert!(!Sweep::ALL.iter().any(Sweep::is_scaling));
+    assert!(Sweep::SCALING.iter().all(Sweep::is_scaling));
+}
+
+#[test]
+fn the_weak_share_sweep_runs_six_variants_on_the_grid() {
+    let scenarios = Sweep::Scaling(Idea::WeakShares).scenarios(&Scenario::default());
+    assert_eq!(scenarios.len(), 48);
+    assert_eq!(
+        scenarios[47].label,
+        "64 weak shares a share, carried whole, 1,000 nodes, 1 s shares"
+    );
+}
+
+#[test]
+fn parallel_map_returns_results_in_item_order_on_any_thread_count() {
+    let items: Vec<u64> = (1..=20).collect();
+    let one = parallel_map(&items, 1, |item| item * 3);
+    let many = parallel_map(&items, 7, |item| item * 3);
+    let none = parallel_map(&items, 0, |item| item * 3);
+    let expected: Vec<u64> = (1..=20).map(|item| item * 3).collect();
+    assert_eq!(one, expected);
+    assert_eq!(many, expected);
+    assert_eq!(none, expected);
+}

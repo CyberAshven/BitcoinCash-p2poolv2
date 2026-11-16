@@ -378,4 +378,6 @@ pub fn direct_payee_count(output_bytes: &[usize], coinbase_limit: usize) -> usiz
 }
 
 #[cfg(test)]
+mod scale_tests;
+#[cfg(test)]
 mod tests;

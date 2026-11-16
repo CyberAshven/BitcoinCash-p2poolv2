@@ -7,7 +7,7 @@ use crate::api::server::AppState;
 use axum::{Json, extract::State};
 use p2poolv2_lib::address::bch_share::BchShareNetwork;
 use p2poolv2_lib::address_display::payout_address_string;
-use p2poolv2_lib::store::found_block::FoundBlock;
+use p2poolv2_lib::store::found_block::{EffortSnapshot, FoundBlock};
 use serde::Serialize;
 use std::sync::Arc;
 
@@ -19,6 +19,10 @@ pub struct FoundBlockResponse {
     pub share_blockhash: String,
     pub bitcoin_time: u32,
     pub miner_bitcoin_address: String,
+    /// The work since the previous find over the network difficulty of the
+    /// header that claimed this block, kept when it was accepted. Blocks
+    /// accepted before snapshots were kept have no effort.
+    pub effort: Option<EffortSnapshot>,
 }
 
 impl FoundBlockResponse {
@@ -37,6 +41,7 @@ impl FoundBlockResponse {
                 Ok(address) => payout_address_string(&address, cash_network),
                 Err(_) => block.miner_bitcoin_address.clone(),
             },
+            effort: block.effort,
         }
     }
 }

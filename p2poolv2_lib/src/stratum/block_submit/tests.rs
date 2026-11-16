@@ -205,7 +205,9 @@ async fn the_primary_node_result_is_counted() {
             share_blockhash: block.block_hash(),
             bitcoin_time: block.header.time,
             miner_bitcoin_address: "miner".to_string(),
+            effort: None,
         },
+        network_difficulty: Some(450_000.0),
     };
     metrics.record_confirmed_share(12.0).await.unwrap();
 
@@ -214,16 +216,29 @@ async fn the_primary_node_result_is_counted() {
 
     assert_eq!(result, BlockSubmission::Accepted);
     acceptance.record(&result, &metrics).await;
-    assert_eq!(
-        acceptance.store.get_found_blocks().unwrap(),
-        vec![acceptance.found.clone()]
-    );
+    // The acceptance carries the effort it reset: the work since the
+    // previous find over the difficulty of the header that claimed it.
+    let mut expected = acceptance.found.clone();
+    expected.effort = Some(EffortSnapshot {
+        work: 12.0,
+        network_difficulty: Some(450_000.0),
+    });
+    assert_eq!(acceptance.store.get_found_blocks().unwrap(), vec![expected]);
     assert_eq!(metrics.get_metrics().await.work_since_last_block, 0.0);
     metrics.record_confirmed_share(7.0).await.unwrap();
     acceptance
         .record(&BlockSubmission::Duplicate, &metrics)
         .await;
+    // A duplicate verdict neither resets the counter again nor rewrites
+    // the snapshot.
     assert_eq!(metrics.get_metrics().await.work_since_last_block, 7.0);
+    assert_eq!(
+        acceptance.store.get_found_blocks().unwrap()[0].effort,
+        Some(EffortSnapshot {
+            work: 12.0,
+            network_difficulty: Some(450_000.0),
+        })
+    );
     let counted = metrics.get_metrics().await;
     assert_eq!(
         counted
@@ -245,7 +260,9 @@ async fn inconclusive_and_rejected_submissions_do_not_record_finds_or_reset_effo
             share_blockhash: block.block_hash(),
             bitcoin_time: block.header.time,
             miner_bitcoin_address: "miner".to_string(),
+            effort: None,
         },
+        network_difficulty: None,
     };
     let metrics = spawn_test_metrics_handle();
     metrics.record_confirmed_share(9.0).await.unwrap();

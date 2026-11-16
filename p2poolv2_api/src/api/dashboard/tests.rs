@@ -44,7 +44,7 @@ async fn build_state(
         metrics_handle,
         tracker_handle: start_tracker_actor(),
         node_handle: NodeHandle::new_for_test(),
-        monitoring_event_sender: create_monitoring_event_channel().0,
+        monitoring_event_sender: create_monitoring_event_channel(),
         auth_user,
         auth_token,
         pplns_window: None,
@@ -73,10 +73,10 @@ async fn confirm_share(state: &AppState, share: &p2poolv2_lib::shares::share_blo
 
 fn recent_share_row_heights(body: &str) -> Vec<u32> {
     let table = body
-        .split_once("<h2>Recent shares")
+        .split_once("<h2>Shares")
         .and_then(|(_, rest)| rest.split_once("</table>"))
         .map(|(table, _)| table)
-        .expect("overview has a Recent shares table");
+        .expect("overview has a Shares table");
     table
         .split("<tr")
         .skip(1)
@@ -151,6 +151,9 @@ async fn the_overview_is_html_without_script() {
     assert!(body.starts_with("<!DOCTYPE html>"));
     assert!(body.contains("Bitcoin Cash chipnet"));
     assert!(body.contains("Share chain height"));
+    // The Blocks found tile carries the effort note (a dash here: no
+    // template has been built yet, so there is no difficulty to divide by).
+    assert!(body.contains("Effort —"));
     assert!(!body.contains("<script"));
 }
 
@@ -544,6 +547,7 @@ fn a_miner_row_serializes_as_the_wasm_app_reads_it() {
         best_share: 5,
         last_share_at: 9,
         payout_fraction: None,
+        hashrate: None,
     };
     assert_eq!(
         serde_json::to_value(&row).unwrap(),
@@ -559,7 +563,8 @@ fn a_miner_row_serializes_as_the_wasm_app_reads_it() {
             "accepted_work": 10,
             "best_share": 5,
             "last_share_at": 9,
-            "payout_fraction": null
+            "payout_fraction": null,
+            "hashrate": null
         })
     );
 }
@@ -582,6 +587,7 @@ fn online_counts_count_active_workers() {
         best_share: 1,
         last_share_at: 1,
         payout_fraction: None,
+        hashrate: None,
     };
     let miners = [miner(&[true, false, true]), miner(&[false]), miner(&[])];
     assert_eq!(online_counts(&miners), (1, 2));
@@ -596,6 +602,7 @@ fn a_looked_up_miner_matches_either_spelling() {
         best_share: 0,
         last_share_at: 0,
         payout_fraction: None,
+        hashrate: None,
     };
     assert!(is_looked_up_miner(&miner, "qpayout", None));
     assert!(is_looked_up_miner(
@@ -693,3 +700,30 @@ async fn the_series_toggles_read_their_query_parameters() {
     assert!(body.contains("/dashboard?range=24h\">"));
     assert!(body.contains("/dashboard?range=24h&amp;pool=0&amp;node=0\""));
 }
+
+/// The genesis share has no parent, so its page links to none: the all-zero
+/// hash a genesis header carries is no share, and a link to it is a dead one.
+#[tokio::test]
+async fn the_genesis_share_page_links_to_no_parent() {
+    let (state, _store, _metrics) = build_state(None, None).await;
+    let genesis_block = genesis_for_tests();
+    state
+        .chain_store_handle
+        .init_or_setup_genesis(genesis_block.clone())
+        .await
+        .unwrap();
+
+    let (status, body, _) = get(
+        &state,
+        &format!("/dashboard/share/{}", genesis_block.block_hash()),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        !body.contains(&format!("/dashboard/share/{}", "0".repeat(64))),
+        "the genesis share page links to no parent: {body}"
+    );
+}
+
+mod browser;

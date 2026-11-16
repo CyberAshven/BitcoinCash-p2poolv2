@@ -30,6 +30,7 @@ use crate::seeded::SeededSequence;
 use crate::sim::RunDir;
 use crate::sim::addresses::{DEFAULT_MINER_ADDRESS, check_payout_address, share_address};
 use crate::sim::bitcoind::{Bitcoind, CallOutcome, RpcSettings, WALLET};
+use p2poolv2_config::{MAX_PAYOUT_LEVEL, MIN_PAYOUT_LEVEL, payout_level_below_minimum};
 use serde_json::Value;
 use std::fmt::Write as _;
 use std::fs::File;
@@ -79,29 +80,53 @@ pub struct SwarmSettings {
     /// order, comma separated, such as `5,7,7`. A node past the list keeps
     /// the node's default level.
     pub payout_levels: Vec<u8>,
+    /// `WEAK_SHARES=1`: every node's miners send weak shares (`[sim]
+    /// weak_shares`).
+    pub weak_shares: bool,
+    /// `VIRTUAL_MINERS`: miners each node models (`[sim] virtual_miners`), so
+    /// a small swarm has many payees.
+    pub virtual_miners: Option<u32>,
+    /// `MERGE_TOKENS`: a token file every node merge-mines (`[stratum]
+    /// merge_mining_tokens`), which makes every share a token share.
+    pub merge_tokens: Option<String>,
+    /// `LOG_LEVEL`: the nodes' log level, `debug` unless set. A long run
+    /// with weak shares writes gigabytes at `debug`.
+    pub log_level: String,
 }
 
-/// The levels of a `PAYOUT_LEVELS` value: comma-separated levels from 0 to
-/// 7, empty for none.
+/// The levels of a `PAYOUT_LEVELS` value: comma-separated levels from
+/// [`MIN_PAYOUT_LEVEL`] to [`MAX_PAYOUT_LEVEL`], empty for none.
 pub fn parse_payout_levels(value: &str) -> ToolResult<Vec<u8>> {
     if value.trim().is_empty() {
         return Ok(Vec::new());
     }
     value
         .split(',')
-        .map(|level| {
-            level
-                .trim()
-                .parse::<u8>()
-                .ok()
-                .filter(|level| *level <= 7)
-                .ok_or_else(|| {
-                    ToolError::message(format!(
-                        "PAYOUT_LEVELS={value:?}: {level:?} is not a payout level from 0 to 7"
-                    ))
-                })
-        })
+        .map(|token| parse_one_payout_level(value, token.trim()))
         .collect()
+}
+
+/// One `PAYOUT_LEVELS` token, or why it is not a Bitcoin Cash payout level.
+fn parse_one_payout_level(value: &str, token: &str) -> ToolResult<u8> {
+    let level: u8 = token.parse().map_err(|_| {
+        ToolError::message(format!(
+            "PAYOUT_LEVELS={value:?}: {token:?} is not a payout level from \
+             {MIN_PAYOUT_LEVEL} to {MAX_PAYOUT_LEVEL}"
+        ))
+    })?;
+    if level < MIN_PAYOUT_LEVEL {
+        return Err(ToolError::message(format!(
+            "PAYOUT_LEVELS={value:?}: {}",
+            payout_level_below_minimum(level)
+        )));
+    }
+    if level > MAX_PAYOUT_LEVEL {
+        return Err(ToolError::message(format!(
+            "PAYOUT_LEVELS={value:?}: {token:?} is not a payout level from \
+             {MIN_PAYOUT_LEVEL} to {MAX_PAYOUT_LEVEL}"
+        )));
+    }
+    Ok(level)
 }
 
 impl SwarmSettings {
@@ -136,6 +161,10 @@ impl SwarmSettings {
             dial_fanout: env_vars::parsed("DIAL_FANOUT", 3)?,
             profile: env_vars::string("PROFILE", "release"),
             payout_levels: parse_payout_levels(&env_vars::string("PAYOUT_LEVELS", ""))?,
+            weak_shares: env_vars::string("WEAK_SHARES", "0") == "1",
+            virtual_miners: env_vars::optional("VIRTUAL_MINERS")?,
+            merge_tokens: env_vars::optional_string("MERGE_TOKENS"),
+            log_level: env_vars::string("LOG_LEVEL", "debug"),
         })
     }
 
@@ -289,9 +318,9 @@ chain = "bitcoin-cash"
 bitcoin_cash_network = "regtest"
 # Required, but Bitcoin Cash derives it from bitcoin_cash_network.
 network = "regtest"
-version_mask = "1fffffe0"
+version_mask = "1fffe000"
 pool_signature = "{prefix}{index}"
-{payout_level}
+{payout_level}{merge_tokens}
 [bitcoinrpc]
 url = "{rpc_url}"
 username = "{rpc_user}"
@@ -299,7 +328,7 @@ password = "{rpc_password}"
 
 [logging]
 console = true
-level = "debug"
+level = "{log_level}"
 stats_dir = "{run_dir}/stats-{index}"
 
 [api]
@@ -317,7 +346,7 @@ propagation_delay_ms = {latency}
 asert_anchor_time = {anchor}
 network_hashrate = {network_hashrate}
 ideal_block_time_secs = {block_time}
-"#,
+{sim_options}"#,
         // `dial` is already a TOML fragment (`"/ip4/..."`), not one string.
         dial = dial_peers(settings, index),
         miner = toml_basic_string(&settings.miner_address),
@@ -339,8 +368,30 @@ ideal_block_time_secs = {block_time}
             .get(index)
             .map(|level| format!("payout_level = {level}\n"))
             .unwrap_or_default(),
+        merge_tokens = settings
+            .merge_tokens
+            .as_ref()
+            .map(|path| format!("merge_mining_tokens = \"{}\"\n", toml_basic_string(path)))
+            .unwrap_or_default(),
+        log_level = toml_basic_string(&settings.log_level),
+        sim_options = sim_options(settings),
     );
     config
+}
+
+/// The `[sim]` lines of the swarm's optional settings: weak shares and the
+/// miners each node models.
+fn sim_options(settings: &SwarmSettings) -> String {
+    let weak_shares = if settings.weak_shares {
+        "weak_shares = true\n"
+    } else {
+        ""
+    };
+    let virtual_miners = settings
+        .virtual_miners
+        .map(|count| format!("virtual_miners = {count}\n"))
+        .unwrap_or_default();
+    format!("{weak_shares}{virtual_miners}")
 }
 
 /// The longest pool signature, the highest node's, must fit the config's

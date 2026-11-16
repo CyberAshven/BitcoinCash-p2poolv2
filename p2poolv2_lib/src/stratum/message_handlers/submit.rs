@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 use crate::accounting::payout::simple_pplns::SimplePplnsShare;
+use crate::accounting::stats::metrics::WeakShareCarrier;
 use crate::config::PoolMode;
 use crate::node::weak_share_worker::WeakShareEvent;
 use crate::shares::coinbase_proof::CoinbaseProof;
@@ -447,7 +448,9 @@ fn found_block_acceptance(
             share_blockhash: share_header.block_hash(),
             bitcoin_time: header.time,
             miner_bitcoin_address: share_header.miner_bitcoin_address.to_string(),
+            effort: None,
         },
+        network_difficulty: Some(share_header.bitcoin_network_difficulty()),
     })
 }
 
@@ -615,6 +618,12 @@ async fn emit_share_chain_share(
         })
         .await
         .map_err(|e| Error::SubmitFailure(format!("Failed to send share to store: {e}")))?;
+    if !job.weak_shares.is_empty() {
+        let _ = stratum_context
+            .metrics
+            .record_weak_shares_carried(WeakShareCarrier::ThisNode, job.weak_shares.len() as u64)
+            .await;
+    }
     Ok(true)
 }
 

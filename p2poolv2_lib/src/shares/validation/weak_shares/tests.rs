@@ -8,13 +8,17 @@ use crate::accounting::payout::sharechain_pplns::pplns_window::MockPplnsWindow;
 use crate::pool_difficulty::{AsertParent, MockPoolDifficulty};
 use crate::shares::chain::chain_store_handle::MockChainStoreHandle;
 use crate::shares::validation::FailureKind;
-use crate::shares::weak::{GENESIS_WEAK_RATIO, WeakSummary, next_weak_ratio};
+use crate::shares::weak::{GENESIS_WEAK_RATIO, WEAK_DEPTH, WeakSummary, next_weak_ratio};
 use crate::store::block_tx_metadata::{BlockMetadata, ChainMembership, Status};
-use crate::test_utils::{TestShareBlockBuilder, TestWeakShare, build_test_weak_share};
+use crate::test_utils::{
+    TestShareBlockBuilder, TestWeakShare, build_test_weak_share, build_test_weak_share_paying,
+};
+use crate::utils::time_provider::TestTimeProvider;
 use bitcoin::hashes::Hash;
 use bitcoin::{Address, CompactTarget, Network, PubkeyHash, Work};
 use p2poolv2_wallet::payout_address::PayoutAddress;
 use p2poolv2_wallet::share_owner::ShareOwner;
+use std::time::{Duration, UNIX_EPOCH};
 
 //* Validity tests. A weak share is mined at `HARD`, a target its hash
 //* misses, on a parent whose minimum is `EASY`, the validator's ceiling and
@@ -97,6 +101,26 @@ fn a_body_repeating_a_weak_share_is_refused_before_the_root() {
     assert!(error.message.contains("more than once"), "{error}");
 }
 
+/// One proof of work carried twice under two encodings, the second with
+/// another coinbase value: the leaves differ, and the header commits the
+/// root over both, but the repeat check compares proof-of-work hashes and
+/// refuses it.
+#[test]
+fn a_body_carrying_one_proof_of_work_under_two_encodings_is_a_repeat() {
+    let first = body_weak_share(1);
+    let mut second = body_weak_share(1);
+    second.coinbase_value += 1;
+    assert_ne!(first.committed_hash(), second.committed_hash());
+    let share = TestShareBlockBuilder::new()
+        .share_owner(ShareOwner::CashP2pkh([0x22; 20]))
+        .weak_shares(vec![first, second])
+        .build();
+
+    let error = check_weak_shares_match_header(&share).unwrap_err();
+    assert_eq!(error.kind, FailureKind::Consensus);
+    assert!(error.message.contains("more than once"), "{error}");
+}
+
 /// Weak shares under the cap in count but past `WEAK_BYTES` in size are
 /// refused. A branch longer than a decoded one may be makes each large.
 #[test]
@@ -119,8 +143,9 @@ fn more_weak_shares_than_the_cap_are_refused() {
     assert!(error.message.contains("more than 64"), "{error}");
 }
 
-#[test]
-fn a_weak_share_on_a_job_at_the_minimum_passes_the_header_rules() {
+/// A weak share that passes the header rules, the store that answers for its
+/// parent, and the difficulty its validator needs.
+fn header_rule_fixture() -> (WeakShare, MockChainStoreHandle, MockPoolDifficulty) {
     let parent = TestShareBlockBuilder::new()
         .share_owner(ShareOwner::CashP2pkh([0x11; 20]))
         .bits(CompactTarget::from_consensus(EASY))
@@ -161,6 +186,19 @@ fn a_weak_share_on_a_job_at_the_minimum_passes_the_header_rules() {
             chain: ChainMembership::Confirmed,
         })
     });
+    (weak_share, store, pool_difficulty)
+}
+
+/// A clock a day behind [`WEAK_TIME`]: the fixture's weak share is far past
+/// the future limit of a node that reads it.
+fn a_day_behind() -> Arc<TestTimeProvider> {
+    let now = UNIX_EPOCH + Duration::from_secs(u64::from(WEAK_TIME) - 86_400);
+    Arc::new(TestTimeProvider::new(now))
+}
+
+#[test]
+fn a_weak_share_on_a_job_at_the_minimum_passes_the_header_rules() {
+    let (weak_share, store, pool_difficulty) = header_rule_fixture();
     let validator = DefaultShareValidator::new(pool_difficulty)
         .for_chain(Chain::BitcoinCash)
         .with_target_ceiling(CompactTarget::from_consensus(EASY));
@@ -168,6 +206,82 @@ fn a_weak_share_on_a_job_at_the_minimum_passes_the_header_rules() {
     let result = validator.validate_weak_share_header(&weak_share, &store);
 
     assert!(result.is_ok(), "{}", result.unwrap_err());
+}
+
+/// The header rules do not read the clock, so a carried weak share gets the
+/// same verdict on every node: a validator a day behind the weak share's
+/// time still passes it.
+#[test]
+fn the_header_rules_of_a_weak_share_do_not_depend_on_the_clock() {
+    let (weak_share, store, pool_difficulty) = header_rule_fixture();
+    let validator = DefaultShareValidator::with_time_provider(pool_difficulty, a_day_behind())
+        .for_chain(Chain::BitcoinCash)
+        .with_target_ceiling(CompactTarget::from_consensus(EASY));
+
+    let result = validator.validate_weak_share_header(&weak_share, &store);
+
+    assert!(result.is_ok(), "{}", result.unwrap_err());
+}
+
+/// A relayed weak share ahead of this node's clock is early, not invalid: the
+/// failure is `Recoverable`, so the worker holds it and checks it again.
+#[test]
+fn a_relayed_weak_share_ahead_of_the_clock_is_held_not_refused() {
+    let (weak_share, store, pool_difficulty) = header_rule_fixture();
+    let validator = DefaultShareValidator::with_time_provider(pool_difficulty, a_day_behind())
+        .for_chain(Chain::BitcoinCash)
+        .with_target_ceiling(CompactTarget::from_consensus(EASY));
+
+    let error = validator
+        .validate_relayed_weak_share(
+            &weak_share,
+            &store,
+            &RwLock::new(MockPplnsWindow::default()),
+            &mut WeakPayoutCache::new(),
+        )
+        .unwrap_err();
+
+    assert_eq!(error.kind(), FailureKind::Recoverable, "{error}");
+}
+
+/// A carried weak share is held to its carrier's time: two numbers every
+/// node reads the same. Two minutes after the carrier is the limit.
+#[test]
+fn a_carried_weak_share_may_be_two_minutes_after_its_carrier() {
+    let carrier_time = WEAK_TIME;
+
+    assert!(
+        check_carried_weak_time(carrier_time + 120, carrier_time).is_ok(),
+        "120 seconds after its carrier"
+    );
+    assert!(
+        check_carried_weak_time(carrier_time - 600, carrier_time).is_ok(),
+        "ten minutes before its carrier"
+    );
+    let error = check_carried_weak_time(carrier_time + 121, carrier_time).unwrap_err();
+    assert_eq!(
+        error.kind(),
+        FailureKind::Consensus,
+        "121 seconds after its carrier: {error}"
+    );
+}
+
+/// The clock's limit for a relayed weak share is the same two minutes, and
+/// passing it is never a verdict.
+#[test]
+fn a_relayed_weak_share_may_be_two_minutes_ahead_of_the_clock() {
+    let now = u64::from(WEAK_TIME);
+
+    assert!(
+        check_relayed_weak_time(WEAK_TIME + 120, now).is_ok(),
+        "120 seconds ahead of the clock"
+    );
+    let error = check_relayed_weak_time(WEAK_TIME + 121, now).unwrap_err();
+    assert_eq!(
+        error.kind(),
+        FailureKind::Recoverable,
+        "121 seconds ahead of the clock: {error}"
+    );
 }
 
 /// A hash that meets its own share target is a full share and must travel
@@ -409,6 +523,104 @@ fn weak_shares_on_one_template_share_one_window_walk() {
     assert!(second_result.is_ok(), "{}", second_result.unwrap_err());
 }
 
+/// 64 weak shares on 64 templates of one Bitcoin Cash block, each paying
+/// another coinbase value, share one walk of the window: the weights depend
+/// on the parent and the block, not on the value. Each one's payouts are
+/// still built for its own value, so its rebuilt coinbase matches the one it
+/// was mined on and every one passes.
+#[test]
+fn weak_shares_on_many_templates_of_one_block_share_one_window_walk() {
+    let payee = PayoutAddress::from(Address::p2pkh(
+        PubkeyHash::from_byte_array([0x55; 20]),
+        Network::Regtest,
+    ));
+    let distribution = HashMap::from([(payee, 1_000u128)]);
+    let mut window = MockPplnsWindow::default();
+    window.expect_network().return_const(Network::Regtest);
+    let walked = distribution.clone();
+    window
+        .expect_get_weights_from_start_hash()
+        .times(1)
+        .returning(move |_, _, _| Ok(PplnsWeights::without_levels(walked.clone())));
+    let validator =
+        DefaultShareValidator::new(MockPoolDifficulty::default()).for_chain(Chain::BitcoinCash);
+    let mut cache = WeakPayoutCache::new();
+
+    let passed = (0..64u32)
+        .filter(|template| {
+            let weak_share = build_test_weak_share_paying(
+                TestWeakShare {
+                    parent_hash: BlockHash::from_byte_array([0x66; 32]),
+                    bits: CompactTarget::from_consensus(HARD),
+                    minimum: CompactTarget::from_consensus(HARD),
+                    weak_ratio: GENESIS_WEAK_RATIO,
+                    distribution: &distribution,
+                    time: WEAK_TIME,
+                    nonce: *template,
+                },
+                5_000_000_000 + u64::from(*template),
+            );
+            validator
+                .validate_weak_share_coinbase(
+                    &weak_share,
+                    &MockChainStoreHandle::default(),
+                    &mut window,
+                    &mut cache,
+                )
+                .is_ok()
+        })
+        .count();
+
+    assert_eq!(passed, 64);
+}
+
+/// The cached weights are those of the weak share's own block: one paying
+/// another Bitcoin Cash block walks the window again.
+#[test]
+fn a_weak_share_paying_another_block_walks_the_window_again() {
+    let payee = PayoutAddress::from(Address::p2pkh(
+        PubkeyHash::from_byte_array([0x55; 20]),
+        Network::Regtest,
+    ));
+    let distribution = HashMap::from([(payee, 1_000u128)]);
+    let first = build_test_weak_share(TestWeakShare {
+        parent_hash: BlockHash::from_byte_array([0x66; 32]),
+        bits: CompactTarget::from_consensus(HARD),
+        minimum: CompactTarget::from_consensus(HARD),
+        weak_ratio: GENESIS_WEAK_RATIO,
+        distribution: &distribution,
+        time: WEAK_TIME,
+        nonce: 1,
+    });
+    let mut second = first.clone();
+    second.header.bitcoin_header.prev_blockhash = BlockHash::from_byte_array([0x77; 32]);
+    let mut window = MockPplnsWindow::default();
+    window.expect_network().return_const(Network::Regtest);
+    let walked = distribution.clone();
+    window
+        .expect_get_weights_from_start_hash()
+        .times(2)
+        .returning(move |_, _, _| Ok(PplnsWeights::without_levels(walked.clone())));
+    let validator =
+        DefaultShareValidator::new(MockPoolDifficulty::default()).for_chain(Chain::BitcoinCash);
+    let mut cache = WeakPayoutCache::new();
+
+    let first_result = validator.validate_weak_share_coinbase(
+        &first,
+        &MockChainStoreHandle::default(),
+        &mut window,
+        &mut cache,
+    );
+    let _ = validator.validate_weak_share_coinbase(
+        &second,
+        &MockChainStoreHandle::default(),
+        &mut window,
+        &mut cache,
+    );
+
+    assert!(first_result.is_ok(), "{}", first_result.unwrap_err());
+}
+
 /// A coinbase paying someone other than the window anchored at the weak
 /// share's parent rebuilds to another txid and another merkle root.
 #[test]
@@ -498,6 +710,47 @@ fn a_weak_share_whose_branch_does_not_reach_its_merkle_root_is_refused() {
     assert!(error.message.contains("merkle root"), "{error}");
 }
 
+/// A full cache drops its oldest walk and keeps the rest. Starting over
+/// instead let a peer cycle one key more than the cache holds and make every
+/// weak share it sent again walk the window again.
+#[test]
+fn a_full_cache_drops_only_its_oldest_walk() {
+    let key = |bits: u32| WeakWeightsKey {
+        parent: BlockHash::from_byte_array([1; 32]),
+        bitcoin_bits: bits,
+        bch_prev: BlockHash::all_zeros(),
+    };
+    let walks = std::cell::Cell::new(0usize);
+    let walk = || -> Result<PplnsWeights, ValidationError> {
+        walks.set(walks.get() + 1);
+        Ok(PplnsWeights::without_levels(HashMap::new()))
+    };
+    let mut cache = WeakPayoutCache::new();
+    for bits in 0..=WEAK_WEIGHTS_CACHE_CAPACITY as u32 {
+        cache.weights_or_walk(key(bits), walk).unwrap();
+    }
+    assert_eq!(
+        walks.get(),
+        WEAK_WEIGHTS_CACHE_CAPACITY + 1,
+        "one walk a key"
+    );
+
+    cache.weights_or_walk(key(1), walk).unwrap();
+    assert_eq!(
+        walks.get(),
+        WEAK_WEIGHTS_CACHE_CAPACITY + 1,
+        "the second oldest walk is still cached"
+    );
+    cache.weights_or_walk(key(0), walk).unwrap();
+    assert_eq!(
+        walks.get(),
+        WEAK_WEIGHTS_CACHE_CAPACITY + 2,
+        "the oldest walk was dropped"
+    );
+}
+
+/// The carrier is at height 101, the weak share's parent at 53: exactly
+/// `WEAK_DEPTH` shares below, the deepest a carried weak share may be.
 #[test]
 fn a_weak_share_carried_once_within_its_depth_is_placed() {
     let carrier_parent = BlockHash::from_byte_array([0x01; 32]);
@@ -535,8 +788,8 @@ fn a_weak_share_carried_once_within_its_depth_is_placed() {
             chain: ChainMembership::Confirmed,
         };
         Ok(vec![
-            (carrier_parent, metadata(10)),
-            (weak_parent, metadata(5)),
+            (carrier_parent, metadata(100)),
+            (weak_parent, metadata(101 - WEAK_DEPTH)),
         ])
     });
     store
@@ -550,8 +803,8 @@ fn a_weak_share_carried_once_within_its_depth_is_placed() {
     assert!(result.is_ok(), "{}", result.unwrap_err());
 }
 
-/// The carrier is at height 11, the weak share's parent at 4: seven shares
-/// below, one more than `WEAK_DEPTH`.
+/// The carrier is at height 101, the weak share's parent at 52: one more
+/// than `WEAK_DEPTH` shares below.
 #[test]
 fn a_weak_share_whose_parent_is_too_deep_is_refused() {
     let carrier_parent = BlockHash::from_byte_array([0x01; 32]);
@@ -585,8 +838,8 @@ fn a_weak_share_whose_parent_is_too_deep_is_refused() {
             chain: ChainMembership::Confirmed,
         };
         Ok(vec![
-            (carrier_parent, metadata(10)),
-            (weak_parent, metadata(4)),
+            (carrier_parent, metadata(100)),
+            (weak_parent, metadata(100 - WEAK_DEPTH)),
         ])
     });
     let validator =
@@ -598,7 +851,9 @@ fn a_weak_share_whose_parent_is_too_deep_is_refused() {
 
     assert_eq!(error.kind, FailureKind::Consensus);
     assert!(
-        error.message.contains("7 shares below its carrier"),
+        error
+            .message
+            .contains(&format!("{} shares below its carrier", WEAK_DEPTH + 1)),
         "{error}"
     );
 }
@@ -634,6 +889,76 @@ fn a_weak_share_an_ancestor_already_carries_is_refused() {
         .share_owner(ShareOwner::CashP2pkh([0x22; 20]))
         .prev_share_blockhash(carrier_parent.to_string())
         .weak_shares(vec![weak_share])
+        .build();
+    let mut store = MockChainStoreHandle::default();
+    store.expect_get_block_metadata_batch().returning(move |_| {
+        let metadata = |height| BlockMetadata {
+            expected_height: Some(height),
+            chain_work: Work::from_le_bytes([0u8; 32]),
+            status: Status::BlockValid,
+            chain: ChainMembership::Confirmed,
+        };
+        Ok(vec![
+            (carrier_parent, metadata(10)),
+            (weak_parent, metadata(9)),
+        ])
+    });
+    store
+        .expect_get_share_header()
+        .returning(move |_| Ok(earlier_header.clone()));
+    store
+        .expect_get_weak_summaries()
+        .returning(move |_| Ok(HashMap::from([(carrier_parent, summary.clone())])));
+    let validator =
+        DefaultShareValidator::new(MockPoolDifficulty::default()).for_chain(Chain::BitcoinCash);
+
+    let error = validator
+        .validate_carried_weak_positions(&carrier, &store)
+        .unwrap_err();
+
+    assert_eq!(error.kind, FailureKind::Consensus);
+    assert!(
+        error.message.contains("already carried by an ancestor"),
+        "{error}"
+    );
+}
+
+/// The carrier's parent carries a weak share, and the carrier carries the
+/// same proof of work with another coinbase value: another leaf of the weak
+/// root, but the carried-once rule compares proof-of-work hashes, so it is
+/// still one proof of work credited twice and refused.
+#[test]
+fn a_weak_share_an_ancestor_carries_is_refused_under_another_encoding() {
+    let carrier_parent = BlockHash::from_byte_array([0x01; 32]);
+    let weak_parent = BlockHash::from_byte_array([0x02; 32]);
+    let weak_share = build_test_weak_share(TestWeakShare {
+        parent_hash: weak_parent,
+        bits: CompactTarget::from_consensus(HARD),
+        minimum: CompactTarget::from_consensus(HARD),
+        weak_ratio: GENESIS_WEAK_RATIO,
+        distribution: &HashMap::from([(
+            PayoutAddress::from(Address::p2pkh(
+                PubkeyHash::from_byte_array([0x55; 20]),
+                Network::Regtest,
+            )),
+            1u128,
+        )]),
+        time: WEAK_TIME,
+        nonce: 1,
+    });
+    let mut reencoded = weak_share.clone();
+    reencoded.coinbase_value += 1;
+    assert_ne!(reencoded.committed_hash(), weak_share.committed_hash());
+    let earlier_carrier = TestShareBlockBuilder::new()
+        .share_owner(ShareOwner::CashP2pkh([0x22; 20]))
+        .weak_shares(vec![weak_share])
+        .build();
+    let summary = WeakSummary::of(&earlier_carrier.weak_shares);
+    let earlier_header = earlier_carrier.header;
+    let carrier = TestShareBlockBuilder::new()
+        .share_owner(ShareOwner::CashP2pkh([0x22; 20]))
+        .prev_share_blockhash(carrier_parent.to_string())
+        .weak_shares(vec![reencoded])
         .build();
     let mut store = MockChainStoreHandle::default();
     store.expect_get_block_metadata_batch().returning(move |_| {

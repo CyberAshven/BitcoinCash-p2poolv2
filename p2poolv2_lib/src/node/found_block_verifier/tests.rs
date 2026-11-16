@@ -4,6 +4,7 @@
 
 use super::*;
 use crate::accounting::stats::metrics::spawn_test_metrics_handle;
+use crate::test_utils::TestShareBlockBuilder;
 use bitcoin::hashes::Hash;
 use mockall::Sequence;
 use wiremock::matchers::{body_partial_json, method};
@@ -29,6 +30,7 @@ async fn a_claimed_target_candidate_absent_from_bchn_does_not_reset_effort() {
         share_blockhash: BlockHash::from_byte_array([0x22; 32]),
         bitcoin_time: 1_700_000_000,
         miner_bitcoin_address: "miner".to_string(),
+        effort: None,
     };
     let mut store = ChainStoreHandle::default();
     store
@@ -79,6 +81,7 @@ async fn a_candidate_below_bchn_finalization_is_no_longer_checked() {
         share_blockhash: BlockHash::from_byte_array([0x22; 32]),
         bitcoin_time: 1_700_000_000,
         miner_bitcoin_address: "miner".to_string(),
+        effort: None,
     };
     let mut store = ChainStoreHandle::default();
     store
@@ -112,6 +115,7 @@ async fn bchn_acceptance_resets_effort_only_for_the_first_persisted_find() {
         share_blockhash: BlockHash::from_byte_array([0x22; 32]),
         bitcoin_time: 1_700_000_000,
         miner_bitcoin_address: "miner".to_string(),
+        effort: None,
     };
     let mut store = ChainStoreHandle::default();
     let mut reads = Sequence::new();
@@ -139,6 +143,24 @@ async fn bchn_acceptance_resets_effort_only_for_the_first_persisted_find() {
         .times(1)
         .in_sequence(&mut writes)
         .returning(|_| Ok(false));
+    let share_header = TestShareBlockBuilder::new()
+        .nonce(0xe9695792)
+        .build()
+        .header;
+    let expected_difficulty = share_header.bitcoin_network_difficulty();
+    store
+        .expect_get_share_header()
+        .times(1)
+        .return_once(move |_| Ok(share_header));
+    store
+        .expect_set_accepted_found_block_effort()
+        .times(1)
+        .withf(move |hash, snapshot| {
+            *hash == bitcoin_blockhash
+                && snapshot.work == 77.0
+                && snapshot.network_difficulty == Some(expected_difficulty)
+        })
+        .returning(|_, _| Ok(()));
     let metrics = spawn_test_metrics_handle();
     let client = BitcoindRpcClient::new(&server.uri(), "user", "pass").unwrap();
     let mut verifier = FoundBlockVerifier::new(client, store, metrics.clone());
@@ -168,6 +190,7 @@ async fn a_candidate_is_retried_after_an_rpc_failure_and_counted_after_acceptanc
         share_blockhash: BlockHash::from_byte_array([0x22; 32]),
         bitcoin_time: 1_700_000_000,
         miner_bitcoin_address: "miner".to_string(),
+        effort: None,
     };
     let mut store = ChainStoreHandle::default();
     let mut reads = Sequence::new();
@@ -186,6 +209,24 @@ async fn a_candidate_is_retried_after_an_rpc_failure_and_counted_after_acceptanc
         .expect_record_accepted_found_block()
         .times(1)
         .returning(|_| Ok(true));
+    let share_header = TestShareBlockBuilder::new()
+        .nonce(0xe9695792)
+        .build()
+        .header;
+    let expected_difficulty = share_header.bitcoin_network_difficulty();
+    store
+        .expect_get_share_header()
+        .times(1)
+        .return_once(move |_| Ok(share_header));
+    store
+        .expect_set_accepted_found_block_effort()
+        .times(1)
+        .withf(move |hash, snapshot| {
+            *hash == bitcoin_blockhash
+                && snapshot.work == 77.0
+                && snapshot.network_difficulty == Some(expected_difficulty)
+        })
+        .returning(|_, _| Ok(()));
     let metrics = spawn_test_metrics_handle();
     let client = BitcoindRpcClient::new(&server.uri(), "user", "pass").unwrap();
     let mut verifier = FoundBlockVerifier::new(client, store, metrics.clone());
@@ -225,6 +266,7 @@ async fn an_accepted_historical_candidate_is_recorded_without_resetting_runtime_
         share_blockhash: BlockHash::from_byte_array([0x22; 32]),
         bitcoin_time: 1_700_000_000,
         miner_bitcoin_address: "miner".to_string(),
+        effort: None,
     };
     let mut store = ChainStoreHandle::default();
     store

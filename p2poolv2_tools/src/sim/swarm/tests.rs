@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 use super::*;
+use p2poolv2_config::{MIN_PAYOUT_LEVEL, payout_level_below_minimum};
 
 fn settings(node_count: usize) -> SwarmSettings {
     SwarmSettings {
@@ -35,6 +36,10 @@ fn settings(node_count: usize) -> SwarmSettings {
         dial_fanout: 3,
         profile: "release".to_string(),
         payout_levels: Vec::new(),
+        weak_shares: false,
+        virtual_miners: None,
+        merge_tokens: None,
+        log_level: "debug".to_string(),
     }
 }
 
@@ -95,7 +100,25 @@ fn node_config_leaves_out_a_payout_level_past_the_list() {
 
 #[test]
 fn payout_levels_parse_as_a_comma_separated_list() {
-    assert_eq!(parse_payout_levels("5, 7,0").unwrap(), vec![5, 7, 0]);
+    assert_eq!(
+        parse_payout_levels("5, 7,1").unwrap(),
+        vec![5, 7, MIN_PAYOUT_LEVEL],
+        "comma separated payout levels"
+    );
+}
+
+#[test]
+fn a_payout_level_of_zero_is_refused() {
+    let error = parse_payout_levels("5,0").unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "PAYOUT_LEVELS={:?}: {}",
+            "5,0",
+            payout_level_below_minimum(0)
+        ),
+        "PAYOUT_LEVELS level 0"
+    );
 }
 
 #[test]
@@ -280,4 +303,51 @@ fn nodes_mine_bitcoin_cash_regtest() {
         "\nbootstrap_address = \"{DEFAULT_MINER_ADDRESS}\"\n"
     )));
     assert!(config.contains(&format!("\nshare_address = \"{}\"\n", share_address(2))));
+}
+
+/// `WEAK_SHARES`, `VIRTUAL_MINERS` and `MERGE_TOKENS` reach the node's
+/// config as `[sim]` and `[stratum]` keys, and a swarm without them writes
+/// none.
+#[test]
+fn the_optional_settings_reach_the_node_config() {
+    let shape = NodeShape {
+        hashrate: "5".to_string(),
+        latency_ms: 0,
+    };
+    let identity = NodeIdentity {
+        index: 0,
+        payout_address: DEFAULT_MINER_ADDRESS,
+        shape: &shape,
+    };
+    let plain = node_config(&settings(2), &identity);
+    let with_options = node_config(
+        &SwarmSettings {
+            weak_shares: true,
+            virtual_miners: Some(100),
+            merge_tokens: Some("D:\\run\\tokens.json".to_string()),
+            ..settings(2)
+        },
+        &identity,
+    );
+
+    assert!(!plain.contains("weak_shares"));
+    assert!(!plain.contains("virtual_miners"));
+    assert!(!plain.contains("merge_mining_tokens"));
+    let parsed: toml::Value = toml::from_str(&with_options).unwrap();
+    let sim = parsed.get("sim").unwrap();
+    assert_eq!(
+        sim.get("weak_shares").and_then(toml::Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        sim.get("virtual_miners").and_then(toml::Value::as_integer),
+        Some(100)
+    );
+    assert_eq!(
+        parsed
+            .get("stratum")
+            .and_then(|table| table.get("merge_mining_tokens"))
+            .and_then(toml::Value::as_str),
+        Some("D:\\run\\tokens.json")
+    );
 }

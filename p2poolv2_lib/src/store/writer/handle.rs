@@ -13,7 +13,7 @@ use crate::accounting::payout::simple_pplns::SimplePplnsShare;
 use crate::shares::bch_headers::KnownBchHeader;
 use crate::shares::share_block::{ShareBlock, ShareHeader};
 use crate::store::Store;
-use crate::store::found_block::FoundBlock;
+use crate::store::found_block::{EffortSnapshot, FoundBlock};
 use crate::store::hashrate_samples::HashrateSample;
 use crate::store::payout_tree::StoredPayoutTree;
 use crate::store::prune_blocks::PruneStats;
@@ -237,6 +237,24 @@ impl StoreHandle {
         self.write_tx
             .send(WriteCommand::RecordAcceptedFoundBlock {
                 found_block,
+                reply: reply_tx,
+            })
+            .map_err(|_| StoreError::ChannelClosed)?;
+        reply_rx.await.map_err(|_| StoreError::ChannelClosed)?
+    }
+
+    /// Keep the effort snapshot for an accepted block through the
+    /// serialized writer, after the acceptance itself is recorded.
+    pub async fn set_accepted_found_block_effort(
+        &self,
+        bitcoin_blockhash: BlockHash,
+        snapshot: EffortSnapshot,
+    ) -> Result<(), StoreError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.write_tx
+            .send(WriteCommand::SetAcceptedFoundBlockEffort {
+                bitcoin_blockhash,
+                snapshot,
                 reply: reply_tx,
             })
             .map_err(|_| StoreError::ChannelClosed)?;
@@ -595,6 +613,7 @@ mockall::mock! {
 
         // Serialized writes (async)
         pub async fn record_accepted_found_block(&self, found_block: FoundBlock) -> Result<bool, StoreError>;
+        pub async fn set_accepted_found_block_effort(&self, bitcoin_blockhash: BlockHash, snapshot: EffortSnapshot) -> Result<(), StoreError>;
         pub async fn organise_header(&self, header: ShareHeader) -> Result<Option<u32>, StoreError>;
         pub async fn organise_block(&self) -> Result<Option<u32>, StoreError>;
         pub async fn mark_invalid(&self, blockhash: BlockHash) -> Result<(), StoreError>;

@@ -79,3 +79,18 @@ decoder fuzz harness, the libzmq fix), took upstream's Electrum server crate
 check and per-host vaults, its nix devShell and its CI runner updates, and
 left upstream's `grafana_p2poolv2` ansible role unused beside this fork's
 `monitoring_p2poolv2`.
+
+The next merge, of upstream `c2287b28` (its v0.17.0, 2026-11-12), brought
+these pages of upstream's `docs/` folder up to that commit:
+
+| Upstream page | This book | Notes |
+|---|---|---|
+| `docs/architecture/async-flow.md` | [Async flow and concurrency](architecture/async-flow.md) | The monitoring broadcast row and the Electrum tip watcher, beside this fork's share transaction relay row. |
+| `docs/architecture/pruning.md` | [Pruning](architecture/pruning.md) | Script history and its compaction filter. On Bitcoin Cash the window is `BCH_PAYOUT_DEPTH`. |
+| `docs/architecture/store-schema.md` | [Store schema](architecture/store-schema.md) | The `ScriptHistory` column family. |
+| `docs/testnet5.md` | not ported | Testnet5 is a Bitcoin test network this fork does not run: upstream's `Chain` config type that carries it collides with this fork's `chain` setting. |
+
+The Electrum crate's `README.adoc` came with the code. Shell scripts upstream
+changed under `load-tests/sim/` stay deleted here; their changes (the promoted
+block log line, the BIP 320 version mask) are in `cargo sim`
+(`docs/tooling.md`).

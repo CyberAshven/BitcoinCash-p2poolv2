@@ -25,7 +25,7 @@ jobs:
           toolchain: 1.99.0
           components: clippy, rustfmt
 
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
 
       - name: Check formatting
         run: cargo fmt --all -- --check
@@ -55,14 +55,30 @@ jobs:
           toolchain: 1.99.0
 
       - name: Install latest nextest release
-        uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037 # v2.87.32
+        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
           tool: nextest
 
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
 
       - name: Run tests
         run: cargo nextest run --workspace
+
+      # The run above loaded the dashboard in headless Chrome without
+      # pictures. This one has the browser draw one page of each kind, for
+      # a person to look at.
+      - name: Draw the dashboard in headless Chrome
+        env:
+          DASHBOARD_SCREENSHOTS: ${{ runner.temp }}/dashboard-screenshots
+        run: cargo test -p p2poolv2_api --lib browser
+
+      - name: Keep the dashboard pictures
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: dashboard-screenshots
+          path: ${{ runner.temp }}/dashboard-screenshots
+          if-no-files-found: warn
 
       - name: Run sim-feature tests
         run: cargo nextest run -p p2poolv2_lib --features sim
@@ -84,11 +100,11 @@ jobs:
           toolchain: 1.99.0
 
       - name: Install latest nextest release
-        uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037 # v2.87.32
+        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
           tool: nextest
 
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
 
       - name: Run tests
         shell: pwsh
@@ -117,11 +133,11 @@ jobs:
 
       # Trunk fetches the wasm-bindgen CLI matching Cargo.lock and wasm-opt.
       - name: Install trunk
-        uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037 # v2.87.32
+        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
           tool: trunk
 
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
 
       - name: Clippy for wasm32
         run: cargo clippy --target wasm32-unknown-unknown -- -D warnings
@@ -147,7 +163,7 @@ jobs:
             echo "dist has a stylesheet that is not a shared asset"; exit 1
           fi
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: p2poolv2_web
           path: p2poolv2_web/dist
@@ -168,11 +184,11 @@ jobs:
           toolchain: 1.99.0
 
       - name: Install latest nextest release
-        uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037 # v2.87.32
+        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
           tool: nextest
 
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
 
       - name: Run the covenant tests
         run: cargo nextest run -p p2poolv2_safa
@@ -187,33 +203,34 @@ jobs:
       - name: Install Rust
         run: rustup toolchain install
       - name: Install cargo-llvm-cov and nextest
-        uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037 # v2.87.32
+        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
           tool: cargo-llvm-cov,nextest
+      # Without a cache every run rebuilds librocksdb-sys from C++ source
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       # Run coverage through nextest so it uses the same runner as the test
       # job. Plain `cargo test` runs the whole workspace in one process per
       # crate, which changes test semantics for anything touching process
       # state and can fail here while passing there.
       - name: Generate code coverage
         run: cargo llvm-cov nextest --all-features --workspace --lcov --output-path lcov.info
-      # Dependabot runs read the Dependabot secret store, not the Actions one,
-      # so the token is empty there and a protected branch rejects the upload.
-      # Coverage is still generated above, which is what catches a dependency
-      # bump that breaks the build. The delta itself is not useful on a
-      # lockfile bump, and skipping keeps the token out of a job that compiles
-      # and runs build scripts from newly proposed dependency versions.
-      # A fork without a CODECOV_TOKEN secret cannot upload; tokenless
-      # uploads are refused. Only this step sees the secret, and it reports
-      # just whether one is set, so the upload is skipped instead of failing.
-      - name: Check for a Codecov token
-        id: codecov_token
+      # This job compiles and runs PR code, including build scripts of newly
+      # proposed dependency versions, so it holds no secrets. It only saves the
+      # report; coverage-upload.yml sends it to Codecov from a workflow_run
+      # that holds CODECOV_TOKEN but never executes PR code. That keeps the
+      # token away from every PR, Dependabot's included, without skipping any.
+      - name: Record pull request number
         env:
-          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
-        run: echo "present=$([ -n "$CODECOV_TOKEN" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
-      - name: Upload coverage to Codecov
-        if: github.actor != 'dependabot[bot]' && steps.codecov_token.outputs.present == 'true'
-        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
+          PULL_REQUEST_NUMBER: ${{ github.event.pull_request.number }}
+        run: printf '%s' "$PULL_REQUEST_NUMBER" > pull-request-number
+      - name: Save coverage report
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          token: ${{ secrets.CODECOV_TOKEN }}
-          files: lcov.info
-          fail_ci_if_error: true
+          name: coverage-report
+          path: |
+            lcov.info
+            pull-request-number
+          # coverage-gate.yml compares PRs against the newest alpha report, so
+          # alpha keeps its report long enough to survive quiet periods.
+          retention-days: ${{ github.event_name == 'push' && 90 || 7 }}
+          if-no-files-found: error

@@ -94,6 +94,26 @@ impl PoolMetrics {
         ));
         output.push('\n');
 
+        output.push_str(
+            "# HELP weak_shares_carried_by_node_total Weak shares carried by the shares this node's miners found\n",
+        );
+        output.push_str("# TYPE weak_shares_carried_by_node_total counter\n");
+        output.push_str(&format!(
+            "weak_shares_carried_by_node_total {}\n",
+            self.weak_shares_carried_by_node
+        ));
+        output.push('\n');
+
+        output.push_str(
+            "# HELP weak_shares_carried_on_chain_total Weak shares carried by the shares confirmed on the share chain while it was current\n",
+        );
+        output.push_str("# TYPE weak_shares_carried_on_chain_total counter\n");
+        output.push_str(&format!(
+            "weak_shares_carried_on_chain_total {}\n",
+            self.weak_shares_carried_on_chain
+        ));
+        output.push('\n');
+
         output.push_str(&self.found_block_submission_expositions());
 
         output.push_str(&self.get_worker_expositions());

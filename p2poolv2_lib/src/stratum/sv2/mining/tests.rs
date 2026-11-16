@@ -348,15 +348,19 @@ async fn active_custom_job_keeps_its_share_credit_after_difficulty_changes() {
     assert_eq!(next_job.difficulty, 1000);
 }
 
-#[tokio::test]
-async fn node_rejection_does_not_install_a_custom_job() {
+/// The node's answer to a block proposal: `null` for a block it accepts,
+/// else its reason.
+fn proposal_answer(result: serde_json::Value) -> ResponseTemplate {
+    ResponseTemplate::new(200)
+        .set_body_json(serde_json::json!({"result": result, "error": null, "id": 0}))
+}
+
+/// The `SetCustomMiningJob.Error` code a Full-Template job gets when the
+/// node answers its block proposal with `answer`. The job is not installed.
+async fn custom_job_error_for_proposal_answer(answer: ResponseTemplate) -> String {
     let rpc = MockServer::start().await;
     Mock::given(method("POST"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(
-                serde_json::json!({"result": "bad-cb-amount", "error": null, "id": 0}),
-            ),
-        )
+        .respond_with(answer)
         .expect(1)
         .mount(&rpc)
         .await;
@@ -397,8 +401,59 @@ async fn node_rejection_does_not_install_a_custom_job() {
         .unwrap();
     let mut error_payload = payload(&rejected[0]);
     let error = SetCustomMiningJobError::from_bytes(&mut error_payload).unwrap();
-    assert_eq!(error.error_code.as_utf8_or_hex(), "invalid-template");
     assert!(channels.channels[&1].jobs.is_empty());
+    error.error_code.as_utf8_or_hex()
+}
+
+#[tokio::test]
+async fn node_rejection_does_not_install_a_custom_job() {
+    assert_eq!(
+        custom_job_error_for_proposal_answer(proposal_answer("bad-cb-amount".into())).await,
+        "invalid-template"
+    );
+}
+
+/// At a Bitcoin Cash tip change the node may already have left the parent
+/// a job was declared on, while the pool's template still names it. The
+/// node then has no verdict on the block (`inconclusive-not-best-prevblk`,
+/// from BCHN and BCHD alike), and the job gets the stale-tip code, not
+/// `invalid-template`.
+#[tokio::test]
+async fn a_proposal_on_a_parent_the_node_left_is_a_stale_chain_tip() {
+    assert_eq!(
+        custom_job_error_for_proposal_answer(proposal_answer(
+            "inconclusive-not-best-prevblk".into()
+        ))
+        .await,
+        ERROR_CODE_SET_CUSTOM_MINING_JOB_STALE_CHAIN_TIP
+    );
+}
+
+/// A proposal check that gets no answer about the block, here a node too
+/// busy to take the request, says the pool cannot check now. It is not the
+/// node's verdict on the template.
+#[tokio::test]
+async fn a_proposal_check_without_an_answer_is_template_unavailable() {
+    assert_eq!(
+        custom_job_error_for_proposal_answer(ResponseTemplate::new(503)).await,
+        "template-unavailable"
+    );
+}
+
+/// A block the node cannot read comes back as an RPC error, not as a reject
+/// reason. It is still the node's answer about the template, and asking
+/// again gets the same one.
+#[tokio::test]
+async fn a_block_the_node_cannot_decode_is_an_invalid_template() {
+    let decode_failed = ResponseTemplate::new(500).set_body_json(serde_json::json!({
+        "result": null,
+        "error": { "code": -22, "message": "Block decode failed" },
+        "id": 0,
+    }));
+    assert_eq!(
+        custom_job_error_for_proposal_answer(decode_failed).await,
+        "invalid-template"
+    );
 }
 
 #[tokio::test]
@@ -2901,6 +2956,125 @@ async fn a_new_tip_keeps_the_previous_tips_jobs_and_older_ones_are_stale() {
     assert_eq!(
         short_extranonce_reply(&mut channels, channel_id, first + 1_000).await,
         "invalid-job-id"
+    );
+}
+
+/// Open extended channel 1 for the miner the declared job fixture pays.
+async fn open_declaring_channel(channels: &mut MiningChannels) {
+    let mut open = open_extended_request(&bch_identity());
+    channels
+        .handle(MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL, &mut open, None)
+        .await
+        .unwrap();
+}
+
+/// Install a declared job on channel 1, built on `prepared` with a token of
+/// `nonce`, and return its job id.
+async fn install_declared_job(
+    channels: &mut MiningChannels,
+    prepared: &Arc<PreparedNotifyParams>,
+    nonce: u8,
+) -> u32 {
+    let token = prepared
+        .mining_job_token([nonce; 32], prepared.template().curtime)
+        .unwrap();
+    let (mut bytes, declared) = test_bch_custom_job(
+        Arc::clone(prepared),
+        token,
+        vec![],
+        false,
+        prepared.template().coinbasevalue,
+    );
+    let request = SetCustomMiningJob::from_bytes(&mut bytes).unwrap();
+    let installed = channels
+        .install_custom_job(&request, declared, Some(Arc::clone(prepared)))
+        .await
+        .unwrap();
+    assert_eq!(
+        frame_type(&installed[0]),
+        MESSAGE_TYPE_SET_CUSTOM_MINING_JOB_SUCCESS
+    );
+    let mut installed_payload = payload(&installed[0]);
+    SetCustomMiningJobSuccess::from_bytes(&mut installed_payload)
+        .unwrap()
+        .job_id
+}
+
+/// The pool sends a channel its own job at every share-chain move. A
+/// declared job stays through more of them than the channel remembers of
+/// its own: a share on it still finds the job, where it got `stale-share`.
+#[tokio::test]
+async fn a_declared_job_outlasts_the_pool_s_own_jobs() {
+    let (ctx, _emissions, _dirs) = test_bch_stratum_context("http://127.0.0.1:1").await;
+    let mut channels = MiningChannels::new(ctx, DEFAULT_VERSION_MASK);
+    open_declaring_channel(&mut channels).await;
+    let prepared = test_bch_prepared();
+    let declared = install_declared_job(&mut channels, &prepared, 1).await;
+
+    for _ in 0..=MAX_CHANNEL_JOBS {
+        extended_job_id(&channels.on_template(&prepared));
+    }
+
+    assert_eq!(
+        short_extranonce_reply(&mut channels, 1, declared).await,
+        ERROR_CODE_SUBMIT_SHARES_BAD_EXTRANONCE_SIZE
+    );
+}
+
+/// A channel remembers eight declared jobs: the ninth drops the first, and
+/// the second is still there.
+#[tokio::test]
+async fn a_ninth_declared_job_drops_the_first() {
+    let (ctx, _emissions, _dirs) = test_bch_stratum_context("http://127.0.0.1:1").await;
+    let mut channels = MiningChannels::new(ctx, DEFAULT_VERSION_MASK);
+    open_declaring_channel(&mut channels).await;
+    let prepared = test_bch_prepared();
+    let mut declared = Vec::with_capacity(MAX_DECLARED_CHANNEL_JOBS + 1);
+    for nonce in 0..=MAX_DECLARED_CHANNEL_JOBS as u8 {
+        declared.push(install_declared_job(&mut channels, &prepared, nonce + 1).await);
+    }
+
+    assert_eq!(channels.channels[&1].jobs.len(), MAX_DECLARED_CHANNEL_JOBS);
+    assert_eq!(
+        short_extranonce_reply(&mut channels, 1, declared[0]).await,
+        "stale-share"
+    );
+    assert_eq!(
+        short_extranonce_reply(&mut channels, 1, declared[1]).await,
+        ERROR_CODE_SUBMIT_SHARES_BAD_EXTRANONCE_SIZE
+    );
+}
+
+/// Declared jobs do not count towards the pool's own: beside one, a channel
+/// still remembers `MAX_CHANNEL_JOBS` of the pool's jobs and drops the
+/// oldest of those.
+#[tokio::test]
+async fn the_pool_s_own_jobs_keep_their_limit_beside_declared_ones() {
+    let (ctx, _emissions, _dirs) = test_bch_stratum_context("http://127.0.0.1:1").await;
+    let mut channels = MiningChannels::new(ctx, DEFAULT_VERSION_MASK);
+    open_declaring_channel(&mut channels).await;
+    let prepared = test_bch_prepared();
+    install_declared_job(&mut channels, &prepared, 1).await;
+
+    let first = extended_job_id(&channels.on_template(&prepared));
+    let second = extended_job_id(&channels.on_template(&prepared));
+    for _ in 1..MAX_CHANNEL_JOBS {
+        channels.on_template(&prepared);
+    }
+
+    let jobs = &channels.channels[&1].jobs;
+    assert_eq!(
+        jobs.values().filter(|job| !job.declared).count(),
+        MAX_CHANNEL_JOBS
+    );
+    assert_eq!(jobs.values().filter(|job| job.declared).count(), 1);
+    assert_eq!(
+        short_extranonce_reply(&mut channels, 1, first).await,
+        "stale-share"
+    );
+    assert_eq!(
+        short_extranonce_reply(&mut channels, 1, second).await,
+        ERROR_CODE_SUBMIT_SHARES_BAD_EXTRANONCE_SIZE
     );
 }
 

@@ -55,3 +55,6 @@ perf.data
 node-start.log
 node-start.log.prev
 node2-start.log
+
+# nix outputs
+/result*

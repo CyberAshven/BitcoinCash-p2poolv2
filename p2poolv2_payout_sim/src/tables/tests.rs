@@ -61,3 +61,21 @@ fn a_run_is_a_pure_function_of_its_scenario_and_seed() {
         second.miners[0].income_per_month
     );
 }
+
+#[test]
+fn parallel_map_keeps_the_items_order() {
+    let items: Vec<u64> = (0..100).collect();
+    let squares = parallel_map(&items, |item| item * item);
+    assert_eq!(squares.len(), 100);
+    assert_eq!(squares[0], 0);
+    assert_eq!(squares[7], 49);
+    assert_eq!(squares[99], 9_801);
+}
+
+#[test]
+fn the_study_tables_are_in_the_default_run() {
+    assert!(Table::ALL.contains(&Table::RefusingRaces));
+    assert!(Table::ALL.contains(&Table::RatioMax));
+    assert_eq!(Table::parse("refusing-races"), Ok(Table::RefusingRaces));
+    assert_eq!(Table::parse("r-max"), Ok(Table::RatioMax));
+}

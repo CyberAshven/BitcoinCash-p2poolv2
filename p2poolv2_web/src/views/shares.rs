@@ -115,7 +115,7 @@ pub fn SharesPage(page: usize) -> impl IntoView {
 fn loading_panel() -> AnyView {
     view! {
         <div class="panel">
-            <h2>"Recent shares"</h2>
+            <h2>"Shares"</h2>
             {loading()}
         </div>
     }
@@ -126,7 +126,7 @@ fn loading_panel() -> AnyView {
 fn empty_panel(text: &str) -> AnyView {
     view! {
         <div class="panel">
-            <h2>"Recent shares"</h2>
+            <h2>"Shares"</h2>
             <p class="empty-state">{text}</p>
         </div>
     }
@@ -138,7 +138,7 @@ fn shares_panel(tip: u32, body: AnyView) -> AnyView {
     view! {
         <div class="panel">
             <h2>
-                "Recent shares"
+                "Shares"
                 <span class="panel-note">
                     "newest first, uncles under the share that includes them"
                     {" \u{b7} tip "}

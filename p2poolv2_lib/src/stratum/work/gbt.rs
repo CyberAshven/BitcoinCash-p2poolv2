@@ -263,9 +263,10 @@ async fn get_bch_light_block_template(
 /// hashes are shown like transaction IDs. Returns the template, the job id
 /// and the branch.
 ///
-/// A light template may lack `coinbaseaux`, `longpollid` and `sigoplimit`
-/// (Knuth's sends the same limit as `sigchecklimit`). They are filled in
-/// here, for light templates only; a full template must carry them.
+/// A light template may lack `coinbaseaux` and `sigoplimit` (Knuth's sends
+/// the same limit as `sigchecklimit`). They are filled in here, for light
+/// templates only; a full template must carry them. Any template may lack
+/// `longpollid` ([`BlockTemplate::longpollid`]).
 fn parse_bch_light_block_template(
     json: &str,
 ) -> Result<(BlockTemplate, String, Vec<TxMerkleNode>), LightTemplateUnavailable> {
@@ -298,7 +299,6 @@ fn parse_bch_light_block_template(
         .map_err(|error| unusable(format!("invalid light template merkle hash: {error}")))?;
     fields.entry("transactions").or_insert_with(|| json!([]));
     fields.entry("coinbaseaux").or_insert_with(|| json!({}));
-    fields.entry("longpollid").or_insert_with(|| json!(""));
     if !fields.contains_key("sigoplimit")
         && let Some(sigchecklimit) = fields.get("sigchecklimit").cloned()
     {
@@ -806,6 +806,60 @@ mod gbt_load_tests {
         );
     }
 
+    /// A full template with the fields Knuth's `getblocktemplate` sends
+    /// (k-nuth/kth 5b230a17, `render_block_template`): no `longpollid`,
+    /// since Knuth serves no long polling, with regtest values.
+    const KNUTH_SHAPED_FULL_TEMPLATE: &str = r#"{
+        "capabilities": [],
+        "version": 536870912,
+        "previousblockhash": "21806fe2b8639db291436084f7663fccb43eb9bfcfb4adb3fa3c74495b17a2b3",
+        "transactions": [],
+        "coinbaseaux": {"flags": ""},
+        "coinbasevalue": 5000000000,
+        "target": "7fffff0000000000000000000000000000000000000000000000000000000000",
+        "mintime": 1793475699,
+        "mutable": ["time", "transactions", "prevblock"],
+        "noncerange": "00000000ffffffff",
+        "sigoplimit": 226950,
+        "sizelimit": 32000000,
+        "curtime": 1793476401,
+        "bits": "207fffff",
+        "height": 122
+    }"#;
+
+    /// A node without long polling sends no `longpollid`. Requiring it made
+    /// every Knuth template fail to parse, so the node gave miners no work.
+    #[tokio::test]
+    async fn a_full_template_without_longpollid_flows_through_rpc_and_validation() {
+        let (server, config) = setup_mock_bitcoin_rpc().await;
+        mock_method(
+            &server,
+            "getblocktemplate",
+            serde_json::json!([{"capabilities": ["coinbasevalue", "coinbase/append", "workid"]}]),
+            KNUTH_SHAPED_FULL_TEMPLATE.to_string(),
+        )
+        .await;
+        let client =
+            BitcoindRpcClient::new(&config.url, &config.username, &config.password).unwrap();
+        let template = get_bch_block_template(&client).await.unwrap();
+        assert_eq!(template.height, 122);
+        assert!(template.longpollid.is_empty());
+    }
+
+    /// The same for a template with transactions: BCHN's chipnet template
+    /// with its `longpollid` taken out.
+    #[test]
+    fn a_template_with_transactions_and_no_longpollid_parses() {
+        let mut json: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../bitcoindrpc/test_data/bchn-chipnet-template.json"
+        ))
+        .unwrap();
+        json.as_object_mut().unwrap().remove("longpollid").unwrap();
+        let template = parse_bch_block_template(&json.to_string()).unwrap();
+        assert_eq!(template.transactions.len(), 65);
+        assert!(template.longpollid.is_empty());
+    }
+
     #[test]
     fn malformed_transaction_id_returns_an_error() {
         let mut template: BlockTemplate =
@@ -823,7 +877,7 @@ mod gbt_load_tests {
         let (mock_server, bitcoinrpc_config) = setup_mock_bitcoin_rpc().await;
         let params = serde_json::json!([{
             "capabilities": ["coinbasetxn", "coinbase/append", "workid"],
-            "rules": ["segwit", "signet"],
+            "rules": ["segwit", "signet", "consensuscleanup"],
         }]);
         mock_method(
             &mock_server,
@@ -1073,7 +1127,7 @@ mod gbt_server_tests {
         let (mock_server, bitcoinrpc_config) = setup_mock_bitcoin_rpc().await;
         let params = serde_json::json!([{
             "capabilities": ["coinbasetxn", "coinbase/append", "workid"],
-            "rules": ["segwit", "signet"],
+            "rules": ["segwit", "signet", "consensuscleanup"],
         }]);
         mock_method(
             &mock_server,
@@ -1129,7 +1183,7 @@ mod gbt_server_tests {
         let (mock_server, bitcoinrpc_config) = setup_mock_bitcoin_rpc().await;
         let params = serde_json::json!([{
             "capabilities": ["coinbasetxn", "coinbase/append", "workid"],
-            "rules": ["segwit", "signet"],
+            "rules": ["segwit", "signet", "consensuscleanup"],
         }]);
         mock_method(
             &mock_server,

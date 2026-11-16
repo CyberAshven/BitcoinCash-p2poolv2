@@ -89,8 +89,9 @@ pub const BAND_CAP_STEP_DIVISOR: f64 = 512.0;
 /// Fixed-point unit of `band_cap` and `weak_ratio`: 1/1024.
 pub const FIXED_POINT_ONE: u64 = 1_024;
 
-/// Largest weak ratio `R_MAX` = 4096 *(sim)*.
-pub const WEAK_RATIO_MAX: u64 = 4_096;
+/// Largest weak ratio `R_MAX` = 256, the rule since study #85 (4,096
+/// before).
+pub const WEAK_RATIO_MAX: u64 = 256;
 
 /// The weak ratio moves by `1/256` of itself per share (design page,
 /// section 3, "The weak target").
@@ -104,12 +105,30 @@ pub const WEAK_CAP: u64 = 64;
 pub const WEAK_FILL: u64 = 32;
 
 /// Deepest a weak share's parent may be below the share that carries it:
-/// `WEAK_DEPTH` = 6 *(sim)*.
-pub const WEAK_DEPTH: usize = 6;
+/// `WEAK_DEPTH` = 48, the rule since study #85 (6 before).
+pub const WEAK_DEPTH: usize = 48;
+
+/// `WEAK_FILL_MAX` as section 6 of the design page proposes it: the most
+/// weak shares a share that asks may steer the weak ratio towards, ten times
+/// `WEAK_FILL` *(sim)*. Not a rule of the chain.
+pub const WEAK_FILL_MAX: u64 = 320;
+
+/// `WEAK_ASK_DIVISOR` as section 6 proposes it: a share was asked when more
+/// than one in 64 of the weak shares it carried ask *(sim)*.
+pub const WEAK_ASK_DIVISOR: u64 = 64;
+
+/// `R_ASK_MAX` as section 6 proposes it: the largest weak ratio asks may
+/// reach, 4,096 *(sim)*. Without asks the ratio stays within `R_MAX`.
+pub const WEAK_RATIO_ASK_MAX: u64 = 4_096;
+
+/// The node default section 6 proposes (policy, not a rule): a miner's node
+/// asks while the miner expects fewer than this many weak shares a month.
+pub const ASK_WEAK_SHARES_PER_MONTH: f64 = 16.0;
 
 /// Share of a weak share's work that goes to the share carrying it:
-/// `INCLUDER_CUT` = 2% *(sim)*.
-pub const INCLUDER_CUT: f64 = 0.02;
+/// `INCLUDER_CUT` = 1%, the rule since study #85 (the page first proposed
+/// 2%, then set 5%).
+pub const INCLUDER_CUT: f64 = 0.01;
 
 /// Shares a miner must hold in Cash Dragon's floor window before it can set
 /// the floor: the presence minimum `N` = 3 (`docs/sharechain/vardiff-sharechain.md`
@@ -117,10 +136,18 @@ pub const INCLUDER_CUT: f64 = 0.02;
 pub const VARDIFF_PRESENCE_SHARES: f64 = 3.0;
 
 /// Smallest payout level, Bitcoin Cash's P2PKH dust limit in satoshis
-/// (design page, section 4, "Levels"): level `k` is `546 * 2^k`.
+/// (design page, section 4, "Levels"): level `k` is `546 * 2^k`. Level 0
+/// pays this and is not a level a miner may carry.
 pub const DUST_LEVEL_SATOSHIS: u64 = 546;
 
-/// Number of payout levels, `k` = 0 to 7.
+/// The lowest payout level a miner may carry. Level 0 paid 546 satoshis,
+/// which is below dust once the payout tree's fee is taken, so a level 0
+/// win that landed in the tree went to the tree's largest payee. `u32`,
+/// like [`DEFAULT_LEVEL`]: this simulator does not link `p2poolv2_lib`.
+pub const MIN_PAYOUT_LEVEL: u32 = 1;
+
+/// Number of payout level slots, `k` = 0 to 7. A miner may not carry level
+/// 0; the shift still has a slot for it so `546 * 2^k` stays the same.
 pub const LEVEL_COUNT: u32 = 8;
 
 /// The node's default payout level, 5: 17,472 satoshis.
@@ -149,3 +176,16 @@ pub const STALE_RATE_BY_PERIOD: [(f64, f64); 5] = [
     (10.0, 0.021),
     (30.0, 0.005),
 ];
+
+/// `INCLUDER_CUT` as the design page now sets it, 100 basis points (1%),
+/// since study #85 (500 before). The study tables use it unless they sweep
+/// the cut.
+pub const PAGE_INCLUDER_CUT: f64 = INCLUDER_CUT;
+
+/// ASERT's half-life on the share chain, seconds (`HALFLIFE`,
+/// `docs/difficulty_adjustment/asert.md`).
+pub const ASERT_HALF_LIFE_SECONDS: f64 = 600.0;
+
+/// Medium miners' sizes in the medium mixes: five log-spaced sizes from 30
+/// to 300 TH/s, each holding an equal part of the medium hashrate.
+pub const MEDIUM_MINER_HASHRATES: [f64; 5] = [30.0e12, 53.3e12, 94.9e12, 168.7e12, 300.0e12];

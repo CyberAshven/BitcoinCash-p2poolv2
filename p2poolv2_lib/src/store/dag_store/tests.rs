@@ -1919,7 +1919,7 @@ fn test_find_uncles_finds_single_uncle() {
         .build();
 
     // Store uncle with Valid metadata so find_uncles can read its metadata
-    store.store_with_valid_metadata(&uncle1);
+    store.store_with_block_valid_metadata(&uncle1);
 
     // Confirm share1 using push_to_confirmed_chain
     store.push_to_confirmed_chain(&share1).unwrap();
@@ -2031,13 +2031,13 @@ fn test_find_uncles_finds_multiple_uncles_at_different_heights() {
 
     // Store uncles with Valid metadata before confirming their parent levels.
     // Uncle parents must have metadata for cumulative chain_work to be correct.
-    store.store_with_valid_metadata(&uncle0);
+    store.store_with_block_valid_metadata(&uncle0);
     store.push_to_confirmed_chain(&share1).unwrap();
 
-    store.store_with_valid_metadata(&uncle1);
+    store.store_with_block_valid_metadata(&uncle1);
     store.push_to_confirmed_chain(&share2).unwrap();
 
-    store.store_with_valid_metadata(&uncle2);
+    store.store_with_block_valid_metadata(&uncle2);
     store.push_to_confirmed_chain(&share3).unwrap();
 
     // find_uncles should find uncle0, uncle1, uncle2
@@ -2106,10 +2106,10 @@ fn test_find_uncles_excludes_uncles_beyond_depth_3() {
 
     // Confirm main chain up to each uncle's parent before storing uncles
     store.push_to_confirmed_chain(&share1).unwrap();
-    store.store_with_valid_metadata(&uncle_deep);
+    store.store_with_block_valid_metadata(&uncle_deep);
     store.push_to_confirmed_chain(&share2).unwrap();
     store.push_to_confirmed_chain(&share3).unwrap();
-    store.store_with_valid_metadata(&uncle_within);
+    store.store_with_block_valid_metadata(&uncle_within);
     store.push_to_confirmed_chain(&share4).unwrap();
     store.push_to_confirmed_chain(&share5).unwrap();
 
@@ -2128,8 +2128,13 @@ fn test_find_uncles_excludes_uncles_beyond_depth_3() {
 /// selection only -- `validate_uncles` still accepts a peer's nephew that
 /// references such a block, because uncle acceptance must not depend on
 /// per-node validation progress.
+///
+/// Nor is a block only header-validated: a peer relays a share once its
+/// header checks out, before any node has validated its body, so this node
+/// names as an uncle only a share it has fully validated, as it mines only
+/// on one.
 #[test]
-fn test_find_uncles_excludes_invalid_and_keeps_header_valid() {
+fn test_find_uncles_excludes_invalid_and_header_valid() {
     let temp_dir = tempdir().unwrap();
     let store = Store::new(temp_dir.path().to_str().unwrap().to_string(), false).unwrap();
 
@@ -2184,8 +2189,8 @@ fn test_find_uncles_excludes_invalid_and_keeps_header_valid() {
         "a validated sibling is still an uncle"
     );
     assert!(
-        uncles.contains(&header_valid.block_hash()),
-        "an uncle needs a body, not chain-context validation"
+        !uncles.contains(&header_valid.block_hash()),
+        "a share whose body this node has not validated must not be an uncle"
     );
 }
 
@@ -2472,26 +2477,26 @@ fn test_find_uncles_excludes_nephew_read_as_child() {
         .prev_share_blockhash(b.block_hash().to_string())
         .nonce(100)
         .build();
-    store.store_with_valid_metadata(&sibling);
+    store.store_with_block_valid_metadata(&sibling);
 
     let b_fork = TestShareBlockBuilder::new()
         .prev_share_blockhash(a.block_hash().to_string())
         .nonce(101)
         .build();
-    store.store_with_valid_metadata(&b_fork);
+    store.store_with_block_valid_metadata(&b_fork);
 
     let p = TestShareBlockBuilder::new()
         .prev_share_blockhash(b_fork.block_hash().to_string())
         .nonce(102)
         .build();
-    store.store_with_valid_metadata(&p);
+    store.store_with_block_valid_metadata(&p);
 
     let nephew = TestShareBlockBuilder::new()
         .prev_share_blockhash(p.block_hash().to_string())
         .uncles(vec![b.block_hash()])
         .nonce(103)
         .build();
-    store.store_with_valid_metadata(&nephew);
+    store.store_with_block_valid_metadata(&nephew);
 
     // Mirror what organise_header writes for a declared uncle.
     let mut batch = Store::get_write_batch();
@@ -2563,8 +2568,8 @@ fn test_find_uncles_excludes_uncles_listed_by_ancestors() {
 
     // Confirm share1 first so uncle1 and uncle2 can find their parents
     store.push_to_confirmed_chain(&share1).unwrap();
-    store.store_with_valid_metadata(&uncle1);
-    store.store_with_valid_metadata(&uncle2);
+    store.store_with_block_valid_metadata(&uncle1);
+    store.store_with_block_valid_metadata(&uncle2);
 
     // Confirm share2
     store.push_to_confirmed_chain(&share2).unwrap();
@@ -2617,8 +2622,8 @@ fn test_find_uncles_includes_uncle_listed_only_off_chain() {
         .build();
 
     store.push_to_confirmed_chain(&share1).unwrap();
-    store.store_with_valid_metadata(&uncle1);
-    store.store_with_valid_metadata(&losing_nephew);
+    store.store_with_block_valid_metadata(&uncle1);
+    store.store_with_block_valid_metadata(&losing_nephew);
     store.push_to_confirmed_chain(&share2).unwrap();
 
     // organise_header records every listed uncle in the uncles index,
@@ -2719,15 +2724,15 @@ fn test_find_uncles_returns_max_3_uncles_by_chain_work() {
         .build();
 
     // Store uncle shares with Valid metadata so find_uncles can read their metadata
-    store.store_with_valid_metadata(&uncle_a);
-    store.store_with_valid_metadata(&uncle_b);
-    store.store_with_valid_metadata(&uncle_c);
+    store.store_with_block_valid_metadata(&uncle_a);
+    store.store_with_block_valid_metadata(&uncle_b);
+    store.store_with_block_valid_metadata(&uncle_c);
 
     // Confirm share1 first, so uncle_d's parent has metadata
     store.push_to_confirmed_chain(&share1).unwrap();
 
     // Now store uncle_d (its parent share1 now has metadata)
-    store.store_with_valid_metadata(&uncle_d);
+    store.store_with_block_valid_metadata(&uncle_d);
 
     // Confirm share2
     store.push_to_confirmed_chain(&share2).unwrap();
@@ -2780,9 +2785,9 @@ fn test_find_uncles_orders_equal_work_uncles_by_blockhash() {
         .nonce(102)
         .build();
 
-    store.store_with_valid_metadata(&uncle_a);
-    store.store_with_valid_metadata(&uncle_b);
-    store.store_with_valid_metadata(&uncle_c);
+    store.store_with_block_valid_metadata(&uncle_a);
+    store.store_with_block_valid_metadata(&uncle_b);
+    store.store_with_block_valid_metadata(&uncle_c);
     store.push_to_confirmed_chain(&share1).unwrap();
 
     let uncles = store.find_uncles(&share1.block_hash()).unwrap();
@@ -2836,10 +2841,10 @@ fn test_find_uncles_keeps_lowest_blockhashes_when_equal_work_exceeds_max() {
         .nonce(103)
         .build();
 
-    store.store_with_valid_metadata(&uncle_a);
-    store.store_with_valid_metadata(&uncle_b);
-    store.store_with_valid_metadata(&uncle_c);
-    store.store_with_valid_metadata(&uncle_d);
+    store.store_with_block_valid_metadata(&uncle_a);
+    store.store_with_block_valid_metadata(&uncle_b);
+    store.store_with_block_valid_metadata(&uncle_c);
+    store.store_with_block_valid_metadata(&uncle_d);
     store.push_to_confirmed_chain(&share1).unwrap();
 
     let uncles = store.find_uncles(&share1.block_hash()).unwrap();
@@ -2916,19 +2921,19 @@ fn test_find_uncles_with_deep_chain_only_looks_at_last_3_heights() {
 
     // Store uncle shares with Valid metadata so find_uncles can discover them.
     // Uncle parents must be confirmed first so metadata chain_work is correct.
-    store.store_with_valid_metadata(&uncle1);
+    store.store_with_block_valid_metadata(&uncle1);
     store.push_to_confirmed_chain(&share1).unwrap();
 
-    store.store_with_valid_metadata(&uncle2);
+    store.store_with_block_valid_metadata(&uncle2);
     store.push_to_confirmed_chain(&share2).unwrap();
 
-    store.store_with_valid_metadata(&uncle3);
+    store.store_with_block_valid_metadata(&uncle3);
     store.push_to_confirmed_chain(&share3).unwrap();
 
-    store.store_with_valid_metadata(&uncle4);
+    store.store_with_block_valid_metadata(&uncle4);
     store.push_to_confirmed_chain(&share4).unwrap();
 
-    store.store_with_valid_metadata(&uncle5);
+    store.store_with_block_valid_metadata(&uncle5);
     store.push_to_confirmed_chain(&share5).unwrap();
 
     store.push_to_confirmed_chain(&share6).unwrap();
@@ -2989,7 +2994,7 @@ fn test_find_uncles_anchors_on_leading_base_not_confirmed_tip() {
         .build();
 
     store.push_to_confirmed_chain(&c1).unwrap();
-    store.store_with_valid_metadata(&deep_uncle);
+    store.store_with_block_valid_metadata(&deep_uncle);
     store.push_to_confirmed_chain(&c2).unwrap();
     store.push_to_confirmed_chain(&c3).unwrap();
 
@@ -3008,9 +3013,9 @@ fn test_find_uncles_anchors_on_leading_base_not_confirmed_tip() {
         .prev_share_blockhash(f4.block_hash().to_string())
         .nonce(5)
         .build();
-    store.store_with_valid_metadata(&f4);
-    store.store_with_valid_metadata(&near_uncle);
-    store.store_with_valid_metadata(&f5);
+    store.store_with_block_valid_metadata(&f4);
+    store.store_with_block_valid_metadata(&near_uncle);
+    store.store_with_block_valid_metadata(&f5);
 
     // Anchored on the leading base f5 (the nephew would be at height 6).
     let uncles = store.find_uncles(&f5.block_hash()).unwrap();
@@ -3080,15 +3085,15 @@ fn test_find_uncles_prefers_higher_chain_work_over_height() {
         .build();
 
     // Store uncle shares at height 1 with Valid metadata (parent share0 has metadata from genesis)
-    store.store_with_valid_metadata(&uncle_mid_a);
-    store.store_with_valid_metadata(&uncle_mid_b);
+    store.store_with_block_valid_metadata(&uncle_mid_a);
+    store.store_with_block_valid_metadata(&uncle_mid_b);
 
     // Confirm share1 so uncles at height 2 can compute their metadata
     store.push_to_confirmed_chain(&share1).unwrap();
 
     // Store uncle shares at height 2 with Valid metadata
-    store.store_with_valid_metadata(&uncle_high);
-    store.store_with_valid_metadata(&uncle_low);
+    store.store_with_block_valid_metadata(&uncle_high);
+    store.store_with_block_valid_metadata(&uncle_low);
 
     // Confirm share2
     store.push_to_confirmed_chain(&share2).unwrap();
@@ -3133,7 +3138,7 @@ fn test_find_uncles_excludes_chain_tip() {
         .prev_share_blockhash(share1.block_hash().to_string())
         .nonce(99)
         .build();
-    store.store_with_valid_metadata(&fork_uncle);
+    store.store_with_block_valid_metadata(&fork_uncle);
 
     let share2 = TestShareBlockBuilder::new()
         .prev_share_blockhash(share1.block_hash().to_string())
@@ -3169,6 +3174,7 @@ fn test_share_info_serialization() {
         miner_address: make_test_share_program(1).into(),
         timestamp: 1_700_000_000,
         bits: CompactTarget::from_consensus(0x1b4188f5),
+        weak_count: 0,
         uncles: vec![],
     };
 
@@ -3207,6 +3213,7 @@ fn test_share_info_with_uncles_serialization() {
         miner_address: make_test_share_program(1).into(),
         timestamp: 1_700_000_020,
         bits: CompactTarget::from_consensus(0x1b4188f5),
+        weak_count: 0,
         uncles: vec![uncle],
     };
 

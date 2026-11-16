@@ -82,13 +82,6 @@ allow-git = ["https://github.com/mainnet-pat/libauth-rs"]
 # condition under which it is removed. An ignore list without removal
 # conditions becomes permanent.
 ignore = [
-    # Reachable, blocked upstream in libp2p. libp2p-dns 0.44 pins
-    # hickory-resolver 0.25, and the fix for RUSTSEC-2026-0119 is in
-    # hickory-proto 0.26.1. RUSTSEC-2026-0118 has no patched release at all.
-    # Remove both when libp2p moves to hickory 0.26.
-    "RUSTSEC-2026-0118",  # hickory-proto 0.25.2, no fix published
-    "RUSTSEC-2026-0119",  # hickory-proto 0.25.2, fixed in >=0.26.1
-
     # Reachable only in offline tools, blocked upstream. crypto-bigint 0.5.5
     # now comes only from k256 0.13 inside libauth (pinned git revision),
     # used by p2poolv2_safa and p2poolv2_photon_payout, which never run in the

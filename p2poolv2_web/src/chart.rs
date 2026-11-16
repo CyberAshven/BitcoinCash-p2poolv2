@@ -934,6 +934,7 @@ mod tests {
             share_blockhash: "00".to_string(),
             bitcoin_time: time,
             miner_bitcoin_address: "bchtest:qtest".to_string(),
+            effort: None,
         }
     }
 

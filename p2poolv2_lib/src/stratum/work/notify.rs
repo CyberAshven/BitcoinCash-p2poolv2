@@ -216,6 +216,7 @@ fn build_prepared_notify(
     .share_version(share_version)
     .band_cap(band_cap)
     .share_rate_limit(share_rate_limit)
+    .target_ceiling(Some(context.pool_difficulty.target_ceiling()))
     .weak_shares(weak_ratio, weak_shares)
     .weak_target(weak_target)
     .pool_hashrate(pool_hashrate)

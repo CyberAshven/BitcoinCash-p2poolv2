@@ -639,6 +639,14 @@ footer.site-footer a {
   box-shadow: inset 0 -1px 0 var(--pico-border-color);
 }
 
+/* The peers table's Address cell: a long IPv6 (or an /ip6/ multiaddr
+   fallback) wraps inside the column instead of widening the table into a
+   horizontal scrollbar. IPv4 stays on one line; break-all only kicks in
+   when space runs out. */
+.table-wrap .peer-addr {
+  word-break: break-all;
+}
+
 .more-row {
   display: flex;
   justify-content: center;
@@ -785,6 +793,14 @@ footer.site-footer a {
   align-items: center;
   padding: 0.4rem 0.6rem;
   font-size: 0.8rem;
+}
+
+/* The miners page's table adds the Hashrate column (after Workers). */
+.miners-grid.hashrate-col .grid-head,
+.miners-grid.hashrate-col .grid-row {
+  grid-template-columns:
+    2.2rem minmax(9rem, 1fr) 5.5rem 5.5rem 5.5rem 4.5rem 6.5rem 5.5rem
+    2rem;
 }
 
 .miners-grid .grid-head {

@@ -488,8 +488,11 @@ pub async fn flamegraph() -> ToolResult<()> {
     let root = repo::root();
     let plan = repo::jmeter_dir().join("stratum.jmx");
     let config = root.join("config-load-test.toml");
-    let temporary = std::env::temp_dir();
-    let build_log = temporary.join("flamegraph-build.log");
+    // The logs stay in this checkout, not in the shared temporary folder,
+    // where another user could have placed a file or link of the same name.
+    let logs = root.join("target").join("flamegraph");
+    std::fs::create_dir_all(&logs).map_err(|error| ToolError::io("create", &logs, error))?;
+    let build_log = logs.join("flamegraph-build.log");
 
     start_mock_bitcoind().await?;
 
@@ -534,15 +537,9 @@ pub async fn flamegraph() -> ToolResult<()> {
         "-t".to_string(),
         plan.display().to_string(),
         "-l".to_string(),
-        temporary
-            .join("flamegraph-loadtest.jtl")
-            .display()
-            .to_string(),
+        logs.join("flamegraph-loadtest.jtl").display().to_string(),
         "-j".to_string(),
-        temporary
-            .join("flamegraph-jmeter.log")
-            .display()
-            .to_string(),
+        logs.join("flamegraph-jmeter.log").display().to_string(),
     ])?;
     log("jmeter complete");
 

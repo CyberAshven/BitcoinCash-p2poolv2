@@ -6,25 +6,25 @@ use super::*;
 
 #[test]
 fn confirmed_heights_reads_the_height() {
-    let line = b"x Promoted block ab to confirmed height Some(42) y";
+    let line = b"x Promoted block ab to confirmed height 42: diff=1 y";
     assert_eq!(confirmed_heights(line).collect::<Vec<_>>(), vec![42]);
 }
 
 #[test]
-fn confirmed_heights_needs_the_closing_paren() {
-    let line = b"to confirmed height Some(42";
+fn confirmed_heights_needs_the_colon() {
+    let line = b"to confirmed height 42";
     assert_eq!(confirmed_heights(line).count(), 0);
 }
 
 #[test]
 fn confirmed_heights_ignores_uncles() {
-    let line = b"Promoted block ab to confirmed height None";
+    let line = b"Promoted block ab to confirmed height -1: diff=1";
     assert_eq!(confirmed_heights(line).count(), 0);
 }
 
 #[test]
 fn promoted_hashes_reads_hex_runs() {
-    let line = b"Promoted block 00ff to confirmed height None";
+    let line = b"Promoted block 00ff to confirmed height -1: diff=1";
     assert_eq!(
         promoted_hashes(line).collect::<Vec<_>>(),
         vec![&b"00ff"[..]]
@@ -43,7 +43,7 @@ fn confirmed_height_range_spans_the_log() {
     let path = directory.path().join("node-0.log");
     std::fs::write(
         &path,
-        "a Promoted block 11 to confirmed height Some(5)\nb Promoted block 12 to confirmed height Some(3)\nc Promoted block 13 to confirmed height None\n",
+        "a Promoted block 11 to confirmed height 5: diff=1\nb Promoted block 12 to confirmed height 3: diff=1\nc Promoted block 13 to confirmed height -1: diff=1\n",
     )
     .expect("write log");
     assert_eq!(
@@ -66,7 +66,7 @@ fn first_hash_at_height_takes_the_first_promotion() {
     let path = directory.path().join("node-0.log");
     std::fs::write(
         &path,
-        "Promoted block 1111111111111111aa to confirmed height Some(70)\nPromoted block 2222222222222222bb to confirmed height Some(7)\nPromoted block 3333333333333333cc to confirmed height Some(7)\n",
+        "Promoted block 1111111111111111aa to confirmed height 70: diff=1\nPromoted block 2222222222222222bb to confirmed height 7: diff=1\nPromoted block 3333333333333333cc to confirmed height 7: diff=1\n",
     )
     .expect("write log");
     assert_eq!(

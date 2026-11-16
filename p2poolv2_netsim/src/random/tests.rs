@@ -112,3 +112,24 @@ fn normal_draws_have_the_requested_mean_and_spread() {
         "deviation was {variance}"
     );
 }
+
+#[test]
+fn a_branch_leaves_its_parent_where_it_was() {
+    let mut parent = SimulationRandom::from_seed(7);
+    let mut untouched = SimulationRandom::from_seed(7);
+    let _branch = parent.branch(99);
+    assert_eq!(parent.next_u64(), untouched.next_u64());
+    assert_eq!(parent.next_u64(), untouched.next_u64());
+}
+
+#[test]
+fn a_branch_differs_from_its_parent_and_from_other_branches() {
+    let mut parent = SimulationRandom::from_seed(7);
+    let mut first = parent.branch(1);
+    let mut second = parent.branch(2);
+    let mut first_again = parent.branch(1);
+    let first_draw = first.next_u64();
+    assert_ne!(first_draw, parent.next_u64());
+    assert_ne!(first_draw, second.next_u64());
+    assert_eq!(first_draw, first_again.next_u64());
+}

@@ -9,11 +9,16 @@
 //! never exposed as found blocks until a trusted caller verifies BCHN
 //! acceptance and records them separately in AcceptedFoundBlocks. Neither record changes share
 //! confirmation, payout eligibility or any share-chain rule.
+//!
+//! Each acceptance also snapshots the block effort metric (work since the
+//! previous find and the network difficulty at that moment) into the
+//! AcceptedBlockEffort column family, keyed by the accepted blockhash.
 
 use super::{ColumnFamily, Store, writer::StoreError};
 use crate::shares::share_block::ShareHeader;
 use bitcoin::BlockHash;
 use bitcoin::consensus::encode::{self, Decodable, Encodable};
+use serde::{Deserialize, Serialize};
 
 /// Size of the big endian bitcoin height prefix in a block record key.
 const HEIGHT_KEY_PREFIX_LENGTH: usize = 8;
@@ -36,6 +41,26 @@ pub struct FoundBlock {
     pub bitcoin_time: u32,
     /// Bitcoin address of the miner that found the block
     pub miner_bitcoin_address: String,
+    /// The block effort metric at acceptance, from AcceptedBlockEffort.
+    /// Always `None` for candidates, and for an accepted block recorded
+    /// before its snapshot arrived or without one.
+    pub effort: Option<EffortSnapshot>,
+}
+
+/// The block effort metric captured when a find resets it: the confirmed
+/// sharechain work since the previous find (the numerator of the effort
+/// ratio) and the network difficulty of the block's header at that moment
+/// (the denominator). Kept per accepted block so the effort percent stays
+/// reproducible after the difficulty moves on.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct EffortSnapshot {
+    /// Confirmed sharechain pool difficulty accumulated since the previous
+    /// find: the value the metrics actor's counter reset to zero at.
+    pub work: f64,
+    /// Network difficulty from the found block header's own nBits, the same
+    /// mainnet-relative units as the live `network_difficulty` gauge.
+    /// `None` when the header could not be read at acceptance.
+    pub network_difficulty: Option<f64>,
 }
 
 /// The value half of a FoundBlocks entry, encoded with bitcoin consensus
@@ -77,6 +102,45 @@ fn found_block_key(bitcoin_height: u64, bitcoin_blockhash: &BlockHash) -> Vec<u8
     key.extend_from_slice(&bitcoin_height.to_be_bytes());
     key.extend_from_slice(&encode::serialize(bitcoin_blockhash));
     key
+}
+
+/// The AcceptedBlockEffort key: the accepted blockhash alone, enough to
+/// identify the block and still readable at the point lookups the join
+/// makes.
+fn effort_key(bitcoin_blockhash: &BlockHash) -> Vec<u8> {
+    encode::serialize(bitcoin_blockhash)
+}
+
+impl Encodable for EffortSnapshot {
+    fn consensus_encode<W: bitcoin::io::Write + ?Sized>(
+        &self,
+        writer: &mut W,
+    ) -> Result<usize, bitcoin::io::Error> {
+        let mut length = self.work.to_bits().consensus_encode(writer)?;
+        length += self.network_difficulty.is_some().consensus_encode(writer)?;
+        if let Some(network_difficulty) = self.network_difficulty {
+            length += network_difficulty.to_bits().consensus_encode(writer)?;
+        }
+        Ok(length)
+    }
+}
+
+impl Decodable for EffortSnapshot {
+    fn consensus_decode<R: bitcoin::io::Read + ?Sized>(
+        reader: &mut R,
+    ) -> Result<Self, encode::Error> {
+        let work = u64::consensus_decode(reader)?;
+        let has_difficulty = bool::consensus_decode(reader)?;
+        let network_difficulty = if has_difficulty {
+            Some(f64::from_bits(u64::consensus_decode(reader)?))
+        } else {
+            None
+        };
+        Ok(EffortSnapshot {
+            work: f64::from_bits(work),
+            network_difficulty,
+        })
+    }
 }
 
 impl Store {
@@ -163,6 +227,49 @@ impl Store {
         Ok(true)
     }
 
+    /// Keep the effort snapshot taken when a find reset the block effort
+    /// metric, written right after [`Self::record_accepted_found_block`]
+    /// inserts the accepted block. The snapshot is an annotation: if it
+    /// cannot be written the accepted block still stands, without effort.
+    pub(crate) fn set_accepted_found_block_effort(
+        &self,
+        bitcoin_blockhash: &BlockHash,
+        snapshot: EffortSnapshot,
+    ) -> Result<(), StoreError> {
+        let column_family = self
+            .db
+            .cf_handle(&ColumnFamily::AcceptedBlockEffort)
+            .expect("accepted_block_effort CF registered on read-write open");
+        let mut batch = Self::get_write_batch();
+        batch.put_cf(
+            &column_family,
+            effort_key(bitcoin_blockhash),
+            encode::serialize(&snapshot),
+        );
+        self.commit_batch(batch)?;
+        Ok(())
+    }
+
+    /// The effort snapshot kept for an accepted block, `None` when the
+    /// block was accepted before snapshots were kept, its snapshot failed
+    /// to write, or the open has no effort column family: read-only tools
+    /// never request it and so report accepted finds without effort.
+    pub fn get_accepted_found_block_effort(
+        &self,
+        bitcoin_blockhash: &BlockHash,
+    ) -> Result<Option<EffortSnapshot>, StoreError> {
+        let Some(column_family) = self.db.cf_handle(&ColumnFamily::AcceptedBlockEffort) else {
+            return Ok(None);
+        };
+        match self
+            .db
+            .get_pinned_cf(&column_family, effort_key(bitcoin_blockhash))?
+        {
+            Some(value) => Ok(Some(encode::deserialize(&value)?)),
+            None => Ok(None),
+        }
+    }
+
     /// Return BCHN-accepted pool blocks, ordered by Bitcoin Cash height.
     pub fn get_found_blocks(&self) -> Result<Vec<FoundBlock>, StoreError> {
         let column_family = self
@@ -175,7 +282,10 @@ impl Store {
             .iterator_cf(&column_family, rocksdb::IteratorMode::Start)
         {
             let (key, value) = item?;
-            found_blocks.push(decode_found_block(&key, &value)?);
+            let mut found_block = decode_found_block(&key, &value)?;
+            found_block.effort =
+                self.get_accepted_found_block_effort(&found_block.bitcoin_blockhash)?;
+            found_blocks.push(found_block);
         }
         Ok(found_blocks)
     }
@@ -221,6 +331,7 @@ fn decode_found_block(key: &[u8], value: &[u8]) -> Result<FoundBlock, StoreError
         share_blockhash: decoded_value.share_blockhash,
         bitcoin_time: decoded_value.bitcoin_time,
         miner_bitcoin_address: decoded_value.miner_bitcoin_address,
+        effort: None,
     })
 }
 

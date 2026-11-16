@@ -49,7 +49,7 @@ use crate::accounting::payout::coinbase_budget::PayoutSplit;
 #[cfg(any(test, feature = "test-utils"))]
 use crate::accounting::payout::payout_distribution::build_pplns_outputs;
 #[cfg(any(test, feature = "test-utils"))]
-use crate::accounting::payout::payout_levels::PplnsWeights;
+use crate::accounting::payout::payout_levels::{MIN_PAYOUT_LEVEL, PplnsWeights};
 #[cfg(test)]
 use crate::accounting::stats::metrics;
 #[cfg(any(test, feature = "test-utils"))]
@@ -1709,6 +1709,17 @@ pub struct TestWeakShare<'a> {
 /// whatever the hash.
 #[cfg(test)]
 pub fn build_test_weak_share(weak: TestWeakShare<'_>) -> crate::shares::weak::WeakShare {
+    build_test_weak_share_paying(weak, 5_000_000_000)
+}
+
+/// A weak share as [`build_test_weak_share`] builds it, whose coinbase pays
+/// `coinbase_value` satoshis instead of 50 BCH: one on another template of
+/// the same Bitcoin Cash block, with other fees.
+#[cfg(test)]
+pub fn build_test_weak_share_paying(
+    weak: TestWeakShare<'_>,
+    coinbase_value: u64,
+) -> crate::shares::weak::WeakShare {
     let owner = [0x33; 20];
     let payout: PayoutAddress = Address::p2pkh(
         bitcoin::PubkeyHash::from_byte_array(owner),
@@ -1733,12 +1744,11 @@ pub fn build_test_weak_share(weak: TestWeakShare<'_>) -> crate::shares::weak::We
         asert_bits: weak.minimum,
         wanted_bits: weak.bits,
         band_cap: crate::shares::band::BAND_CAP_UNIT,
-        payout_level: 0,
+        payout_level: MIN_PAYOUT_LEVEL,
         weak_ratio: weak.weak_ratio,
         weak_count: 0,
         weak_root: crate::shares::weak::empty_weak_root(),
     };
-    let coinbase_value = 5_000_000_000;
     let mut header = ShareHeader::from_commitment_and_header(
         commitment.clone(),
         Header {
@@ -2391,7 +2401,10 @@ impl TestShareBand {
 #[cfg(any(test, feature = "test-utils"))]
 impl TestShareBlockBuilder {
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            payout_level: MIN_PAYOUT_LEVEL,
+            ..Self::default()
+        }
     }
 
     pub fn bitcoin_header(mut self, bitcoin_block: Block) -> Self {
@@ -2493,7 +2506,8 @@ impl TestShareBlockBuilder {
     }
 
     /// Commit payout level `payout_level` (`accounting::payout::payout_levels`)
-    /// instead of level 0. A Bitcoin share carries no level.
+    /// instead of the lowest a Bitcoin Cash share may carry. A Bitcoin share
+    /// carries no level.
     pub fn payout_level(mut self, payout_level: u8) -> Self {
         self.payout_level = payout_level;
         self
@@ -2564,6 +2578,24 @@ impl TestShareBlockBuilder {
                 weak_shares: self.weak_shares,
             },
         )
+    }
+}
+
+/// A Bitcoin Cash weak share mined on `parent`, known by the proof-of-work
+/// hash `nonce` gives it, for tests that need only its identity and parent:
+/// its coinbase fields are placeholders no check would pass.
+#[cfg(any(test, feature = "test-utils"))]
+pub fn test_weak_share_on(parent: BlockHash, nonce: u32) -> crate::shares::weak::WeakShare {
+    crate::shares::weak::WeakShare {
+        header: TestShareBlockBuilder::new()
+            .share_owner(ShareOwner::CashP2pkh([0x33; 20]))
+            .prev_share_blockhash(parent.to_string())
+            .nonce(nonce)
+            .build()
+            .header,
+        coinbase_script_sig: bitcoin::ScriptBuf::new(),
+        coinbase_value: 1,
+        merkle_branch: Vec::new(),
     }
 }
 

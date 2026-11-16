@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 use super::*;
+use crate::constants::MIN_PAYOUT_LEVEL;
 use p2poolv2_netsim::random::SimulationRandom;
 
 #[test]
@@ -10,6 +11,21 @@ fn levels_double_from_the_dust_limit() {
     assert_eq!(level_amount(0), 546);
     assert_eq!(level_amount(5), 17_472);
     assert_eq!(level_amount(7), 69_888);
+}
+
+#[test]
+fn a_level_below_the_lowest_is_refused() {
+    assert_eq!(
+        require_payout_level(0),
+        Err(payout_level_too_low(0)),
+        "level 0"
+    );
+    assert_eq!(
+        require_payout_level(MIN_PAYOUT_LEVEL),
+        Ok(MIN_PAYOUT_LEVEL),
+        "lowest level"
+    );
+    assert!(require_payout_level(8).is_err(), "level 8");
 }
 
 #[test]

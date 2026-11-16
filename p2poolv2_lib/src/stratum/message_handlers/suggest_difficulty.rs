@@ -11,6 +11,12 @@ use tracing::debug;
 /// Handle the "mining.suggest_difficulty" message
 /// Applies difficulty adjuster's constraints to the suggested difficulty
 /// and stores the constrained difficulty to session.
+///
+/// If the miner already set a difficulty with `d=` or `th=` in the
+/// authorize password, the suggestion is recorded but the current
+/// difficulty is kept and resent. Firmware often sends a suggestion
+/// automatically right after authorize, and it must not override the
+/// operator's explicit password setting.
 pub async fn handle_suggest_difficulty<'a, D: DifficultyAdjusterTrait>(
     message: SuggestDifficulty<'a>,
     session: &mut Session<D>,
@@ -23,12 +29,22 @@ pub async fn handle_suggest_difficulty<'a, D: DifficultyAdjusterTrait>(
                 .difficulty_adjuster
                 .apply_difficulty_constraints(*param, Some(*param));
             session.suggested_difficulty = Some(difficulty);
-            session
-                .difficulty_adjuster
-                .set_current_difficulty(difficulty);
-            debug!("Suggested difficulty set to {}", difficulty);
+            let effective_difficulty = if session.difficulty_from_password {
+                let current_difficulty = session.difficulty_adjuster.get_current_difficulty();
+                debug!(
+                    "Ignoring suggested difficulty {} in favour of password difficulty {}",
+                    difficulty, current_difficulty
+                );
+                current_difficulty
+            } else {
+                session
+                    .difficulty_adjuster
+                    .set_current_difficulty(difficulty);
+                debug!("Suggested difficulty set to {}", difficulty);
+                difficulty
+            };
             Ok(vec![Message::SetDifficulty(
-                SetDifficultyNotification::new(difficulty),
+                SetDifficultyNotification::new(effective_difficulty),
             )])
         }
         None => Err(Error::InvalidParams(
@@ -88,5 +104,38 @@ mod tests {
             panic!("Expected SetDifficulty message");
         }
         assert_eq!(session.suggested_difficulty, Some(100));
+    }
+
+    /// On Bitcoin Cash a job's share difficulty caps the session, so a miner
+    /// never skips hashes that are valid shares. A password difficulty above
+    /// it is lowered by the job, and a suggestion the password difficulty
+    /// now ignores does not lift it back.
+    #[tokio::test]
+    async fn test_suggest_difficulty_keeps_password_difficulty_under_share_difficulty() {
+        let mut session = Session::<DifficultyAdjuster>::new(1, 1, None, DEFAULT_VERSION_MASK);
+        session.difficulty_adjuster.set_current_difficulty(500000);
+        session.difficulty_from_password = true;
+        assert_eq!(
+            session
+                .difficulty_adjuster
+                .set_share_difficulty_ceiling(Some(100000)),
+            Some(100000)
+        );
+        let request = SuggestDifficulty {
+            id: Some(Id::Number(1)),
+            method: "mining.suggest_difficulty".into(),
+            params: Cow::Owned(vec![16384]),
+        };
+
+        let messages = handle_suggest_difficulty(request, &mut session)
+            .await
+            .unwrap();
+
+        assert_eq!(session.difficulty_adjuster.get_current_difficulty(), 100000);
+        if let Message::SetDifficulty(notification) = &messages[0] {
+            assert_eq!(notification.params[0], 100000);
+        } else {
+            panic!("Expected SetDifficulty message");
+        }
     }
 }

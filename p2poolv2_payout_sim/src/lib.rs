@@ -17,14 +17,21 @@
 //!
 //! See `README.md` for the model, its assumptions and the results.
 
+pub mod ask_paths;
+pub mod ask_study;
+pub mod asks;
 pub mod constants;
 pub mod difficulty;
 pub mod levels;
 pub mod miners;
 pub mod payouts;
+pub mod races;
 pub mod report;
 pub mod sampling;
 pub mod scenario;
+pub mod storage;
+pub mod study;
 pub mod tables;
+pub mod transition;
 pub mod weak;
 pub mod window;

@@ -13,7 +13,7 @@ use crate::stratum::work::tracker::start_tracker_actor;
 use crate::test_utils::{
     TEST_COINBASE_NSECS, build_pool_job_submit, build_token_win_submit, create_test_commitment,
     load_valid_stratum_work_components, setup_test_chain_store_handle, solve_job_submit,
-    test_bch_prepared_with_tree_payees, test_bch_stratum_context,
+    test_bch_prepared_with_tree_payees, test_bch_stratum_context, test_weak_share_on,
 };
 use bitcoin::{Address, BlockHash, Network, PubkeyHash};
 use bitcoindrpc::BitcoindRpcClient;
@@ -70,6 +70,64 @@ async fn a_found_tree_is_stored_with_the_submitted_coinbase_and_share() {
     );
     assert_eq!(stored[0].share_blockhash, expected_share.block_hash());
     assert_eq!(stored[0].payees, job.payout_tree.unwrap().payees());
+}
+
+/// A share this node's miner finds on a job carrying weak shares counts them
+/// as carried by this node's shares, once the share goes to the share chain.
+/// The job's share target is set to regtest's block target, so the share
+/// the test solves meets it.
+#[tokio::test]
+async fn an_emitted_share_counts_its_jobs_weak_shares_as_carried_by_this_node() {
+    let (ctx, _emissions, _directories) = test_bch_stratum_context("http://127.0.0.1:1").await;
+    let prepared = test_bch_prepared_with_tree_payees(100);
+    let payout = PayoutAddress::from(Address::p2pkh(
+        PubkeyHash::from_byte_array([0x22; 20]),
+        Network::Regtest,
+    ));
+    let (job_id, _) = insert_miner_job(
+        &prepared,
+        Some(&payout),
+        Some(ShareOwner::CashP2pkh([0x22; 20])),
+        None,
+        None,
+        &ctx.tracker_handle,
+    );
+    let mut job = ctx.tracker_handle.get_job(job_id).unwrap();
+    job.weak_shares = Arc::from(vec![
+        test_weak_share_on(BlockHash::from_byte_array([1; 32]), 1),
+        test_weak_share_on(BlockHash::from_byte_array([1; 32]), 2),
+        test_weak_share_on(BlockHash::from_byte_array([1; 32]), 3),
+    ]);
+    job.share_commitment.as_mut().unwrap().bits =
+        bitcoin::CompactTarget::from_consensus(0x207fffff);
+    let submit = solve_job_submit(job_id, &job, "01010101", "0000000000000001");
+    let found =
+        validate_bitcoin_difficulty(&job, &submit, "01010101", DEFAULT_VERSION_MASK).unwrap();
+    let pool_share = PoolShare {
+        job_id,
+        job: &job,
+        header: found.header,
+        block_hash: found.header.block_hash(),
+        coinbase: &found.coinbase,
+        share: SimplePplnsShare::new(
+            1,
+            1,
+            "payout".to_string(),
+            "worker".to_string(),
+            0,
+            job_id.0.to_string(),
+            "0000000000000001".to_string(),
+            "00000000".to_string(),
+        ),
+        meets_credited_difficulty: true,
+    };
+
+    let emitted = emit_pool_share(&ctx, pool_share).await.unwrap();
+
+    assert!(emitted);
+    let metrics = ctx.metrics.get_metrics().await;
+    assert_eq!(metrics.weak_shares_carried_by_node, 3);
+    assert_eq!(metrics.weak_shares_carried_on_chain, 0);
 }
 
 /// A job without a share commitment (solo or Hydrapool mode) has no share to

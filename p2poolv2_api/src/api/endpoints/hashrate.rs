@@ -62,6 +62,17 @@ pub struct HashrateResponse {
     /// prepared notify, in the share chain's units). Live tracker read,
     /// independent of the samples: None until the first notify is built.
     pub share_difficulty: Option<f64>,
+    /// The numerator of the block effort metric: the sum of confirmed
+    /// share difficulties accumulated since the last accepted block find
+    /// (uncles excluded; the accumulator resets on the find). Runtime-only
+    /// state from the metrics actor, not persisted. Divide by
+    /// `network_difficulty` for the effort ratio; the formula lives in
+    /// the renderer, as it does in Grafana.
+    pub work_since_last_block: Option<f64>,
+    /// Current network difficulty (the compact target of the newest
+    /// prepared template). Live tracker read, independent of the samples:
+    /// None until the first notify is built.
+    pub network_difficulty: Option<f64>,
     /// Samples in the window, oldest first.
     pub history: Vec<HashratePoint>,
 }
@@ -108,6 +119,10 @@ async fn hashrate(
         )));
     }
     let samples = state.history.samples();
+    // One metrics actor round-trip for the whole response: the local rate
+    // it feeds before the first sample, and the effort numerator it always
+    // carries.
+    let metrics = state.app.metrics_handle.get_metrics().await;
     let current = match samples.last() {
         Some(newest) => HashratePoint::from(newest),
         None => {
@@ -116,12 +131,7 @@ async fn hashrate(
             // and the local rate from the metrics actor's window.
             let app = Arc::clone(&state.app);
             let now = history::unix_now();
-            let local = state
-                .app
-                .metrics_handle
-                .get_metrics()
-                .await
-                .local_submission_hashrate(now);
+            let local = metrics.local_submission_hashrate(now);
             let pool = tokio::task::spawn_blocking(move || {
                 let shares = history::newest_shares(&app, history::POOL_HASHRATE_SHARES);
                 let points: Vec<(u32, bitcoin::CompactTarget)> = shares
@@ -151,6 +161,8 @@ async fn hashrate(
         local_hashrate: current.local_hashrate,
         network_hashrate: current.network_hashrate,
         share_difficulty: state.app.tracker_handle.get_pool_difficulty(),
+        work_since_last_block: Some(metrics.work_since_last_block),
+        network_difficulty: state.app.tracker_handle.get_network_difficulty(),
         history: in_window(&samples, window),
     }))
 }

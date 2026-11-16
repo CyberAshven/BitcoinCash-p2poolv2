@@ -409,10 +409,7 @@ async fn jobs_commit_to_the_weak_shares_the_template_carries() {
     let minimum_commitment = minimum.share_commitment.clone().unwrap();
     assert_eq!(minimum_commitment.weak_ratio, 256_000);
     assert_eq!(minimum_commitment.weak_count, 1);
-    assert_eq!(
-        minimum_commitment.weak_root,
-        weak_share.pow_hash().to_raw_hash()
-    );
+    assert_eq!(minimum_commitment.weak_root, weak_share.committed_hash());
     assert_eq!(minimum.weak_shares.as_ref(), &[weak_share]);
     assert!(minimum_coinbase2.contains(&hex::encode(minimum_commitment.hash().as_byte_array())));
     let heavier_commitment = tracker

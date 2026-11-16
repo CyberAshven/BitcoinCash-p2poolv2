@@ -40,6 +40,17 @@ accepts only a token present in its registry, for 120 seconds after allocation,
 and consumes it once when a mining connection requests installation.
 Full-Template success rotates the random bytes without changing the terms.
 
+A token belongs to the Job Declaration connection that allocated it, and
+leaves the registry when that connection closes. A connection holds at most
+64 tokens. One more allocation is answered as usual and drops the
+connection's oldest open token (allocated, and neither declared nor used),
+or its oldest token of any state when none is open. So a client that
+allocates a token ahead of each job, and leaves it unused when the share
+chain moves first, is never closed for holding too many. A message that
+names a dropped token gets `invalid-mining-job-token`. The registry holds
+4,096 tokens for all connections together, and an allocation past that
+closes its connection.
+
 The miner supplies its payout address, BCH share owner and selected template
 revenue when constructing the share commitment. The BCH descriptor binds the
 raw scriptSig prefix and the merge-mining v2 commitment (root, tree height
@@ -60,6 +71,24 @@ and asks the local BCHN node to validate a block proposal without PoW.
 Only a null proposal result permits installation. A successful response
 contains the installed channel job id; shares can be submitted immediately.
 The pool can broadcast a complete found block in this mode.
+
+A job whose proposal the node does not accept gets
+`SetCustomMiningJob.Error`, with one of three codes. At a Bitcoin Cash tip
+change the node may already have left the block's parent; it then has no
+verdict on the block (BCHN and BCHD answer `inconclusive-not-best-prevblk`),
+and the job gets `stale-chain-tip`, as a job on another parent than the
+pool's template does. A check that gets no answer within 10 seconds, or
+whose request to the node fails, gets `template-unavailable`. In both cases
+the client declares again and stays on the pool. Only the node's own reason
+for refusing the block, such as `bad-cb-amount`, gets `invalid-template`.
+
+A channel keeps its last eight declared jobs, counted apart from the 32 of
+the pool's own jobs it keeps: the pool still sends the channel its own job
+at every share-chain move, and those do not push a declared job out. A
+declared job stays until eight newer declared jobs are installed, until its
+Bitcoin Cash parent is two blocks back, or until the job tracker drops it,
+which keeps a job for at least 15 minutes. A share on a job that is gone
+gets `stale-share`.
 
 **PushSolution.** A Full-Template client that finds a block also sends
 `PushSolution` on its Job Declaration connection (spec 6.4.9). The
@@ -386,12 +415,17 @@ get `payout-outputs-too-large`, and a template without PPLNS weights
 `payout-outputs-unavailable`. None of these closes the connection.
 
 Whenever the share the node anchors new tokens on, or the BCH block its
-template builds on, changes (about every 10 seconds), each connection that
-negotiated `0x5052` gets `PayoutOutputsStale`. Outputs for earlier tokens
-are then stale: the client allocates a new token and asks again. A
-`stale-payout-outputs` answer is the same race, not a reason to leave the
-pool. A connection may hold outputs for eight open tokens at once; asking
-for a ninth closes it, as a ninth pending declaration does.
+template builds on, changes (every few seconds on a live pool), each
+connection that negotiated `0x5052` gets `PayoutOutputsStale`. Outputs for
+earlier tokens are then stale: the client allocates a new token and asks
+again. A `stale-payout-outputs` answer is the same race, not a reason to
+leave the pool. That holds for a token allocated after the notice too, even
+again and again: the answer then means the client's node and the pool's
+node differ on the Bitcoin Cash tip or its bits. The client keeps asking,
+no faster than once every few seconds, and keeps mining its last installed
+job or the pool's own jobs meanwhile. A connection may hold outputs for
+eight open tokens at once; asking for a ninth closes it, as a ninth pending
+declaration does.
 
 On a connection that negotiated `0x5052`, the allocation's zero-value
 outputs also list output 0, the largest padding and the commitment beside

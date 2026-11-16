@@ -43,7 +43,7 @@ fn peer_block_store_is_peer() {
 #[test]
 fn confirmed_reads_the_height() {
     let events = events_from_line(&line(&format!(
-        "Promoted block {HASH_A} to confirmed height Some(42)"
+        "Promoted block {HASH_A} to confirmed height 42: diff=1"
     )));
     assert_eq!(events[0].detail, "Block aaaaa CONFIRMED at height 42");
 }
@@ -51,7 +51,7 @@ fn confirmed_reads_the_height() {
 #[test]
 fn uncle_promotion_has_no_height() {
     let events = events_from_line(&line(&format!(
-        "Promoted block {HASH_A} to confirmed height None"
+        "Promoted block {HASH_A} to confirmed height -1: diff=1"
     )));
     assert_eq!(events[0].detail, "Block aaaaa CONFIRMED at height none");
 }

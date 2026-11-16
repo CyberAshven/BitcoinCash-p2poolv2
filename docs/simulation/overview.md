@@ -83,17 +83,20 @@ or no-ops in production builds (zero overhead). Key overrides:
   | `BCH_PAYOUT_DEPTH` (Bitcoin Cash) | 121,063 | 183 |
   | `BCH_PRUNE_DEPTH` (Bitcoin Cash) | 242,126 | 366 |
   | `PRUNE_INTERVAL` | 360 | 20 |
-  | window eviction buffer | 1,210 | 20 |
+  | window eviction buffer | 1,210 | 51 |
   | `BACKGROUND_TASK_INTERVAL` (node) | 6 h | 30 s |
 
   They are constants, not config, so every node built from one binary agrees
   on them. The eviction buffer is raised to a quarter of the window (1% of 80
   would be one entry, and shares built behind the tip under propagation delay
-  would be dropped). The reorg depth limit is one payout depth below the
-  confirmed tip (183 shares on Bitcoin Cash), which keeps it well above the
-  forks the failure scenarios create (a 90s partition is 18 shares at 5s
-  blocks). The cost is that sim no longer runs a production-size PPLNS
-  window; `cargo bench --bench pplns_window` covers its compute cost.
+  would be dropped), and on Bitcoin Cash to 51, the reach of a weak share's
+  anchor (`WEAK_DEPTH` plus the uncle depth), which makes the cache 231
+  entries. The reorg depth limit
+  is one payout depth below the confirmed tip (183 shares on Bitcoin Cash),
+  which keeps it well above the forks the failure scenarios create (a 90s
+  partition is 18 shares at 5s blocks). The cost is that sim no longer runs
+  a production-size PPLNS window; `cargo bench --bench pplns_window` covers
+  its compute cost.
 
   These replace the old `[sim] coinbase_maturity` option. Bitcoin Cash's
   maturity, `BCH_COINBASE_MATURITY` (100), is not shortened: it is a

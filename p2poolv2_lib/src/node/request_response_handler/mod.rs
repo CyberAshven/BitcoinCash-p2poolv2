@@ -10,11 +10,13 @@ use self::peer_block_knowledge::PeerBlockKnowledge;
 use crate::config::NetworkConfig;
 use crate::node::SwarmSend;
 use crate::node::behaviour::request_response::RequestResponseEvent;
-use crate::node::messages::{InventoryMessage, Message};
+use crate::node::messages::{GetData, InventoryMessage, Message};
 use crate::node::p2p_message_handlers::receivers::block_receiver::BlockReceiverHandle;
+use crate::node::p2p_message_handlers::senders::share_block::ShareRelayBytes;
 use crate::node::request_sender::RequestSender;
 use crate::node::response_worker::{ResponseWorkerEvent, ResponseWorkerSender};
 use crate::node::validation_worker::ValidationSender;
+use crate::node::weak_share_fetch::WeakFetchEvent;
 use crate::node::weak_share_worker::WeakShareEventSender;
 use crate::service::PeerHandle;
 use crate::service::p2p_service::RequestContext;
@@ -26,6 +28,7 @@ use crate::shares::chain::chain_store_handle::ChainStoreHandle;
 use crate::shares::chain::chain_store_handle::ChainStoreHandle;
 use crate::shares::transaction_pool::ShareTransactionPool;
 use crate::shares::validation::ShareValidator;
+use crate::shares::weak_pool::WeakPool;
 use crate::utils::time_provider::SystemTimeProvider;
 use libp2p::PeerId;
 use libp2p::request_response::ResponseChannel;
@@ -70,6 +73,9 @@ pub struct RequestResponseHandler<C: Send + Sync> {
     inbound_failures_total: u64,
     /// Responses dropped on a full or closed worker queue, for P2P health metrics.
     responses_dropped_total: u64,
+    /// Share messages this node relayed and their bytes, for P2P health
+    /// metrics.
+    share_relay: ShareRelayBytes,
     /// Bitcoin Cash: the pool relayed share transactions go to. `None` on
     /// Bitcoin, which ignores them.
     share_transaction_pool: Option<ShareTransactionPool>,
@@ -109,6 +115,7 @@ impl RequestResponseHandler<ResponseChannel<Message>> {
             outbound_failures_total: 0,
             inbound_failures_total: 0,
             responses_dropped_total: 0,
+            share_relay: ShareRelayBytes::default(),
             share_transaction_pool,
             weak_share_tx: None,
         }
@@ -242,6 +249,23 @@ impl<C: Send + Sync + 'static> RequestResponseHandler<C> {
         self.responses_dropped_total
     }
 
+    /// Add what one share broadcast sent to the totals since start.
+    pub fn record_share_relay(&mut self, sent: ShareRelayBytes) {
+        self.share_relay += sent;
+    }
+
+    /// Share messages relayed and their bytes, since start.
+    pub fn share_relay(&self) -> ShareRelayBytes {
+        self.share_relay
+    }
+
+    /// The weak pool relayed weak shares go to, which a share about to be
+    /// relayed asks how long it has held each weak share. `None` on Bitcoin
+    /// and in Hydrapool mode.
+    pub fn weak_pool(&self) -> Option<WeakPool> {
+        self.weak_share_tx.as_ref().map(WeakShareEventSender::pool)
+    }
+
     /// Responses waiting in the response worker queue.
     pub fn response_queue_depth(&self) -> u64 {
         (self.response_worker_handle.max_capacity() - self.response_worker_handle.capacity()) as u64
@@ -288,6 +312,10 @@ impl<C: Send + Sync + 'static> RequestResponseHandler<C> {
             Message::ShareBlock(block, _) => {
                 self.peer_block_knowledge
                     .record_block_known(peer, block.block_hash());
+            }
+            Message::ShareWithWeakHashes(share, _) => {
+                self.peer_block_knowledge
+                    .record_block_known(peer, share.block_hash());
             }
             _ => {}
         }
@@ -364,6 +392,19 @@ impl<C: Send + Sync + 'static> RequestResponseHandler<C> {
         Ok(())
     }
 
+    /// A weak-share body or a `NotFound` for one, or `response` when it is
+    /// some other message. The body and the `NotFound` are what a fetch
+    /// asked for, so they go to the weak-share worker instead of the
+    /// response worker.
+    #[allow(clippy::result_large_err)]
+    fn weak_fetch_event(peer: PeerId, response: Message) -> Result<WeakFetchEvent, Message> {
+        match response {
+            Message::WeakShare(weak_share) => Ok(WeakFetchEvent::Body { peer, weak_share }),
+            Message::NotFound(GetData::WeakShare(hash)) => Ok(WeakFetchEvent::NotFound { hash }),
+            other => Err(other),
+        }
+    }
+
     /// Dispatch a response by calling handle_response directly.
     ///
     /// Records peer block knowledge before processing. Responses bypass
@@ -380,6 +421,38 @@ impl<C: Send + Sync + 'static> RequestResponseHandler<C> {
         response: Message,
     ) -> Result<(), Box<dyn Error>> {
         self.record_peer_knowledge(&peer, &response);
+
+        // The weak shares a share relayed by hash lacked go to the share
+        // waiting for them, not to the response worker.
+        let response = match (response, self.weak_share_tx.as_ref()) {
+            (Message::CarriedWeakShares(share_hash, weak_shares), Some(sender)) => {
+                if !sender.fill().answer(peer, share_hash, weak_shares) {
+                    debug!("No share waits for weak shares of {share_hash} from {peer}");
+                }
+                return Ok(());
+            }
+            (response, _) => response,
+        };
+
+        // A weak-share fetch is a queue send, not a header walk, so it does
+        // not go to the response worker. A node with no weak pool leaves the
+        // message on that path. `is_some` ends before the message is moved,
+        // so the later send on the response worker can borrow `self`.
+        let response = if self.weak_share_tx.is_some() {
+            match Self::weak_fetch_event(peer, response) {
+                Ok(event) => {
+                    if let Some(sender) = self.weak_share_tx.as_ref()
+                        && sender.try_send_fetch(event).is_err()
+                    {
+                        debug!("Weak fetch queue full, dropping response from {peer}");
+                    }
+                    return Ok(());
+                }
+                Err(response) => response,
+            }
+        } else {
+            response
+        };
 
         // Hand the response to the response worker rather than processing it
         // here: handle_response can be heavy (a ShareHeaders batch runs many

@@ -1,5 +1,6 @@
 use super::*;
 use crate::accounting::payout::coinbase_budget::BCH_MAX_TX_SIZE;
+use crate::accounting::payout::payout_levels::MIN_PAYOUT_LEVEL;
 use crate::shares::bch_coinbase::BchCoinbase;
 use crate::shares::merge_mining::MergeMiningCommitment;
 use crate::shares::share_block::ShareTransaction;
@@ -7,6 +8,7 @@ use crate::shares::validation::{BCH_SHARE_BODY_SIZE_LIMIT, BLOCK_TXS_SIZE_LIMIT,
 use crate::shares::weak::{WEAK_BYTES, WEAK_CAP, WeakShare};
 use crate::test_utils::TestShareBlockBuilder;
 use bitcoin::consensus::encode;
+use bitcoin::hashes::Hash;
 use bitcoin::script::Builder;
 use p2poolv2_wallet::share_owner::ShareOwner;
 use std::str::FromStr;
@@ -147,6 +149,7 @@ fn test_largest_bch_share_block_fits_max_message_size() {
 fn declared_bch_header_batch_round_trips_a_compressed_32_level_proof() {
     let mut header = TestShareBlockBuilder::new().build().header;
     header.miner_address = ShareOwner::CashP2pkh([0x11; 20]);
+    header.payout_level = MIN_PAYOUT_LEVEL;
     header.bch_coinbase = Some(BchCoinbase {
         prefix: Builder::new()
             .push_int(header.bitcoin_height as i64)
@@ -281,6 +284,63 @@ fn test_get_data_txid_roundtrip() {
     assert_eq!(decoded, get_data);
 }
 
+fn weak_share_hash(index: u8) -> BlockHash {
+    let mut bytes = [0u8; 32];
+    bytes[0] = index;
+    BlockHash::from_byte_array(bytes)
+}
+
+#[test]
+fn test_weak_share_hashes_roundtrip_through_raw_message() {
+    for count in [0usize, 1, 64] {
+        let hashes: Vec<BlockHash> = (0..count)
+            .map(|index| weak_share_hash(index as u8))
+            .collect();
+        let message = Message::Inventory(InventoryMessage::WeakShareHashes(hashes));
+        let raw = RawMessage::new(message.clone());
+        let mut encoded = Vec::new();
+        raw.consensus_encode(&mut encoded).unwrap();
+
+        let decoded = RawMessage::consensus_decode(&mut &encoded[..]).unwrap();
+        assert_eq!(
+            decoded.payload, message,
+            "weak share inventory of {count} hashes round-trips through RawMessage"
+        );
+        assert_eq!(
+            decoded.payload_len, raw.payload_len,
+            "weak share inventory of {count} hashes keeps its payload length"
+        );
+        assert_eq!(
+            decoded.checksum, raw.checksum,
+            "weak share inventory of {count} hashes keeps its checksum"
+        );
+    }
+}
+
+#[test]
+fn test_get_data_weak_share_roundtrip_through_raw_message() {
+    let get_data = GetData::WeakShare(weak_share_hash(7));
+    let message = Message::GetData(get_data);
+    let raw = RawMessage::new(message.clone());
+    let mut encoded = Vec::new();
+    raw.consensus_encode(&mut encoded).unwrap();
+
+    let decoded = RawMessage::consensus_decode(&mut &encoded[..]).unwrap();
+    assert_eq!(
+        decoded.payload, message,
+        "GetData::WeakShare round-trips through RawMessage"
+    );
+}
+
+#[test]
+fn test_inventory_and_getdata_discriminant_3_fails_decode() {
+    let encoded = [3u8];
+    let inventory = InventoryMessage::consensus_decode(&mut &encoded[..]);
+    assert!(inventory.is_err(), "inventory discriminant 3 fails decode");
+    let get_data = GetData::consensus_decode(&mut &encoded[..]);
+    assert!(get_data.is_err(), "getdata discriminant 3 fails decode");
+}
+
 #[test]
 fn test_message_discriminants_unique() {
     use message_discriminants::*;
@@ -297,6 +357,10 @@ fn test_message_discriminants_unique() {
         ACK,
         SHARE_HEADERS_WITH_BCH,
         SHARE_BLOCK_WITH_BCH,
+        WEAK_SHARE,
+        SHARE_WITH_WEAK_HASHES,
+        GET_CARRIED_WEAK_SHARES,
+        CARRIED_WEAK_SHARES,
     ];
 
     // Check all discriminants are unique
@@ -549,6 +613,164 @@ fn test_carried_bch_header_count_outside_one_to_the_cap_is_rejected() {
         bytes.extend(encode::serialize(&bitcoin::VarInt::from(count)));
         bytes.extend(vec![0u8; 80 * count]);
         assert!(encode::deserialize::<Message>(&bytes).is_err(), "{count}");
+    }
+}
+
+/// A Bitcoin Cash share carrying `count` weak shares.
+fn share_carrying_weak_shares(count: u32) -> ShareBlock {
+    let weak_shares = (0..count)
+        .map(|nonce| WeakShare {
+            header: TestShareBlockBuilder::new()
+                .share_owner(ShareOwner::CashP2pkh([0x33; 20]))
+                .nonce(nonce)
+                .build()
+                .header,
+            coinbase_script_sig: bitcoin::ScriptBuf::from_bytes(vec![0x51; 40]),
+            coinbase_value: 625_000_000,
+            merkle_branch: vec![TxMerkleNode::all_zeros(); 12],
+        })
+        .collect();
+    TestShareBlockBuilder::new()
+        .share_owner(ShareOwner::CashP2pkh([0x22; 20]))
+        .weak_shares(weak_shares)
+        .build()
+}
+
+/// A share relayed with weak hashes round-trips, with and without carried
+/// Bitcoin Cash headers, and lists its weak shares by proof-of-work hash in
+/// the order carried: 32 bytes each instead of the whole weak share. Filled
+/// in that order it is the share again.
+#[test]
+fn test_share_with_weak_hashes_round_trips_and_lists_weak_shares_by_hash() {
+    use message_discriminants::*;
+    let share = share_carrying_weak_shares(3);
+    let relayed = ShareWithWeakHashes::new(share.clone());
+    assert_eq!(
+        relayed.weak_hashes(),
+        share
+            .weak_shares
+            .iter()
+            .map(WeakShare::pow_hash)
+            .collect::<Vec<_>>()
+    );
+    assert!(relayed.share_block().weak_shares.is_empty());
+
+    for bch_headers in [Vec::new(), carried()] {
+        let message = Message::ShareWithWeakHashes(relayed.clone(), bch_headers.clone());
+        let bytes = encode::serialize(&message);
+        assert_eq!(bytes[0], SHARE_WITH_WEAK_HASHES);
+        assert_eq!(bytes.len(), message.encoded_size());
+        let decoded: Message = encode::deserialize(&bytes).unwrap();
+        assert_eq!(decoded, message);
+
+        //* Besides the hashes, the message keeps the share's empty weak list
+        //* and an empty prefilled list (a byte each) and always writes the
+        //* header count, which a whole share without carried headers leaves
+        //* out (one more).
+        let overhead = if bch_headers.is_empty() { 3 } else { 2 };
+        let whole = Message::ShareBlock(share.clone(), bch_headers);
+        let weak_bytes: usize = share.weak_shares.iter().map(WeakShare::encoded_size).sum();
+        assert_eq!(
+            whole.encoded_size() - message.encoded_size(),
+            weak_bytes - 3 * 32 - overhead,
+            "the share message is smaller by the weak shares less their hashes"
+        );
+    }
+    assert_eq!(relayed.with_weak_shares(share.weak_shares.clone()), share);
+}
+
+/// Malformed shares with weak hashes are refused at decode: one carrying
+/// weak shares whole besides its hashes, and one listing more hashes than a
+/// share may carry.
+#[test]
+fn test_share_with_weak_hashes_decode_refuses_whole_weak_shares_and_too_many_hashes() {
+    use message_discriminants::*;
+    let whole = share_carrying_weak_shares(1);
+    let mut bytes = vec![SHARE_WITH_WEAK_HASHES, 0];
+    bytes.extend(encode::serialize(&whole));
+    bytes.extend(encode::serialize(&VarInt::from(0usize)));
+    assert!(encode::deserialize::<Message>(&bytes).is_err());
+
+    let mut bytes = vec![SHARE_WITH_WEAK_HASHES, 0];
+    bytes.extend(encode::serialize(&share_carrying_weak_shares(0)));
+    bytes.extend(encode::serialize(&VarInt::from(WEAK_CAP + 1)));
+    bytes.extend(vec![0u8; 32 * (WEAK_CAP + 1)]);
+    assert!(encode::deserialize::<Message>(&bytes).is_err());
+
+    //* More prefilled weak shares than a share may carry are refused
+    //* before any is read.
+    let mut bytes = vec![SHARE_WITH_WEAK_HASHES, 0];
+    bytes.extend(encode::serialize(&share_carrying_weak_shares(0)));
+    bytes.extend(encode::serialize(&VarInt::from(0usize)));
+    bytes.extend(encode::serialize(&VarInt::from(WEAK_CAP + 1)));
+    assert!(matches!(
+        encode::deserialize::<Message>(&bytes),
+        Err(encode::Error::ParseFailed(_))
+    ));
+}
+
+/// A share with weak hashes round-trips with prefilled weak shares, which
+/// go whole beside the full list in the order carried; filled, it is the
+/// share again.
+#[test]
+fn test_share_with_weak_hashes_round_trips_with_prefilled_weak_shares() {
+    let share = share_carrying_weak_shares(3);
+    let young = [
+        share.weak_shares[0].pow_hash(),
+        share.weak_shares[2].pow_hash(),
+    ];
+    let relayed = ShareWithWeakHashes::prefilling(share.clone(), |weak_share| {
+        young.contains(&weak_share.pow_hash())
+    });
+    assert_eq!(relayed.weak_hashes().len(), 3);
+    assert_eq!(
+        relayed.prefilled(),
+        [share.weak_shares[0].clone(), share.weak_shares[2].clone()]
+    );
+
+    let message = Message::ShareWithWeakHashes(relayed.clone(), Vec::new());
+    let decoded: Message = encode::deserialize(&encode::serialize(&message)).unwrap();
+    assert_eq!(decoded, message);
+    let listed_only =
+        Message::ShareWithWeakHashes(ShareWithWeakHashes::new(share.clone()), Vec::new());
+    assert_eq!(
+        message.encoded_size() - listed_only.encoded_size(),
+        share.weak_shares[0].encoded_size() + share.weak_shares[2].encoded_size()
+    );
+    assert_eq!(relayed.with_weak_shares(share.weak_shares.clone()), share);
+}
+
+/// The request for carried weak shares and its answer round-trip through
+/// `RawMessage`, and neither may name more than a share carries.
+#[test]
+fn test_carried_weak_shares_request_and_answer_round_trip() {
+    use message_discriminants::*;
+    let share = share_carrying_weak_shares(2);
+    let share_hash = share.block_hash();
+    for message in [
+        Message::GetCarriedWeakShares(
+            share_hash,
+            share.weak_shares.iter().map(WeakShare::pow_hash).collect(),
+        ),
+        Message::CarriedWeakShares(share_hash, share.weak_shares.clone()),
+        Message::CarriedWeakShares(share_hash, Vec::new()),
+    ] {
+        let raw = RawMessage::new(message.clone());
+        let mut encoded = Vec::new();
+        raw.consensus_encode(&mut encoded).unwrap();
+        let decoded = RawMessage::consensus_decode(&mut &encoded[..]).unwrap();
+        assert_eq!(decoded.payload, message);
+    }
+
+    for discriminant in [GET_CARRIED_WEAK_SHARES, CARRIED_WEAK_SHARES] {
+        let mut bytes = vec![discriminant];
+        bytes.extend(encode::serialize(&share_hash));
+        bytes.extend(encode::serialize(&VarInt::from(WEAK_CAP + 1)));
+        bytes.extend(vec![0u8; 32 * (WEAK_CAP + 1)]);
+        assert!(
+            encode::deserialize::<Message>(&bytes).is_err(),
+            "discriminant {discriminant}"
+        );
     }
 }
 
