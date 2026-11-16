@@ -44,10 +44,28 @@ pub fn size_window(
     network_hashrate: f64,
     period_seconds: f64,
 ) -> WindowGeometry {
+    size_window_capped(
+        credited_work_rate,
+        chain_share_rate,
+        network_hashrate,
+        period_seconds,
+        WINDOW_CAP_SECONDS,
+    )
+}
+
+/// [`size_window`] with the cap at `cap_seconds` of shares instead of 14
+/// days, for the window cap study.
+pub fn size_window_capped(
+    credited_work_rate: f64,
+    chain_share_rate: f64,
+    network_hashrate: f64,
+    period_seconds: f64,
+    cap_seconds: f64,
+) -> WindowGeometry {
     let threshold = BCH_PPLNS_WINDOW_BLOCKS * network_hashrate * BCH_BLOCK_INTERVAL_SECONDS;
     let work_per_share = credited_work_rate / chain_share_rate;
     let shares_by_work = threshold / work_per_share;
-    let cap_shares = WINDOW_CAP_SECONDS / period_seconds;
+    let cap_shares = cap_seconds / period_seconds;
     let capped = shares_by_work > cap_shares;
     let shares = shares_by_work.min(cap_shares);
     WindowGeometry {

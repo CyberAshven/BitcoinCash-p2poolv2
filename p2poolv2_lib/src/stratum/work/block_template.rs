@@ -65,6 +65,10 @@ pub struct BlockTemplate<T = TemplateTransaction> {
     pub transactions: Vec<T>,
     pub coinbaseaux: HashMap<String, String>,
     pub coinbasevalue: u64,
+    /// BIP 22's long polling id. Only a node that serves long polling sends
+    /// it (Bitcoin Core and BCHN do, Knuth does not), and the pool never
+    /// long-polls, so a template without it reads as an empty id.
+    #[serde(default)]
     pub longpollid: String,
     pub target: String,
     pub mintime: u32,

@@ -9,6 +9,7 @@ use serde::Serialize;
 use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
+use std::sync::{Arc, PoisonError, RwLock};
 use std::time::Instant;
 use tracing::warn;
 
@@ -65,8 +66,57 @@ pub(crate) enum ConnectionAction {
     Block,
 }
 
+/// The IP blocklist, shared between the ConnectionTracker, which checks
+/// inbound connections and serves the block/unblock API, and the transport,
+/// which refuses dials to blocked IPs once DNS has resolved them.
+///
+/// A lock is used because the transport dials synchronously inside the swarm
+/// poll and cannot ask an actor, while the API changes the list at runtime.
+/// It is the only lock involved, each method holds it for one set operation
+/// and calls nothing while holding it, so there is no lock ordering to keep.
+/// A poisoned lock is recovered: a panic cannot leave a HashSet of IPs in a
+/// state that breaks an invariant.
+#[derive(Clone, Default)]
+pub(crate) struct BlockedIps(Arc<RwLock<HashSet<IpAddr>>>);
+
+impl BlockedIps {
+    pub(crate) fn new(blocked_ips: HashSet<IpAddr>) -> Self {
+        Self(Arc::new(RwLock::new(blocked_ips)))
+    }
+
+    pub(crate) fn contains(&self, ip: &IpAddr) -> bool {
+        self.0
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains(ip)
+    }
+
+    pub(crate) fn insert(&self, ip: IpAddr) {
+        self.0
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(ip);
+    }
+
+    pub(crate) fn remove(&self, ip: &IpAddr) {
+        self.0
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(ip);
+    }
+
+    pub(crate) fn to_vec(&self) -> Vec<IpAddr> {
+        self.0
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .copied()
+            .collect()
+    }
+}
+
 /// Extract the IP address from a Multiaddr.
-fn extract_ip_from_multiaddr(address: &Multiaddr) -> Option<IpAddr> {
+pub(crate) fn extract_ip_from_multiaddr(address: &Multiaddr) -> Option<IpAddr> {
     for protocol in address.iter() {
         match protocol {
             libp2p::multiaddr::Protocol::Ip4(ip) => return Some(IpAddr::V4(ip)),
@@ -87,8 +137,8 @@ pub(crate) struct ConnectionTracker {
     /// this lets the reconnector see a dial peer as connected however it is
     /// connected, including over an inbound connection it opened to us.
     dial_peer_ids: HashMap<Multiaddr, PeerId>,
-    /// IP addresses blocked from connecting
-    blocked_ips: HashSet<IpAddr>,
+    /// IP addresses blocked from connecting, shared with the transport
+    blocked_ips: BlockedIps,
     /// Consecutive reported ping failures per connection; cleared on a
     /// successful ping and when the connection closes.
     ping_failures: HashMap<ConnectionId, u32>,
@@ -101,7 +151,7 @@ pub(crate) struct ConnectionTracker {
 }
 
 impl ConnectionTracker {
-    pub(crate) fn new(blocked_ips: HashSet<IpAddr>) -> Self {
+    pub(crate) fn new(blocked_ips: BlockedIps) -> Self {
         Self {
             connected_peers: HashMap::new(),
             dial_peer_ids: HashMap::new(),
@@ -115,7 +165,10 @@ impl ConnectionTracker {
 
     /// Process a new connection. Returns Block if the IP is blocked,
     /// otherwise returns Accept with the peer info and records the
-    /// connection in the tracker.
+    /// connection in the tracker. An outbound connection dialed through a
+    /// `/dns` address carries no IP here (libp2p does not expose the resolved
+    /// address), so its `ip` is None; the transport has already refused such
+    /// dials to blocked IPs.
     pub(crate) fn handle_established(
         &mut self,
         peer_id: PeerId,
@@ -256,7 +309,7 @@ impl ConnectionTracker {
 
     /// Return all blocked IPs.
     pub(crate) fn get_blocked_ips(&self) -> Vec<IpAddr> {
-        self.blocked_ips.iter().copied().collect()
+        self.blocked_ips.to_vec()
     }
 
     /// Build a list of connected peer info responses.
@@ -311,7 +364,7 @@ mod tests {
 
     #[test]
     fn test_accept_outbound_connection() {
-        let mut tracker = ConnectionTracker::new(HashSet::new());
+        let mut tracker = ConnectionTracker::new(BlockedIps::default());
         let peer_id = PeerId::random();
         let endpoint = make_dialer_endpoint("/ip4/1.2.3.4/tcp/46884");
 
@@ -327,7 +380,7 @@ mod tests {
 
     #[test]
     fn test_accept_inbound_connection() {
-        let mut tracker = ConnectionTracker::new(HashSet::new());
+        let mut tracker = ConnectionTracker::new(BlockedIps::default());
         let peer_id = PeerId::random();
         let endpoint = make_listener_endpoint("/ip4/5.6.7.8/tcp/12345");
 
@@ -351,7 +404,7 @@ mod tests {
             .iter()
             .filter_map(|ip| ip.parse().ok())
             .collect();
-        let mut tracker = ConnectionTracker::new(blocked);
+        let mut tracker = ConnectionTracker::new(BlockedIps::new(blocked));
         let peer_id = PeerId::random();
         let endpoint = make_dialer_endpoint("/ip4/1.2.3.4/tcp/46884");
 
@@ -370,7 +423,7 @@ mod tests {
             .iter()
             .filter_map(|ip| ip.parse().ok())
             .collect();
-        let mut tracker = ConnectionTracker::new(blocked);
+        let mut tracker = ConnectionTracker::new(BlockedIps::new(blocked));
         let peer_id = PeerId::random();
         let endpoint = make_dialer_endpoint("/ip4/5.6.7.8/tcp/46884");
 
@@ -381,7 +434,7 @@ mod tests {
 
     #[test]
     fn test_handle_closed_removes_peer_when_last_connection_closes() {
-        let mut tracker = ConnectionTracker::new(HashSet::new());
+        let mut tracker = ConnectionTracker::new(BlockedIps::default());
         let peer_id = PeerId::random();
         let endpoint = make_dialer_endpoint("/ip4/1.2.3.4/tcp/46884");
 
@@ -399,7 +452,7 @@ mod tests {
     /// again on every close.
     #[test]
     fn test_closing_one_of_two_connections_keeps_peer_connected() {
-        let mut tracker = ConnectionTracker::new(HashSet::new());
+        let mut tracker = ConnectionTracker::new(BlockedIps::default());
         let peer_id = PeerId::random();
         let endpoint = make_dialer_endpoint("/ip4/1.2.3.4/tcp/46884");
         tracker.handle_established(peer_id, &endpoint);
@@ -419,7 +472,7 @@ mod tests {
     /// must not open a second, outbound connection to it.
     #[test]
     fn test_dial_peer_connected_inbound_counts_as_connected() {
-        let mut tracker = ConnectionTracker::new(HashSet::new());
+        let mut tracker = ConnectionTracker::new(BlockedIps::default());
         let peer_id = PeerId::random();
         let dial_endpoint = make_dialer_endpoint("/ip4/1.2.3.4/tcp/46884");
 
@@ -439,7 +492,7 @@ mod tests {
 
     #[test]
     fn test_handle_closed_inbound_preserves_dial_addresses() {
-        let mut tracker = ConnectionTracker::new(HashSet::new());
+        let mut tracker = ConnectionTracker::new(BlockedIps::default());
 
         let outbound_peer = PeerId::random();
         let outbound_endpoint = make_dialer_endpoint("/ip4/1.2.3.4/tcp/46884");
@@ -463,7 +516,7 @@ mod tests {
 
     #[test]
     fn test_get_peer_infos_returns_connected_peers() {
-        let mut tracker = ConnectionTracker::new(HashSet::new());
+        let mut tracker = ConnectionTracker::new(BlockedIps::default());
 
         let peer_a = PeerId::random();
         let peer_b = PeerId::random();
@@ -480,7 +533,7 @@ mod tests {
 
     #[test]
     fn test_get_peer_infos_lists_the_longest_connected_peer_first() {
-        let mut tracker = ConnectionTracker::new(HashSet::new());
+        let mut tracker = ConnectionTracker::new(BlockedIps::default());
         let older = PeerId::random();
         let newer = PeerId::random();
         tracker.handle_established(older, &make_dialer_endpoint("/ip4/1.2.3.4/tcp/46884"));
@@ -505,7 +558,7 @@ mod tests {
 
     #[test]
     fn test_record_identified_reports_the_version_in_peer_infos() {
-        let mut tracker = ConnectionTracker::new(HashSet::new());
+        let mut tracker = ConnectionTracker::new(BlockedIps::default());
         let peer_id = PeerId::random();
         tracker.handle_established(peer_id, &make_dialer_endpoint("/ip4/1.2.3.4/tcp/46884"));
 
@@ -518,7 +571,7 @@ mod tests {
 
     #[test]
     fn test_record_ping_rtt_reports_latency_in_milliseconds() {
-        let mut tracker = ConnectionTracker::new(HashSet::new());
+        let mut tracker = ConnectionTracker::new(BlockedIps::default());
         let peer_id = PeerId::random();
         tracker.handle_established(peer_id, &make_dialer_endpoint("/ip4/1.2.3.4/tcp/46884"));
 
@@ -537,7 +590,7 @@ mod tests {
 
     #[test]
     fn test_peer_infos_have_no_version_or_latency_before_they_are_observed() {
-        let mut tracker = ConnectionTracker::new(HashSet::new());
+        let mut tracker = ConnectionTracker::new(BlockedIps::default());
         let peer_id = PeerId::random();
         tracker.handle_established(peer_id, &make_dialer_endpoint("/ip4/1.2.3.4/tcp/46884"));
 
@@ -549,7 +602,7 @@ mod tests {
 
     #[test]
     fn test_version_and_latency_are_forgotten_when_the_peer_disconnects() {
-        let mut tracker = ConnectionTracker::new(HashSet::new());
+        let mut tracker = ConnectionTracker::new(BlockedIps::default());
         let peer_id = PeerId::random();
         tracker.handle_established(peer_id, &make_dialer_endpoint("/ip4/1.2.3.4/tcp/46884"));
         tracker.record_identified(&peer_id, "p2poolv2/0.0.1-alpha".to_string());
@@ -584,13 +637,29 @@ mod tests {
         );
     }
 
+    /// The transport holds a clone of the tracker's blocklist, so an IP
+    /// blocked through the API is refused by the transport too.
+    #[test]
+    fn test_blocked_ips_insert_is_seen_by_clone() {
+        let blocked_ips = BlockedIps::default();
+        let transport_view = blocked_ips.clone();
+        let mut tracker = ConnectionTracker::new(blocked_ips);
+        let ip: IpAddr = "1.2.3.4".parse().unwrap();
+
+        tracker.block_ip(ip);
+        assert!(transport_view.contains(&ip));
+
+        tracker.unblock_ip(ip);
+        assert!(!transport_view.contains(&ip));
+    }
+
     #[test]
     fn test_blocked_outbound_does_not_leave_stale_dial_address() {
         let blocked: HashSet<IpAddr> = ["1.2.3.4"]
             .iter()
             .filter_map(|ip| ip.parse().ok())
             .collect();
-        let mut tracker = ConnectionTracker::new(blocked);
+        let mut tracker = ConnectionTracker::new(BlockedIps::new(blocked));
         let peer_id = PeerId::random();
         let endpoint = make_dialer_endpoint("/ip4/1.2.3.4/tcp/46884");
 
@@ -605,7 +674,7 @@ mod tests {
 
     #[test]
     fn test_duplicate_outbound_not_added_twice() {
-        let mut tracker = ConnectionTracker::new(HashSet::new());
+        let mut tracker = ConnectionTracker::new(BlockedIps::default());
         let peer_a = PeerId::random();
         let peer_b = PeerId::random();
         let endpoint = make_dialer_endpoint("/ip4/1.2.3.4/tcp/46884");
@@ -622,7 +691,7 @@ mod tests {
 
     #[test]
     fn test_ping_failures_count_consecutively_per_connection() {
-        let mut tracker = ConnectionTracker::new(HashSet::new());
+        let mut tracker = ConnectionTracker::new(BlockedIps::default());
         let connection = ConnectionId::new_unchecked(1);
 
         assert_eq!(tracker.record_ping_failure(connection), 1);
@@ -635,7 +704,7 @@ mod tests {
 
     #[test]
     fn test_ping_failures_are_tracked_independently_per_connection() {
-        let mut tracker = ConnectionTracker::new(HashSet::new());
+        let mut tracker = ConnectionTracker::new(BlockedIps::default());
         let failing = ConnectionId::new_unchecked(1);
         let sibling = ConnectionId::new_unchecked(2);
 
@@ -647,7 +716,7 @@ mod tests {
 
     #[test]
     fn test_clearing_ping_failures_restarts_the_count() {
-        let mut tracker = ConnectionTracker::new(HashSet::new());
+        let mut tracker = ConnectionTracker::new(BlockedIps::default());
         let connection = ConnectionId::new_unchecked(1);
         tracker.record_ping_failure(connection);
         tracker.record_ping_failure(connection);
@@ -663,7 +732,7 @@ mod tests {
             .iter()
             .filter_map(|ip| ip.parse().ok())
             .collect();
-        let mut tracker = ConnectionTracker::new(blocked);
+        let mut tracker = ConnectionTracker::new(BlockedIps::new(blocked));
         let peer_id = PeerId::random();
 
         tracker.handle_established(peer_id, &make_dialer_endpoint("/ip4/1.2.3.4/tcp/46884"));
