@@ -452,6 +452,18 @@ pub fn group_thousands(value: u64) -> String {
     grouped
 }
 
+/// Bytes in decimal units with at most one decimal, for labels: `200 kB`,
+/// `3.2 MB`, `2 GB`.
+pub fn decimal_bytes(bytes: u64) -> String {
+    let (unit, name) = [(1.0e9, "GB"), (1.0e6, "MB"), (1.0e3, "kB")]
+        .into_iter()
+        .find(|(unit, _)| bytes as f64 >= *unit)
+        .unwrap_or((1.0, "bytes"));
+    let value = format!("{:.1}", bytes as f64 / unit);
+    let value = value.strip_suffix(".0").unwrap_or(&value);
+    format!("{value} {name}")
+}
+
 /// A fraction as a percentage with two decimals.
 pub fn percent(fraction: f64) -> String {
     format!("{:.2}%", fraction * 100.0)

@@ -28,7 +28,7 @@
 //! and no loss.
 //!
 //! When `bch_block` is set, a Bitcoin Cash block arrives on average every
-//! ten minutes and its compact block takes each node's link for its bytes,
+//! minute and its compact block takes each node's link for its bytes,
 //! once down and once up, as BCHN relays it: shares wait behind it.
 //!
 //! Three changes studied for scaling, none of them built, can be turned on:

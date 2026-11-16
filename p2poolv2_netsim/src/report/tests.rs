@@ -13,6 +13,15 @@ fn thousands_are_grouped_with_commas() {
 }
 
 #[test]
+fn bytes_print_in_decimal_units_with_at_most_one_decimal() {
+    assert_eq!(decimal_bytes(200_000), "200 kB");
+    assert_eq!(decimal_bytes(3_200_000), "3.2 MB");
+    assert_eq!(decimal_bytes(25_600_000), "25.6 MB");
+    assert_eq!(decimal_bytes(2_000_000_000), "2 GB");
+    assert_eq!(decimal_bytes(512), "512 bytes");
+}
+
+#[test]
 fn fractions_print_as_percentages() {
     assert_eq!(percent(0.0123), "1.23%");
 }
@@ -59,7 +68,7 @@ fn a_report_names_what_it_ran() {
     };
     let report = scenario.run();
     assert!(report.summary_text().starts_with("tiny: 10 nodes"));
-    assert_eq!(report.payees, 1_001);
+    assert_eq!(report.payees, 836);
     assert!(report.broken_limits.is_empty());
 }
 
