@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Upstream P2Poolv2 is merged through fdbf85df (its 0.18.0 and two commits
+after it). A node now dials only the host names listed in `dial_peers`, never
+a `/dns` address learned from a peer, and checks `blocked_ips` after it
+resolves a name; a dial that fails later backs off by connection. A
+`d=` difficulty in the password is no longer overridden by the miner's own
+`mining.suggest_difficulty`, as Whatsminer firmware sends right after
+authorizing. Debug logs carry each notify and the address of a stratum
+timeout. Testnet5's new genesis is not taken, as testnet5 is not, and the
+fork stays at 0.0.1-alpha.
+
 The network and payout simulators model one-minute Bitcoin Cash blocks
 (CHIP-2025-03): a block every minute paying a tenth of a ten-minute block,
 and a tenth of the ABLA floors (3.2 MB on mainnet, 200 kB on chipnet, 25.6
