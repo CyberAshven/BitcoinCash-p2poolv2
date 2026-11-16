@@ -1345,7 +1345,10 @@ impl Default for NetworkConfig {
             dial_peers: vec![],
             max_pending_incoming: 10,
             max_pending_outgoing: 10,
-            max_established_incoming: 50,
+            // Each outgoing peer is another node's inbound one: with 16
+            // outgoing a node takes 16 on average, and 128 is room for that
+            // while one node in four accepts inbound connections.
+            max_established_incoming: 128,
             max_established_outgoing: 50,
             // Two, not one: when two nodes dial each other at the same moment
             // each can keep its own outbound connection and refuse the other's

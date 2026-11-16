@@ -149,13 +149,20 @@ is relayed to or how. `/metrics` reports `p2p_outgoing_peers`,
 
 Why 16: in the network simulation, 1,000 nodes that send shares without
 their payouts and relay them after the header check carry a share every
-4.21 seconds on 16 peers per node against 5.01 seconds on 8, within
-today's stale rate, and at 10-second shares stale shares fall from 2.32%
-to 1.99%. With whole shares, as relayed today, more peers alone made
-propagation slower ([Network simulation](simulation/network-sim.md),
-"Where each idea reaches the limit"). The simulation counts each node's
-links in both directions: when every node dials 16, the average node has
-about 32.
+4.46 seconds on 16 peers per node against 5.30 seconds on 8, within
+today's stale rate, and at 10-second shares stale shares fall from 2.30%
+to 2.00%. With whole shares more peers alone made propagation slower
+([Network simulation](simulation/network-sim.md), "Where each idea reaches
+the limit"). The simulation counts each node's links in both directions:
+when every node dials 16, the average node has about 32.
+
+Each outgoing peer is another node's inbound peer. When every node keeps
+16, a node takes 16 inbound peers on average if every node accepts inbound
+connections, 32 if half do and 64 if a quarter do, and a node alone in its
+/16 takes more than one in a crowded /16, since the target picks a group
+before a peer. The sample configs set `max_established_incoming` to 128:
+with 1,000 nodes, a quarter of them accepting inbound connections and 30%
+of those in ten cloud /16s, the busiest node takes about 110.
 
 ## One view of the shares
 

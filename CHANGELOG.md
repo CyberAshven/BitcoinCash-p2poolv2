@@ -8,8 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 A node keeps at least 16 outgoing peers (`[network] target_outgoing_peers`),
-at most one per IPv4 /16 or IPv6 /32, dialed from the peers Kademlia and
-Identify report, with a 60-second backoff that doubles (#122).
+at most one per IPv4 /16 or IPv6 /32, with a 60-second backoff that doubles;
+the sample configs raise `max_established_incoming` from 50 to 128 (#122).
 
 The network and payout simulators model one-minute Bitcoin Cash blocks
 (CHIP-2025-03): a block every minute paying a tenth of a ten-minute block,
