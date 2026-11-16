@@ -68,7 +68,11 @@ except the per-peer services and the StoreWriter thread:
   queues validation.
 - **BlockFetcher** -- distributes `GetData` requests across peers with timeouts.
 - **ValidationWorker** -- context-free validation, one spawned task per block,
-  concurrency capped by a semaphore sized to the CPU count.
+  concurrency capped by a semaphore sized to the CPU count. Each block is
+  checked once at a time: the loop keeps the blocks it has received and not
+  finished checking, in a queue bounded like its channel, and tasks report
+  their end back on an unbounded channel, one message per task, so the loop
+  alone owns that state and no task waits on it.
 - **OrganiseWorker** -- serial candidate-to-confirmed promotion.
 - **Weak share check helpers** (Bitcoin Cash) -- the header checks of the
   weak shares a share carries (in its validation task) and their coinbase
@@ -105,6 +109,7 @@ Every channel is bounded, and every edge has an explicit policy:
 | EmissionWorker -> ValidationWorker | 8192 | awaited send |
 | Stratum connection -> PplnsShareWorker | 1000 | awaited send (enqueue only) |
 | ValidationWorker -> OrganiseWorker | 512 | awaited send, holding the validation permit |
+| Validation task -> ValidationWorker loop (check finished) | unbounded, one message per task | send never blocks; bounded by the tasks, which the permits bound |
 | OrganiseWorker -> ValidationWorker (stranded re-drive, startup seed) | 8192 | `try_send`; skip (next arrival re-drives) |
 | Share transaction pool -> Actor (relay, Bitcoin Cash) | 256 | `try_send`; drop the relay (the transaction stays in the pool and is mined) |
 | OrganiseWorker (`Share`), actor (`Peer`) -> monitoring broadcast (API `/ws` clients, Electrum tip watcher) | 256 | `broadcast` send, never blocks; a receiver that falls behind gets `Lagged` and skips ahead |

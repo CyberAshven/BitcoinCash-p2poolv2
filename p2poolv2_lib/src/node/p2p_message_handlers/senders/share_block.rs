@@ -2,17 +2,25 @@
 //
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
+use crate::node::SwarmSend;
 use crate::node::actor::WEAK_ANNOUNCE_INTERVAL;
 use crate::node::messages::{Message, ShareWithWeakHashes};
 use crate::node::request_response_handler::peer_block_knowledge::PeerBlockKnowledge;
 use crate::node::request_sender::RequestSender;
+#[cfg(test)]
+#[mockall_double::double]
+use crate::shares::chain::chain_store_handle::ChainStoreHandle;
+#[cfg(not(test))]
+use crate::shares::chain::chain_store_handle::ChainStoreHandle;
 use crate::shares::share_block::ShareBlock;
 use crate::shares::weak::WeakShare;
 use crate::shares::weak_pool::WeakPool;
 use bitcoin::BlockHash;
 use bitcoin::block::Header;
 use libp2p::PeerId;
+use libp2p::request_response::ResponseChannel;
 use std::collections::HashSet;
+use tokio::sync::mpsc;
 use tracing::debug;
 
 /// How long this node must have held a carried weak share in its weak pool
@@ -80,6 +88,39 @@ pub fn weak_shares_to_prefill(
         })
         .map(|(pow_hash, _)| *pow_hash)
         .collect()
+}
+
+/// Hand `share_block` to the node actor to relay to its peers
+/// (`SwarmSend::BroadcastBlock`, sent by [`send_share_block_broadcast`]),
+/// with the Bitcoin Cash headers it builds on that a peer may lack.
+///
+/// Called by the validation worker for a share this node mined, once it is
+/// validated, and by the block receiver for a share a peer sent, once its
+/// header checks out and before its body is validated. In the sim the
+/// broadcast waits the simulated propagation delay first
+/// (`sim_overrides::spawn_delayed_broadcast`).
+pub async fn queue_share_block_broadcast(
+    share_block: ShareBlock,
+    chain_store_handle: &ChainStoreHandle,
+    swarm_tx: &mpsc::Sender<SwarmSend<ResponseChannel<Message>>>,
+) {
+    #[cfg(not(feature = "sim"))]
+    {
+        let block_hash = share_block.block_hash();
+        let bch_headers =
+            chain_store_handle.carried_bch_headers(std::slice::from_ref(&share_block.header));
+        if let Err(send_error) = swarm_tx
+            .send(SwarmSend::BroadcastBlock(share_block, bch_headers))
+            .await
+        {
+            tracing::error!("Failed to send broadcast for share block {block_hash}: {send_error}");
+        }
+    }
+    #[cfg(feature = "sim")]
+    {
+        let _ = chain_store_handle;
+        crate::sim_overrides::spawn_delayed_broadcast(swarm_tx.clone(), share_block);
+    }
 }
 
 /// Broadcast a new ShareBlock to all connected peers.

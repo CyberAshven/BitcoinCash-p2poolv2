@@ -50,8 +50,8 @@ use tracing::{debug, error, warn};
 /// go to `handle_share_block` as they came, which then reads only the
 /// share's hash and header, as for a share sent whole. A new share must list
 /// exactly the weak shares its header counts, each once, and prefill only
-/// listed ones, each once; an honest sender lists the body it validated, so
-/// another list is refused as from a bad peer. Its weak shares are then
+/// listed ones, each once; an honest sender lists the body it stored, which
+/// its header binds, so another list is refused as from a bad peer. Its weak shares are then
 /// filled from the weak pool and the prefilled ones. A share those fill is
 /// handed on here; one they do not waits, in a task of its own, for the
 /// sender to send the rest.

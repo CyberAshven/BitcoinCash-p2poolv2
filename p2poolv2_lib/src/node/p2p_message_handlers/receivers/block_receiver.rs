@@ -3,6 +3,9 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 use crate::accounting::payout::sharechain_pplns::pplns_window::ChainDepths;
+use crate::node::SwarmSend;
+use crate::node::messages::Message;
+use crate::node::p2p_message_handlers::senders::share_block::queue_share_block_broadcast;
 use crate::node::request_response_handler::block_fetcher::{BlockFetcherEvent, BlockFetcherHandle};
 use crate::node::validation_worker::{ValidationEvent, ValidationSender};
 use crate::shares::band::check_share_band;
@@ -17,6 +20,7 @@ use crate::store::block_tx_metadata::Status;
 use crate::store::prune_blocks::prune_height_for_tip;
 use crate::store::writer::StoreError;
 use bitcoin::BlockHash;
+use libp2p::request_response::ResponseChannel;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::error::Error;
 use std::sync::Arc;
@@ -105,7 +109,18 @@ struct PendingBlock {
 
 /// Buffers incoming ShareBlocks until their direct parent and uncles are
 /// at status HeaderValid (or better) in the store, then validates ASERT
-/// difficulty, persists the block, and queues it for full validation.
+/// difficulty, persists the block, relays it to peers and queues it for full
+/// validation.
+///
+/// The relay comes before the body is validated, as BIP152's high-bandwidth
+/// compact blocks are relayed before full validation: once the header check
+/// passes (`validate_header_before_storing`, after the admission gate in
+/// `handle_share_block`), the proof of work, the header fields and the body
+/// bound to them are what every peer checks on receipt too. Each relayed
+/// share costs a share's proof of work at the share chain's minimum
+/// difficulty or more, so the relay is bounded as a share's is. Mining,
+/// uncle selection and confirmation still wait for full validation
+/// (`BlockValid`). See `should_relay` for which shares are relayed.
 ///
 /// Each block is processed in isolation against its parent's metadata
 /// from the store. When a block becomes ready and is committed, any
@@ -148,6 +163,9 @@ pub struct BlockReceiver {
     last_prune_height: u32,
     /// The chain's depths, which size the prune height.
     depths: ChainDepths,
+    /// The node actor's swarm channel, which relays shares that pass the
+    /// header check to peers. `None` relays nothing.
+    relay_tx: Option<mpsc::Sender<SwarmSend<ResponseChannel<Message>>>>,
 }
 
 /// Size of a share block as the pending buffer counts it: its consensus
@@ -191,7 +209,19 @@ impl BlockReceiver {
             validation_tx,
             last_prune_height: 0,
             depths: ChainDepths::BITCOIN,
+            relay_tx: None,
         }
+    }
+
+    /// Relay each share that passes the header check to peers through the
+    /// node actor's `swarm_tx`, before its body is validated
+    /// (`should_relay`). Without it the receiver relays nothing.
+    pub fn with_relay(
+        mut self,
+        swarm_tx: mpsc::Sender<SwarmSend<ResponseChannel<Message>>>,
+    ) -> Self {
+        self.relay_tx = Some(swarm_tx);
+        self
     }
 
     /// Size the prune height by `depths` (`ChainDepths::for_chain`);
@@ -508,17 +538,45 @@ impl BlockReceiver {
         Ok(())
     }
 
-    /// Persist a committed block, organise its header, and queue it
-    /// for full validation by the validation worker.
+    /// Whether a block that passed the header check is relayed to peers once
+    /// it is stored, before its body is validated.
+    ///
+    /// It is relayed when the receiver has a relay channel, its body is not
+    /// stored yet (a stored body was relayed, or not, when it was stored, so
+    /// a later copy is never relayed again), its parent is not `Invalid` (a
+    /// child of an invalid share is invalid by descent), and the chain is
+    /// current, so a node catching up does not relay history. A share already
+    /// found `Invalid` never gets here (`process_share_block_at`).
+    fn should_relay(&self, block_hash: &BlockHash, share_block: &ShareBlock) -> bool {
+        self.relay_tx.is_some()
+            && !self.chain_store_handle.share_block_exists(block_hash)
+            && !self.parent_is_invalid(share_block)
+            && self.chain_store_handle.is_current()
+    }
+
+    /// Whether this node has marked the block's parent `Invalid`.
+    fn parent_is_invalid(&self, share_block: &ShareBlock) -> bool {
+        self.chain_store_handle
+            .get_block_metadata(&share_block.header.prev_share_blockhash)
+            .is_ok_and(|metadata| metadata.status == Status::Invalid)
+    }
+
+    /// Persist a committed block, organise its header, relay it to peers
+    /// when `should_relay` says so, and queue it for full validation by the
+    /// validation worker.
     ///
     /// The persist + organise step is performed in a single RocksDB
     /// write batch so a crash cannot leave the share stored but not
-    /// organised on the candidate chain.
+    /// organised on the candidate chain. The relay follows the store, so a
+    /// peer asking for the share or its carried weak shares finds them here.
     async fn store_and_emit_validation(
         &self,
         block_hash: &BlockHash,
         share_block: ShareBlock,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        let relay_copy = self
+            .should_relay(block_hash, &share_block)
+            .then(|| share_block.clone());
         match self
             .chain_store_handle
             .add_share_block_and_organise_header(share_block)
@@ -533,6 +591,13 @@ impl BlockReceiver {
                 error!("Failed to store and organise block {block_hash}: {error}");
                 return Err(error.into());
             }
+        }
+
+        if let (Some(share_block), Some(relay_tx)) = (relay_copy, &self.relay_tx) {
+            debug!(
+                "Relaying block {block_hash} after its header check, before validating its body"
+            );
+            queue_share_block_broadcast(share_block, &self.chain_store_handle, relay_tx).await;
         }
 
         if let Err(error) = self
