@@ -2,6 +2,30 @@ use super::*;
 use bitcoin::block::Header;
 use bitcoin::consensus::deserialize;
 
+/// ASERT after a parent placed by its height through the network's pins,
+/// as these tests read real headers whose parents are not known headers.
+pub(crate) trait ByHeight {
+    fn next_target_at(&self, parent_height: u32, parent_time: u32) -> Option<U256>;
+    fn next_bits_at(&self, parent_height: u32, parent_time: u32) -> Option<CompactTarget>;
+    fn min_difficulty_gap_at(&self, parent_height: u32) -> u32;
+}
+
+impl ByHeight for BchAsert {
+    fn next_target_at(&self, parent_height: u32, parent_time: u32) -> Option<U256> {
+        self.next_target(self.tick_schedule.tick_info(parent_height), parent_time)
+    }
+
+    fn next_bits_at(&self, parent_height: u32, parent_time: u32) -> Option<CompactTarget> {
+        self.next_bits(self.tick_schedule.tick_info(parent_height), parent_time)
+    }
+
+    fn min_difficulty_gap_at(&self, parent_height: u32) -> u32 {
+        self.tick_schedule
+            .tick_info(parent_height)
+            .min_difficulty_gap()
+    }
+}
+
 /// The aserti3-2d specification's vector runs, from BCHN's QA assets
 /// (`aserti3-2d/README.md` beside this file).
 const SPECIFICATION_RUNS: [(&str, &str); 12] = [
@@ -200,14 +224,14 @@ fn real_mainnet_headers_carry_the_bits_asert_gives_them() {
     for (parent_height, parent_hex, child_hex) in MAINNET_PAIRS {
         let (parent, child) = real_pair(parent_hex, child_hex);
         assert_eq!(
-            BchAsert::MAINNET.next_bits(parent_height, parent.time),
+            BchAsert::MAINNET.next_bits_at(parent_height, parent.time),
             Some(child.bits),
             "block {}",
             parent_height + 1
         );
         // The header check, which has only the child, accepts it.
         BchAsert::MAINNET
-            .check_header_bits(child.bits, child.time, u64::from(parent_height) + 1)
+            .check_header_bits(child.bits, child.time, u64::from(parent_height) + 1, None)
             .unwrap();
     }
 }
@@ -224,12 +248,12 @@ fn real_chipnet_headers_carry_the_bits_asert_gives_them() {
             CompactTarget::from_consensus(BCH_POW_LIMIT_BITS)
         } else {
             BchAsert::CHIPNET
-                .next_bits(parent_height, parent.time)
+                .next_bits_at(parent_height, parent.time)
                 .unwrap()
         };
         assert_eq!(child.bits, expected, "block {}", parent_height + 1);
         BchAsert::CHIPNET
-            .check_header_bits(child.bits, child.time, u64::from(parent_height) + 1)
+            .check_header_bits(child.bits, child.time, u64::from(parent_height) + 1, None)
             .unwrap();
     }
     assert_eq!(minimum_difficulty_blocks, 1);
@@ -241,7 +265,7 @@ fn on_schedule_after_the_anchor_keeps_the_anchor_target() {
     let mainnet = BchAsert::MAINNET;
     assert_eq!(
         mainnet
-            .next_bits(
+            .next_bits_at(
                 mainnet.anchor_height,
                 (mainnet.anchor_parent_time + BCH_BLOCK_SPACING) as u32
             )
@@ -249,17 +273,20 @@ fn on_schedule_after_the_anchor_keeps_the_anchor_target() {
             .to_consensus(),
         mainnet.anchor_bits
     );
-    assert_eq!(mainnet.next_bits(mainnet.anchor_height - 1, u32::MAX), None);
+    assert_eq!(
+        mainnet.next_bits_at(mainnet.anchor_height - 1, u32::MAX),
+        None
+    );
     // Far behind schedule it stays at the limit; far ahead it never reaches 0.
     let chipnet = BchAsert::CHIPNET;
     assert_eq!(
         chipnet
-            .next_bits(chipnet.anchor_height + 1, u32::MAX)
+            .next_bits_at(chipnet.anchor_height + 1, u32::MAX)
             .unwrap()
             .to_consensus(),
         BCH_POW_LIMIT_BITS
     );
-    assert!(!chipnet.next_target(u32::MAX, 0).unwrap().is_zero());
+    assert!(!chipnet.next_target_at(u32::MAX, 0).unwrap().is_zero());
 }
 
 /// Mainnet one block past the anchor, on schedule: the computed target is
@@ -271,8 +298,9 @@ fn mainnet_band_is_half_to_one_point_zero_five() {
     let mainnet = BchAsert::MAINNET;
     let height = u64::from(mainnet.anchor_height) + 1;
     let time = (mainnet.anchor_parent_time + BCH_BLOCK_SPACING) as u32;
-    let check =
-        |bits: u32| mainnet.check_header_bits(CompactTarget::from_consensus(bits), time, height);
+    let check = |bits: u32| {
+        mainnet.check_header_bits(CompactTarget::from_consensus(bits), time, height, None)
+    };
     check(0x1804_dafe).unwrap();
     check(0x1802_6d7f).unwrap();
     assert!(check(0x1802_6d7e).unwrap_err().contains("harder"));
@@ -291,8 +319,8 @@ fn test_network_band_is_an_eighth_to_eight_times_or_the_limit() {
     // limit, far from both clamps.
     let height = u64::from(chipnet.anchor_height) + 1 + 20 * 6;
     let time = (chipnet.anchor_parent_time + BCH_BLOCK_SPACING) as u32;
-    let computed = chipnet.next_target(height as u32 - 1, time).unwrap();
-    let check = |target: U256| chipnet.check_header_bits(get_compact(target), time, height);
+    let computed = chipnet.next_target_at(height as u32 - 1, time).unwrap();
+    let check = |target: U256| chipnet.check_header_bits(get_compact(target), time, height, None);
     check(computed).unwrap();
     let eighth = computed / U256::from(8);
     check(eighth).unwrap();
@@ -313,6 +341,7 @@ fn test_network_band_is_an_eighth_to_eight_times_or_the_limit() {
             CompactTarget::from_consensus(BCH_POW_LIMIT_BITS),
             time,
             height,
+            None,
         )
         .unwrap();
 }
@@ -326,17 +355,27 @@ fn test_network_easy_edge_is_exactly_eight_times() {
     let height = u64::from(chipnet.anchor_height) + 10_001;
     let time = (chipnet.anchor_parent_time + BCH_BLOCK_SPACING) as u32;
     assert_eq!(
-        chipnet.next_target(height as u32 - 1, time),
+        chipnet.next_target_at(height as u32 - 1, time),
         Some(U256::one())
     );
     assert_eq!(set_compact(0x0108_0000), Some(U256::from(8)));
     chipnet
-        .check_header_bits(CompactTarget::from_consensus(0x0108_0000), time, height)
+        .check_header_bits(
+            CompactTarget::from_consensus(0x0108_0000),
+            time,
+            height,
+            None,
+        )
         .unwrap();
     assert_eq!(set_compact(0x0109_0000), Some(U256::from(9)));
     assert!(
         chipnet
-            .check_header_bits(CompactTarget::from_consensus(0x0109_0000), time, height)
+            .check_header_bits(
+                CompactTarget::from_consensus(0x0109_0000),
+                time,
+                height,
+                None
+            )
             .unwrap_err()
             .contains("easier")
     );
@@ -354,34 +393,34 @@ fn real_chipnet_header_two_hours_before_its_parent_passes() {
     assert_eq!(height, 329_001);
     assert_eq!(child.bits.to_consensus(), 0x1a31_06ee);
     assert_eq!(
-        BchAsert::CHIPNET.next_bits(parent_height, parent.time),
+        BchAsert::CHIPNET.next_bits_at(parent_height, parent.time),
         Some(child.bits)
     );
     BchAsert::CHIPNET
-        .check_header_bits(child.bits, parent.time - 200, height)
+        .check_header_bits(child.bits, parent.time - 200, height, None)
         .unwrap();
     BchAsert::CHIPNET
-        .check_header_bits(child.bits, parent.time - 260, height)
+        .check_header_bits(child.bits, parent.time - 260, height, None)
         .unwrap();
     BchAsert::CHIPNET
-        .check_header_bits(child.bits, parent.time - 600, height)
+        .check_header_bits(child.bits, parent.time - 600, height, None)
         .unwrap();
     BchAsert::CHIPNET
-        .check_header_bits(child.bits, parent.time - 3_600, height)
+        .check_header_bits(child.bits, parent.time - 3_600, height, None)
         .unwrap();
     BchAsert::CHIPNET
-        .check_header_bits(child.bits, parent.time - 7_200, height)
+        .check_header_bits(child.bits, parent.time - 7_200, height, None)
         .unwrap();
     // The same two hours on mainnet's band would need 2^(1/24), about
     // 1.029, which 1.05 covers.
     let mut old_band = BchAsert::CHIPNET;
     (old_band.easy_numerator, old_band.easy_denominator) = (105, 100);
     old_band
-        .check_header_bits(child.bits, parent.time - 200, height)
+        .check_header_bits(child.bits, parent.time - 200, height, None)
         .unwrap();
     assert!(
         old_band
-            .check_header_bits(child.bits, parent.time - 260, height)
+            .check_header_bits(child.bits, parent.time - 260, height, None)
             .is_err()
     );
 }
@@ -415,7 +454,7 @@ fn header_band_matches_the_safa_tool() {
                 (asert.anchor_parent_time + 900_000) as u32,
             ),
         ] {
-            let computed = asert.next_target(height as u32 - 1, time).unwrap();
+            let computed = asert.next_target_at(height as u32 - 1, time).unwrap();
             let mut candidates = vec![CompactTarget::from_consensus(BCH_POW_LIMIT_BITS)];
             for (numerator, denominator) in [
                 (1, 16),
@@ -443,7 +482,7 @@ fn header_band_matches_the_safa_tool() {
             }
             for bits in candidates {
                 assert_eq!(
-                    asert.check_header_bits(bits, time, height).is_ok(),
+                    asert.check_header_bits(bits, time, height, None).is_ok(),
                     p2poolv2_safa::asert_band_ok(network, bits.to_consensus(), time, height as u32)
                         .unwrap(),
                     "{network} {:#010x} at height {height}, time {time}",
@@ -464,7 +503,7 @@ fn header_band_matches_the_safa_tool() {
                 let height = parent_height + 1;
                 assert_eq!(
                     asert
-                        .check_header_bits(child.bits, time, u64::from(height))
+                        .check_header_bits(child.bits, time, u64::from(height), None)
                         .is_ok(),
                     p2poolv2_safa::asert_band_ok(network, child.bits.to_consensus(), time, height)
                         .unwrap(),
@@ -489,6 +528,7 @@ fn real_mainnet_header_two_hours_before_its_parent_passes() {
                 child.bits,
                 parent.time - 7_200,
                 u64::from(parent_height) + 1,
+                None,
             )
             .unwrap_or_else(|error| panic!("block {}: {error}", parent_height + 1));
     }
@@ -499,10 +539,10 @@ fn header_check_refuses_heights_below_the_anchor_and_invalid_bits() {
     let mainnet = BchAsert::MAINNET;
     let time = mainnet.anchor_parent_time as u32;
     let bits = CompactTarget::from_consensus(mainnet.anchor_bits);
-    assert!(mainnet.check_header_bits(bits, time, 0).is_err());
+    assert!(mainnet.check_header_bits(bits, time, 0, None).is_err());
     assert!(
         mainnet
-            .check_header_bits(bits, time, u64::from(mainnet.anchor_height))
+            .check_header_bits(bits, time, u64::from(mainnet.anchor_height), None)
             .unwrap_err()
             .contains("anchor")
     );
@@ -519,7 +559,8 @@ fn header_check_refuses_heights_below_the_anchor_and_invalid_bits() {
                 .check_header_bits(
                     CompactTarget::from_consensus(invalid),
                     time,
-                    u64::from(mainnet.anchor_height) + 1
+                    u64::from(mainnet.anchor_height) + 1,
+                    None
                 )
                 .is_err(),
             "{invalid:#x}"
@@ -746,7 +787,8 @@ fn chip_schedule_validation_matches() {
     assert_eq!(past_u32, 5);
 }
 
-/// Chipnet's ticks and intervals around its activation block, 332,450.
+/// Chipnet's pinned ticks and intervals around its activation block,
+/// 332,450.
 #[test]
 fn chipnet_switches_to_sixty_tick_blocks_after_block_332450() {
     let chipnet = TickSchedule::for_network(BitcoinCashNetwork::Chipnet);
@@ -754,9 +796,9 @@ fn chipnet_switches_to_sixty_tick_blocks_after_block_332450() {
     assert_eq!(chipnet.ticks(332_451), 332_450 * 600 + 60);
     assert_eq!(chipnet.interval_after(332_449), 600);
     assert_eq!(chipnet.interval_after(332_450), 60);
-    assert_eq!(BchAsert::CHIPNET.min_difficulty_gap(332_449), 1_200);
-    assert_eq!(BchAsert::CHIPNET.min_difficulty_gap(332_450), 120);
-    // Mainnet has not activated: every block is a 600-tick block.
+    assert_eq!(BchAsert::CHIPNET.min_difficulty_gap_at(332_449), 1_200);
+    assert_eq!(BchAsert::CHIPNET.min_difficulty_gap_at(332_450), 120);
+    // Mainnet has no pin: by height every block is a 600-tick block.
     assert_eq!(
         TickSchedule::for_network(BitcoinCashNetwork::Mainnet).ticks(950_000),
         950_000 * 600
@@ -780,10 +822,10 @@ fn the_first_one_minute_block_is_ten_times_easier_on_schedule() {
             + BCH_BLOCK_SPACING) as u32
     };
     let slow = chipnet
-        .next_target(last_slow, on_schedule(last_slow))
+        .next_target_at(last_slow, on_schedule(last_slow))
         .unwrap();
     let fast = chipnet
-        .next_target(last_slow + 1, on_schedule(last_slow + 1))
+        .next_target_at(last_slow + 1, on_schedule(last_slow + 1))
         .unwrap();
     assert_eq!(slow, set_compact(chipnet.anchor_bits).unwrap());
     assert_eq!(fast, bch_pow_limit());
@@ -815,7 +857,7 @@ fn the_first_one_minute_block_is_ten_times_easier_on_schedule() {
 /// node that follows the upgraded chain (2026-11-15): height, nTime and
 /// nBits. Block 332,450 is the last ten-minute block: its median time past,
 /// 1,794,744,504, is the first at or after 1,794,744,000.
-const CHIPNET_AROUND_ACTIVATION: [(u32, u32, u32); 22] = [
+pub(crate) const CHIPNET_AROUND_ACTIVATION: [(u32, u32, u32); 22] = [
     (332_439, 1_794_740_864, 0x1a21_8c7e),
     (332_440, 1_794_741_541, 0x1a1f_4cf0),
     (332_441, 1_794_742_743, 0x1d00_ffff),
@@ -853,12 +895,12 @@ fn real_chipnet_blocks_around_the_activation_carry_the_bits_computed_for_them() 
         let [(parent_height, parent_time, _), (height, time, bits)] = pair else {
             unreachable!()
         };
-        let expected = if *time > parent_time + chipnet.min_difficulty_gap(*parent_height) {
+        let expected = if *time > parent_time + chipnet.min_difficulty_gap_at(*parent_height) {
             minimum_difficulty.push(*height);
             BCH_POW_LIMIT_BITS
         } else {
             chipnet
-                .next_bits(*parent_height, *parent_time)
+                .next_bits_at(*parent_height, *parent_time)
                 .unwrap()
                 .to_consensus()
         };
@@ -894,97 +936,22 @@ fn a_lock_height_opens_ten_one_minute_blocks_per_unit_after_activation() {
     );
 }
 
-/// The headers a new node learns span 58 days: 8,400 ten-minute blocks,
-/// 84,000 one-minute blocks long after the switch, and the mix in between.
+/// A later switch pinned to a block, to 30-second blocks at height 380,000
+/// on chipnet, counts in ticks like the first: a 30-second block's target is
+/// twice a one-minute block's, and coinbase maturity stays 60,000 ticks,
+/// 2,000 thirty-second blocks.
 #[test]
-fn fifty_eight_days_of_blocks_before_and_after_the_switch() {
-    let span = 8_400 * 600;
-    assert_eq!(
-        TickSchedule::for_network(BitcoinCashNetwork::Mainnet).blocks_spanning(950_000, span),
-        8_400
-    );
-    let chipnet = TickSchedule::for_network(BitcoinCashNetwork::Chipnet);
-    assert_eq!(chipnet.blocks_spanning(332_450, span), 8_400);
-    // 150 one-minute blocks are 9,000 ticks; 8,385 ten-minute blocks the
-    // rest.
-    assert_eq!(chipnet.blocks_spanning(332_600, span), 150 + 8_385);
-    assert_eq!(chipnet.blocks_spanning(332_450 + 100_000, span), 84_000);
-    // A chain shorter than the span gives what it has.
-    assert_eq!(
-        TickSchedule::for_network(BitcoinCashNetwork::Mainnet).blocks_spanning(100, span),
-        100
-    );
-}
-
-/// What Knuth on the upgraded chipnet reported (2026-11-15): at the
-/// activation block 332,450 a next interval of 60, and at 332,460 an
-/// interval of 60 and 199,470,600 ticks. A schedule without the switch
-/// learns it from either, and the pinned chipnet schedule agrees.
-#[test]
-fn a_switch_is_learned_from_the_nodes_report() {
-    let report_at = |height, ticks, interval, next_interval| ReportedTicks {
-        height,
-        ticks: Some(ticks),
-        interval: Some(interval),
-        next_interval: Some(next_interval),
-    };
-    let chipnet_switch = IntervalSwitch {
-        height: 332_450,
-        interval: 60,
-    };
-    let unpinned = TickSchedule::TEN_MINUTES;
-    assert_eq!(
-        switch_from_report(&unpinned, report_at(332_450, 199_470_000, 600, 60)),
-        Ok(Some(chipnet_switch))
-    );
-    assert_eq!(
-        switch_from_report(&unpinned, report_at(332_460, 199_470_600, 60, 60)),
-        Ok(Some(chipnet_switch))
-    );
-    let chipnet = TickSchedule::for_network(BitcoinCashNetwork::Chipnet);
-    assert_eq!(
-        switch_from_report(&chipnet, report_at(332_460, 199_470_600, 60, 60)),
-        Ok(None)
-    );
-    // A node that reports only the next interval still shows a switch
-    // right after its tip.
-    assert_eq!(
-        switch_from_report(
-            &unpinned,
-            ReportedTicks {
-                height: 332_450,
-                ticks: None,
-                interval: None,
-                next_interval: Some(60),
-            }
-        ),
-        Ok(Some(chipnet_switch))
-    );
-}
-
-/// A later switch to 30-second blocks, at height 380,000 on chipnet, is
-/// followed from the node's report alone: no new code for a new interval.
-#[test]
-fn a_later_switch_to_thirty_seconds_is_followed_from_the_report() {
+fn a_later_switch_to_thirty_seconds_counts_in_ticks() {
     let chipnet = TickSchedule::for_network(BitcoinCashNetwork::Chipnet);
     let at_switch = chipnet.ticks(380_000);
     assert_eq!(at_switch % 600, 0);
-    let report = ReportedTicks {
-        height: 400_000,
-        ticks: Some(at_switch + 20_000 * 30),
-        interval: Some(30),
-        next_interval: Some(30),
-    };
     let switch = IntervalSwitch {
         height: 380_000,
         interval: 30,
     };
-    assert_eq!(switch_from_report(&chipnet, report), Ok(Some(switch)));
     let followed = chipnet.with_switch(switch).unwrap();
-    assert_eq!(followed.ticks(400_000), report.ticks.unwrap());
+    assert_eq!(followed.ticks(400_000), at_switch + 20_000 * 30);
     assert_eq!(followed.interval_after(400_000), 30);
-    // ASERT makes a 30-second block 20 times easier than the anchor's
-    // interval: twice the one-minute target.
     let reference = set_compact(0x1804_dafe).unwrap();
     let one_minute = calculate_asert(
         reference,
@@ -1007,109 +974,209 @@ fn a_later_switch_to_thirty_seconds_is_followed_from_the_report() {
     )
     .unwrap();
     assert_eq!(thirty_seconds, one_minute * U256::from(2u64));
-    // Coinbase maturity stays 60,000 ticks: 2,000 thirty-second blocks.
     assert!(!followed.coinbase_spendable_in_next_block(400_000, 1_999));
     assert!(followed.coinbase_spendable_in_next_block(400_000, 2_000));
+    // A switch off the 600-tick grid, or to an interval the CHIP refuses, is
+    // refused.
+    assert_eq!(
+        followed.with_switch(IntervalSwitch {
+            height: 400_001,
+            interval: 60,
+        }),
+        Err(ScheduleError::Grid {
+            height: 400_001,
+            ticks: followed.ticks(400_001),
+        })
+    );
+    assert_eq!(
+        chipnet.with_switch(IntervalSwitch {
+            height: 380_000,
+            interval: 7,
+        }),
+        Err(ScheduleError::Interval(7))
+    );
 }
 
-/// Reports no single allowed switch explains are refused, not followed.
-#[test]
-fn a_report_no_switch_explains_is_refused() {
-    let unpinned = TickSchedule::TEN_MINUTES;
-    // Ticks that put the switch at no whole height.
-    let off = ReportedTicks {
-        height: 332_460,
-        ticks: Some(199_470_601),
-        interval: Some(60),
-        next_interval: Some(60),
-    };
-    assert!(switch_from_report(&unpinned, off).is_err());
-    // An interval the CHIP does not allow.
-    let seven = ReportedTicks {
-        height: 332_450,
-        ticks: Some(199_470_000),
-        interval: Some(600),
-        next_interval: Some(7),
-    };
-    assert!(switch_from_report(&unpinned, seven).is_err());
-    // A different interval with no ticks to place the switch.
-    let unplaced = ReportedTicks {
-        height: 332_460,
-        ticks: None,
-        interval: Some(60),
-        next_interval: Some(60),
-    };
-    assert!(switch_from_report(&unpinned, unplaced).is_err());
-}
+/// The ten chipnet blocks before [`CHIPNET_AROUND_ACTIVATION`]: height and
+/// nTime, from the same Knuth node. With them every block from 332,439 on
+/// has its ten ancestors.
+pub(crate) const CHIPNET_BEFORE_ACTIVATION: [(u32, u32); 10] = [
+    (332_429, 1_794_735_255),
+    (332_430, 1_794_736_345),
+    (332_431, 1_794_736_878),
+    (332_432, 1_794_737_463),
+    (332_433, 1_794_737_555),
+    (332_434, 1_794_738_496),
+    (332_435, 1_794_738_670),
+    (332_436, 1_794_739_872),
+    (332_437, 1_794_739_926),
+    (332_438, 1_794_740_624),
+];
 
-/// From block times alone, chipnet's activation block is 332,450: the
-/// first whose median time past reaches 2026-11-15 12:00 UTC.
-#[test]
-fn chipnets_activation_block_is_found_from_block_times() {
-    let ancestors: [(u32, u32); 10] = [
-        (332_429, 1_794_735_255),
-        (332_430, 1_794_736_345),
-        (332_431, 1_794_736_878),
-        (332_432, 1_794_737_463),
-        (332_433, 1_794_737_555),
-        (332_434, 1_794_738_496),
-        (332_435, 1_794_738_670),
-        (332_436, 1_794_739_872),
-        (332_437, 1_794_739_926),
-        (332_438, 1_794_740_624),
-    ];
-    let times: Vec<(u32, u32)> = ancestors
+/// Chipnet's real blocks from 332,429 to 332,460, height and nTime, oldest
+/// first.
+pub(crate) fn chipnet_times_around_activation() -> Vec<(u32, u32)> {
+    CHIPNET_BEFORE_ACTIVATION
         .into_iter()
         .chain(
             CHIPNET_AROUND_ACTIVATION
                 .iter()
                 .map(|(height, time, _)| (*height, *time)),
         )
-        .collect();
-    let announced = AnnouncedSwitch {
-        activation_time: 1_794_744_000,
-        interval: 60,
-    };
-    assert_eq!(
-        activation_height_from_times(announced, &times),
-        Some(332_450)
-    );
-    // Starting after the crossing, the search cannot tell where it was.
-    assert_eq!(activation_height_from_times(announced, &times[12..]), None);
+        .collect()
 }
 
-/// A switch learned for mainnet reaches every mainnet schedule, the ASERT
-/// parameters built from it included, and settles the announcement.
+/// From block times alone, the timed rule makes 332,450 chipnet's last
+/// ten-minute block: the first whose median time past reaches 2026-11-15
+/// 12:00 UTC. It gives every block from 332,439 to 332,460 the next interval
+/// chipnet's pin gives it, so the pin is a shortcut, not another rule.
 #[test]
-fn a_learned_switch_reaches_every_schedule_of_its_network() {
-    let switch = IntervalSwitch {
-        height: 1_000_000,
-        interval: 60,
+fn the_timed_rule_switches_chipnet_at_its_pinned_block() {
+    let chipnet = TickSchedule::for_network(BitcoinCashNetwork::Chipnet);
+    let times = chipnet_times_around_activation();
+    let mut first_sixty = None;
+    for (index, (height, _)) in times.iter().enumerate().skip(10) {
+        // The block's own time and its ten ancestors', newest first.
+        let window: Vec<u32> = times[index - 10..=index]
+            .iter()
+            .rev()
+            .map(|(_, time)| *time)
+            .collect();
+        let next_interval = chipnet.next_interval(*height, &window);
+        assert_eq!(
+            next_interval,
+            chipnet.interval_after(*height),
+            "block {height}"
+        );
+        if next_interval == 60 && first_sixty.is_none() {
+            first_sixty = Some(*height);
+        }
+    }
+    assert_eq!(first_sixty, Some(332_450));
+    // The median times past either side of the activation time.
+    let median = |height: u32| {
+        let index = times.iter().position(|(at, _)| *at == height).unwrap();
+        let window: Vec<u32> = times[index - 10..=index]
+            .iter()
+            .map(|(_, time)| *time)
+            .collect();
+        median_time_past(&window).unwrap()
     };
-    let asert = BchAsert::for_network(BitcoinCashNetwork::Mainnet).unwrap();
-    assert_eq!(asert.tick_schedule.interval_after(1_000_000), 600);
-    assert!(asert.tick_schedule.announced().is_some());
-    assert_eq!(learn_switch(BitcoinCashNetwork::Mainnet, switch), Ok(true));
-    assert_eq!(learn_switch(BitcoinCashNetwork::Mainnet, switch), Ok(false));
-    assert_eq!(asert.tick_schedule.interval_after(1_000_000), 60);
-    assert_eq!(asert.tick_schedule.announced(), None);
+    assert_eq!(median(332_449), 1_794_743_302);
+    assert_eq!(median(332_450), 1_794_744_504);
+}
+
+/// BCHN's `GetMedianTimePast`: the middle of the sorted times, the upper
+/// middle of an even count, as near the chain's first block.
+#[test]
+fn median_time_past_is_bchns() {
+    assert_eq!(median_time_past(&[]), None);
+    assert_eq!(median_time_past(&[7]), Some(7));
+    assert_eq!(median_time_past(&[9, 1]), Some(9));
+    assert_eq!(median_time_past(&[5, 1, 9]), Some(5));
+    assert_eq!(median_time_past(&[11, 3, 7, 1]), Some(7));
+    let eleven = [10, 1, 9, 2, 8, 3, 7, 4, 6, 5, 11];
+    assert_eq!(median_time_past(&eleven), Some(6));
+}
+
+/// A block with fewer than its ten ancestors' times known takes the pins'
+/// next interval; one near the chain's first block has every ancestor it can
+/// and uses its median time past.
+#[test]
+fn a_median_time_past_needs_ten_ancestors_or_the_chains_first_block() {
+    let mainnet = TickSchedule::for_network(BitcoinCashNetwork::Mainnet);
+    let after = 1_810_382_400_u32;
+    // Ten times past the activation are not enough at height 1,000,000: the
+    // pins, which have no mainnet switch, answer 600.
+    assert_eq!(mainnet.next_interval(1_000_000, &[after; 10]), 600);
+    assert_eq!(mainnet.next_interval(1_000_000, &[after; 11]), 60);
+    // Extra times are not read.
+    let mut twelve = vec![after; 6];
+    twelve.extend([0; 6]);
+    assert_eq!(mainnet.next_interval(1_000_000, &twelve), 60);
+    twelve.swap(5, 11);
+    assert_eq!(mainnet.next_interval(1_000_000, &twelve), 600);
+    // Block 3 reads itself and its three ancestors.
+    assert_eq!(mainnet.next_interval(3, &[after; 4]), 60);
+    assert_eq!(mainnet.next_interval(3, &[after; 3]), 600);
+}
+
+/// Every network's timed switches are ones the CHIP allows, in activation
+/// order: mainnet's (and testnet's, scalenet's and regtest's, as in BCHN) at
+/// 2027-05-15 12:00 UTC and chipnet's at 2026-11-15 12:00 UTC, both to 60
+/// ticks. A switch from ten-minute blocks lands on the 600-tick grid by
+/// construction.
+#[test]
+fn every_networks_timed_switches_are_allowed() {
+    for network in [
+        BitcoinCashNetwork::Mainnet,
+        BitcoinCashNetwork::Chipnet,
+        BitcoinCashNetwork::Regtest,
+        BitcoinCashNetwork::Scalenet,
+    ] {
+        let schedule = TickSchedule::for_network(network);
+        let timed = schedule.timed_switches();
+        assert!(!timed.is_empty(), "{network:?}");
+        assert!(
+            timed
+                .iter()
+                .all(|switch| divides_600(switch.interval) && switch.interval != 600),
+            "{network:?}"
+        );
+        assert!(
+            timed
+                .windows(2)
+                .all(|pair| pair[0].activation_time < pair[1].activation_time),
+            "{network:?}"
+        );
+        // Every pin follows a timed switch to its interval.
+        for pin in schedule.switches() {
+            assert!(
+                timed.iter().any(|switch| switch.interval == pin.interval),
+                "{network:?}"
+            );
+        }
+    }
     assert_eq!(
-        TickSchedule::for_network(BitcoinCashNetwork::Mainnet).ticks(1_000_001),
-        600_000_060
+        TickSchedule::for_network(BitcoinCashNetwork::Mainnet).timed_switches(),
+        [TimedSwitch {
+            activation_time: 1_810_382_400,
+            interval: 60,
+        }]
     );
-    // Other networks do not see it, and the CHIP's rules still hold.
     assert_eq!(
-        TickSchedule::for_network(BitcoinCashNetwork::Chipnet).interval_after(1_000_000),
-        60
+        TickSchedule::for_network(BitcoinCashNetwork::Chipnet).timed_switches(),
+        [TimedSwitch {
+            activation_time: 1_794_744_000,
+            interval: 60,
+        }]
     );
-    assert!(
-        learn_switch(
-            BitcoinCashNetwork::Mainnet,
-            IntervalSwitch {
-                height: 1_100_000,
-                interval: 7,
-            }
-        )
-        .is_err()
+    let mainnet = TickSchedule::for_network(BitcoinCashNetwork::Mainnet);
+    assert_eq!(mainnet.interval_reached(1_810_382_399), 600);
+    assert_eq!(mainnet.interval_reached(1_810_382_400), 60);
+    assert_eq!(TickSchedule::TEN_MINUTES.interval_reached(i64::MAX), 600);
+}
+
+/// BCHN's `CheckTxInputs`: a coinbase can be spent in the block built on a
+/// tip when that block's ticks, the tip's plus its next interval, are 60,000
+/// past the coinbase's block. Across chipnet's switch: a coinbase in
+/// 332,400 (ticks 199,440,000) needs the 50 ten-minute blocks to 332,450 and
+/// 500 one-minute blocks after it.
+#[test]
+fn coinbase_maturity_counts_the_next_blocks_ticks() {
+    let coin_ticks = 332_400 * 600;
+    let tip = |ticks: i64| TickInfo {
+        ticks,
+        next_interval: 60,
+    };
+    // The block on 332,949 has ticks 199,470,000 + 500 * 60.
+    assert!(!tip(199_470_000 + 498 * 60).coinbase_spendable_in_next_block(coin_ticks));
+    assert!(tip(199_470_000 + 499 * 60).coinbase_spendable_in_next_block(coin_ticks));
+    let chipnet = TickSchedule::for_network(BitcoinCashNetwork::Chipnet);
+    assert!(!chipnet.coinbase_spendable_in_next_block(332_400, 549));
+    assert!(chipnet.coinbase_spendable_in_next_block(332_400, 550));
+    assert_eq!(
+        chipnet.tick_info(332_948).next_ticks(),
+        199_470_000 + 499 * 60
     );
 }

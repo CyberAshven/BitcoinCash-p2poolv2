@@ -758,25 +758,37 @@ fn gives_merkle_path(transactions: &[Arc<Transaction>], merkle_path: &[[u8; 32]]
 }
 
 /// The floor of the network's adaptive block size limit (ABLA) for a block
-/// at `height`: 32 MB on mainnet and regtest, 2 MB on chipnet, 256 MB on
-/// scalenet (`nDefaultConsensusBlockSize` in BCHN's `src/chainparams.cpp`)
-/// for a ten-minute block. CHIP-2025-03 scales the limit, floor included,
-/// by the block's interval: a one-minute block's floor is a tenth. The
-/// limit never goes below it, so a block within the floor is never too
-/// large.
-fn block_size_floor(network: BitcoinCashNetwork, height: u64) -> u64 {
+/// of `interval` ticks: 32 MB on mainnet and regtest, 2 MB on chipnet, 256
+/// MB on scalenet (`nDefaultConsensusBlockSize` in BCHN's
+/// `src/chainparams.cpp`) for a ten-minute block. CHIP-2025-03 scales the
+/// limit, floor included, by the block's interval: a one-minute block's
+/// floor is a tenth. The limit never goes below it, so a block within the
+/// floor is never too large.
+fn block_size_floor(network: BitcoinCashNetwork, interval: i64) -> u64 {
     let ten_minute_floor: u64 = match network {
         BitcoinCashNetwork::Mainnet | BitcoinCashNetwork::Regtest => 32_000_000,
         BitcoinCashNetwork::Chipnet => 2_000_000,
         BitcoinCashNetwork::Scalenet => 256_000_000,
     };
-    let interval = height
-        .checked_sub(1)
-        .and_then(|parent| u32::try_from(parent).ok())
-        .map_or(BCH_BLOCK_SPACING, |parent| {
-            TickSchedule::for_network(network).interval_after(parent)
-        });
-    ten_minute_floor * interval as u64 / BCH_BLOCK_SPACING as u64
+    ten_minute_floor * interval.clamp(1, BCH_BLOCK_SPACING) as u64 / BCH_BLOCK_SPACING as u64
+}
+
+/// The interval, in ticks, of a block at `height`: `parent_next_interval`,
+/// the parent's `next_target_time` as the node reports it with the parent,
+/// or, from a node that reports none, the network's pins by height.
+fn block_interval(
+    network: BitcoinCashNetwork,
+    height: u64,
+    parent_next_interval: Option<i64>,
+) -> i64 {
+    parent_next_interval.unwrap_or_else(|| {
+        height
+            .checked_sub(1)
+            .and_then(|parent| u32::try_from(parent).ok())
+            .map_or(BCH_BLOCK_SPACING, |parent| {
+                TickSchedule::for_network(network).interval_after(parent)
+            })
+    })
 }
 
 /// Block size limit a provided template at `height` is checked against.
@@ -785,9 +797,21 @@ fn block_size_floor(network: BitcoinCashNetwork, height: u64) -> u64 {
 /// parent (`ablastate.nextblocksizelimit`), the same limit its own
 /// `getblocktemplate` reports as `sizelimit`. BCHN manages the limit, so it is
 /// used whatever its size. Only while BCHN has reported none, because it is
-/// unreachable or keeps no ABLA state, does the network's floor stand in.
-fn template_size_limit(reported: Option<u64>, network: BitcoinCashNetwork, height: u64) -> u64 {
-    reported.unwrap_or_else(|| block_size_floor(network, height))
+/// unreachable or keeps no ABLA state, does the network's floor stand in,
+/// scaled to the new block's interval: the parent's next interval as the
+/// node reports it (`parent_next_interval`), else by the pins.
+fn template_size_limit(
+    reported: Option<u64>,
+    network: BitcoinCashNetwork,
+    height: u64,
+    parent_next_interval: Option<i64>,
+) -> u64 {
+    reported.unwrap_or_else(|| {
+        block_size_floor(
+            network,
+            block_interval(network, height, parent_next_interval),
+        )
+    })
 }
 
 /// The scriptSig start of every coinbase this pool builds at `height`: the
@@ -1519,13 +1543,24 @@ impl ProviderConnection<'_> {
 
     /// Make `hash`, with a block on it at `height`, the parent of the
     /// templates that follow, keeping `reported`, the size limit the node
-    /// reported for a block on it, when there is one.
-    fn enter_parent(&mut self, hash: BlockHash, height: u64, reported: Option<u64>) -> ParentBlock {
+    /// reported for a block on it, when there is one. `next_interval` is the
+    /// interval of a block on it, as the node reports it.
+    fn enter_parent(
+        &mut self,
+        hash: BlockHash,
+        height: u64,
+        reported: Option<u64>,
+        next_interval: Option<i64>,
+    ) -> ParentBlock {
         if reported.is_some() {
             self.reported_size_limit = reported;
         }
-        let size_limit =
-            template_size_limit(self.reported_size_limit, self.provider.network, height);
+        let size_limit = template_size_limit(
+            self.reported_size_limit,
+            self.provider.network,
+            height,
+            next_interval,
+        );
         if self.reported_size_limit.is_none() {
             warn!(
                 "The node reported no block size limit for parent {hash}; checking its templates against the network's {size_limit}-byte floor"
@@ -1553,12 +1588,15 @@ impl ProviderConnection<'_> {
             // reported stands. ABLA moves the limit by a small fraction a
             // block.
             (_, Some((found, height))) if found == prev_hash => {
-                self.enter_parent(prev_hash, height, None)
+                self.enter_parent(prev_hash, height, None, None)
             }
             _ => match lookup_parent(self.bitcoind, prev_hash).await {
-                Ok(summary) => {
-                    self.enter_parent(prev_hash, summary.height + 1, summary.next_block_size_limit)
-                }
+                Ok(summary) => self.enter_parent(
+                    prev_hash,
+                    summary.height + 1,
+                    summary.next_block_size_limit,
+                    summary.next_target_time,
+                ),
                 Err(reason) => {
                     error!("Template Provider template on parent {prev_hash} skipped: {reason}");
                     return Ok(());

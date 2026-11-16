@@ -1895,6 +1895,8 @@ async fn process_bch_block_with_prev(prev_known: bool) -> bool {
     let known = KnownBchHeader {
         height: 10,
         header: TestShareBlockBuilder::new().build().header.bitcoin_header,
+        ticks: 6_000,
+        next_interval: 600,
     };
     mock_store
         .expect_get_bch_header()

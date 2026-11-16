@@ -13,8 +13,10 @@
 //!
 //! - waits until the coinbase output can be spent in the next block: 100
 //!   confirmations before one-minute blocks, 1,000 one-minute blocks after
-//!   (BCH's coinbase maturity, 60,000 ticks under CHIP-2025-03,
-//!   `TickSchedule::coinbase_spendable_in_next_block`);
+//!   (BCH's coinbase maturity, 60,000 ticks under CHIP-2025-03), counted
+//!   from the ticks of the known headers of the tip and the coinbase's
+//!   block (`TickInfo::coinbase_spendable_in_next_block`), or by the
+//!   network's pins while either is not known;
 //! - broadcasts the tree's node transactions at
 //!   `BCH_TREE_EXECUTION_FEE_RATE`, 1 satoshi per byte, root first and each
 //!   node before its children, and the child nodes of the other accepted
@@ -222,8 +224,8 @@ pub struct PayoutTreeExecutor<N: TreeExecutionNode> {
     last_tip: Option<BlockHash>,
     /// New tips in a row each tree has looked settled, by coinbase txid.
     settled_tips: HashMap<Txid, u32>,
-    /// The network's move to one-minute blocks, which sets how many blocks
-    /// a coinbase takes to mature.
+    /// The network's pins, which count a coinbase's maturity by height
+    /// while the known headers cannot.
     tick_schedule: TickSchedule,
 }
 
@@ -245,9 +247,9 @@ impl<N: TreeExecutionNode> PayoutTreeExecutor<N> {
         }
     }
 
-    /// The executor for a network that moves to one-minute blocks as
-    /// `tick_schedule` says. Without it, every block is a ten-minute block
-    /// until mainnet's activation time.
+    /// The executor for a network whose pins are `tick_schedule`, for when
+    /// the known headers cannot count a coinbase's maturity. Without it,
+    /// that count takes every block as a ten-minute block.
     pub fn with_tick_schedule(mut self, tick_schedule: TickSchedule) -> Self {
         self.tick_schedule = tick_schedule;
         self
@@ -306,6 +308,33 @@ impl<N: TreeExecutionNode> PayoutTreeExecutor<N> {
         }
     }
 
+    /// Whether the coinbase of `stored`'s block, at `depth` on the node's
+    /// chain, can be spent in a block on `bitcoin_tip`: the block's on the
+    /// node's main chain, and a block on the tip is at least 60,000 ticks
+    /// past it, as BCHN's `CheckTxInputs` counts, `tip.ticks +
+    /// tip.next_interval - coin_block.ticks`. Both blocks' ticks come from
+    /// their known headers; while either is not known yet, the network's pins
+    /// count by height.
+    fn coinbase_spendable_in_next_block(
+        &self,
+        stored: &StoredPayoutTree,
+        bitcoin_tip: BlockHash,
+        depth: BlockDepth,
+    ) -> bool {
+        if depth.confirmations <= 0 {
+            return false;
+        }
+        let known = |hash: &BlockHash| self.chain_store_handle.get_bch_header(hash).ok().flatten();
+        match (known(&bitcoin_tip), known(&stored.bitcoin_blockhash)) {
+            (Some(tip), Some(coin_block)) => tip
+                .tick_info()
+                .coinbase_spendable_in_next_block(coin_block.ticks),
+            _ => self
+                .tick_schedule
+                .coinbase_spendable_in_next_block(depth.height, depth.confirmations),
+        }
+    }
+
     /// Broadcast one tree if it is mature, and mark it executed once it has
     /// settled.
     async fn execute_tree(
@@ -320,9 +349,7 @@ impl<N: TreeExecutionNode> PayoutTreeExecutor<N> {
             .await
         {
             Ok(Some(depth))
-                if self
-                    .tick_schedule
-                    .coinbase_spendable_in_next_block(depth.height, depth.confirmations) => {}
+                if self.coinbase_spendable_in_next_block(stored, bitcoin_tip, depth) => {}
             Ok(None) => {
                 self.settled_tips.remove(&stored.coinbase_txid);
                 if !synced {

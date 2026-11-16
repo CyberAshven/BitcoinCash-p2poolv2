@@ -699,11 +699,14 @@ impl NodeActor {
                 &config.bitcoinrpc.password,
             )?;
             (
-                Some(FoundBlockVerifier::new(
-                    client.clone(),
-                    chain_store_handle.clone(),
-                    metrics.clone(),
-                )),
+                Some(
+                    FoundBlockVerifier::new(
+                        client.clone(),
+                        chain_store_handle.clone(),
+                        metrics.clone(),
+                    )
+                    .with_tick_schedule(bitcoin_cash_tick_schedule(&config)),
+                ),
                 // Follows BCHN's headers for mining on the current chain.
                 Some(BchHeaderFeeder::new(
                     client,
@@ -1288,14 +1291,15 @@ fn confirmed_tip_progressed(last_seen: Option<BlockHash>, current: BlockHash) ->
     last_seen.is_some_and(|seen| seen != current)
 }
 
-#[cfg(test)]
-mod tests;
-
-/// The configured Bitcoin Cash network's move to one-minute blocks, or
-/// mainnet's when the node runs no Bitcoin Cash network.
+/// The configured Bitcoin Cash network's block intervals (its timed
+/// switches and pins), or ten-minute blocks when the node runs no Bitcoin
+/// Cash network.
 pub(crate) fn bitcoin_cash_tick_schedule(config: &Config) -> TickSchedule {
     config
         .stratum
         .bitcoin_cash_network
         .map_or(TickSchedule::TEN_MINUTES, TickSchedule::for_network)
 }
+
+#[cfg(test)]
+mod tests;

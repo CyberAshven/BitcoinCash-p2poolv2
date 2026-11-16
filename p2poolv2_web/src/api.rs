@@ -163,6 +163,11 @@ pub struct Hashrate {
     /// Current network difficulty from the newest prepared template. None
     /// until the first notify is built.
     pub network_difficulty: Option<f64>,
+    /// Seconds between Bitcoin Cash blocks now: 600, or 60 after a
+    /// network's switch to one-minute blocks. `None` from an older node,
+    /// which estimated with ten minutes.
+    #[serde(default)]
+    pub block_interval_secs: Option<f64>,
     /// Oldest first.
     pub history: Vec<HashratePoint>,
 }

@@ -398,7 +398,10 @@ fn refund(
     )?;
     let mut summary = spend_summary(&transaction, coin);
     // A Bitcoin Cash lock height counts ten-minute units after one-minute
-    // blocks (CHIP-2025-03); a share height is a share height.
+    // blocks (CHIP-2025-03); a share height is a share height. The CLI has
+    // no known headers, so the network's pinned switches place the block:
+    // exact on chipnet, ten-minute blocks on mainnet until its switch is
+    // pinned.
     let valid_from_height = match chain.chain {
         TradeChain::Share => contract.refund_height.saturating_add(1),
         TradeChain::Bch => TickSchedule::for_network(chain.network)

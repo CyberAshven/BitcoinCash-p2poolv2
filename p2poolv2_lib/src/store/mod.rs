@@ -66,7 +66,14 @@ const STORE_FORMAT_KEY: &[u8] = b"store_format";
 /// - 9 (2026-11-12): a weak share a share carries is held to its carrier's
 ///   time (`BCH_WEAK_SHARE_RULE_TAG`, `weak3-64-100-48-256`). A stored chain
 ///   was validated against each node's clock; the chain starts again.
-pub const STORE_FORMAT_VERSION: u32 = 9;
+/// - 10 (2026-11-15): each known Bitcoin Cash header carries its
+///   CHIP-2025-03 ticks and next interval, worked out from its own branch's
+///   median time past (`BCH_CURRENT_CHAIN_RULE_TAG`, `bch-prev-1off-ticks`,
+///   and `BCH_MERGE_MINING_RULE_TAG`, `mm2-roots-asert8-ticks`). A stored
+///   header has neither and would not decode, and a stored chain was
+///   validated with intervals each node learned while running; the chain
+///   starts again.
+pub const STORE_FORMAT_VERSION: u32 = 10;
 
 pub mod bch_headers;
 pub mod block_tx_metadata;
@@ -622,8 +629,9 @@ impl Store {
              (the main and mini chains merged) whose headers carry a difficulty band, a \
              payout level and weak shares, with payees below their level paid by a draw and \
              every proof from a job at the minimum paid at the weak work, and whose weak root \
-             commits each carried weak share's whole encoding. Delete the store directory and \
-             restart to resync the share chain from peers.",
+             commits each carried weak share's whole encoding, and where each known Bitcoin \
+             Cash header carries its ticks and next block interval (CHIP-2025-03). Delete the \
+             store directory and restart to resync the share chain from peers.",
             self.path
         )))
     }

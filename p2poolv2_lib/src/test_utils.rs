@@ -2160,6 +2160,7 @@ pub fn build_token_win_submit(
                             &result.coinbase,
                             &job.template_merkle_branches,
                             None,
+                            None,
                         )
                         .is_empty()
                 },

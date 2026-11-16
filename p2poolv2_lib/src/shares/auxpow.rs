@@ -26,7 +26,7 @@
 //! This checks merge-mined work, not token issuance rules or that the parent
 //! is a complete valid BCH block; BCHN is the authority on that.
 
-use super::bch_asert::{BchAsert, U256, bip34_height};
+use super::bch_asert::{BchAsert, TickInfo, U256, bip34_height};
 use super::merge_mining::{
     MAX_MERGE_MINING_TREE_HEIGHT, MERGE_MINING_OUTPUT_LENGTH, MergeMiningCommitment,
 };
@@ -876,12 +876,16 @@ impl AuxProof {
     ///
     /// With `asert`, the header's nBits must also pass the ASERT format
     /// check at the coinbase's BIP34 height ([`BchAsert::check_header_bits`]);
-    /// regtest and scalenet have no anchor and pass `None`.
+    /// regtest and scalenet have no anchor and pass `None`. `parent` is the
+    /// tick info of the block the header builds on when its header is known;
+    /// without it the network's pins give the ticks and interval by height,
+    /// as the covenant computes them.
     pub fn verify(
         &self,
         leaf: &TokenLeaf,
         max_height: u8,
         asert: Option<BchAsert>,
+        parent: Option<TickInfo>,
     ) -> Result<(), AuxError> {
         self.check_shape()?;
         let target = expand_token_target(leaf.target_bits).ok_or(AuxError::Target)?;
@@ -928,7 +932,7 @@ impl AuxProof {
                 .coinbase_height()
                 .ok_or_else(|| AuxError::Asert("coinbase has no BIP34 height".into()))?;
             asert
-                .check_header_bits(self.header.bits, self.header.time, height)
+                .check_header_bits(self.header.bits, self.header.time, height, parent)
                 .map_err(AuxError::Asert)?;
         }
         Ok(())

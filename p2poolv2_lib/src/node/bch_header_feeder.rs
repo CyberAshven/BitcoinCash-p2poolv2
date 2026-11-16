@@ -7,11 +7,39 @@
 //! Every few seconds the feeder asks BCHN for its best block. When the store
 //! does not know it, the feeder walks back with `getblockheader` until it
 //! reaches a known header, or the chain's first block, and stores the
-//! headers it walked, oldest first, each one height above its parent. A
-//! reorg is the same walk: the new branch is added and the old one stays
-//! known, since a share on a block that lost an orphan race is still placed
-//! on the chain. [`BchHeaderFeeder::learn_from`] runs the same walk from any
-//! block BCHN knows, such as a new template's previous block.
+//! headers it walked, each one height above its parent. A reorg is the same
+//! walk: the new branch is added and the old one stays known, since a share
+//! on a block that lost an orphan race is still placed on the chain.
+//! [`BchHeaderFeeder::learn_from`] runs the same walk from any block BCHN
+//! knows, such as a new template's previous block.
+//!
+//! Each stored header gets its CHIP-2025-03 ticks and next interval as a
+//! peer's header does (`BchHeaderRules::known_on`): its parent's ticks plus
+//! its parent's next interval, and the interval its own median time past (it
+//! and its ten ancestors) reaches. A walk starts with one verbose
+//! `getblockheader` of its first block, for the block's height and, from a
+//! node with the CHIP, its `ticks`, `target_time` and `next_target_time`.
+//! Those only cross-check the values P2Pool works out: a disagreement is
+//! logged as an error, since P2Pool's rules are then out of date, and never
+//! followed.
+//!
+//! A store with nothing to link to, such as a new one, has no parent to count
+//! from. Its walk counts ticks down from the first block's, as the node
+//! reports them or else as the network's pins give them, takes each header's
+//! next interval from the ten headers walked below it, and stores the headers
+//! in chunks of [`STORE_CHUNK`] as it goes back, so the region around the tip
+//! is known within seconds. It stops once the headers span
+//! [`INITIAL_HEADER_TICKS`]. The node runs one round before it dials peers
+//! ([`BchHeaderFeeder::first_sync`]), so the share bodies they send find
+//! their BCH prevs known instead of being dropped and fetched again.
+//!
+//! One walk runs at a time in a node: the feeder, the template relay and that
+//! first round each walk BCHN's headers, and a walk that waited finds them
+//! known. A block already known needs no walk and no wait, and a long walk
+//! lets waiting walks in between its chunks, so the template relay is not
+//! held up for the whole first walk. These headers come from the node's own
+//! BCHN, which has validated them, so they are not run through
+//! `BchHeaderRules::check`; headers from peers are.
 //!
 //! The feeder also keeps an index of BCHN's best chain, height to hash. After
 //! each walk it points the tip's height and every height below it that
@@ -19,23 +47,10 @@
 //! moved down. A sender uses the index to tell which headers its peers
 //! surely have.
 //!
-//! On a node whose store knows no header yet, the walk stops after
-//! [`INITIAL_HEADERS`] blocks and asks BCHN for the height of the oldest.
-//! The node runs one round before it dials peers
-//! ([`BchHeaderFeeder::first_sync`]), so the share bodies they send find
-//! their BCH prevs known instead of being dropped and fetched again. One walk
-//! runs at a time in a node: the feeder, the template relay and that first
-//! round each walk BCHN's headers, and a walk that waited finds them known.
-//! These headers come from the node's own BCHN, which has validated them, so
-//! they are not run through `BchHeaderRules::check`; headers from peers are.
-//!
 //! Part of mining on the current chain (V16,
 //! `docs/sharechain/current-chain.md`).
 
-use crate::shares::bch_asert::{
-    BCH_BLOCK_SPACING, IntervalSwitch, ReportedTicks, TickSchedule, activation_height_from_times,
-    learn_switch, switch_from_report,
-};
+use crate::shares::bch_asert::{BCH_BLOCK_SPACING, MEDIAN_TIME_SPAN, TickInfo, TickSchedule};
 use crate::shares::bch_headers::KnownBchHeader;
 #[cfg(test)]
 #[mockall_double::double]
@@ -46,52 +61,182 @@ use crate::stratum::work::notify::{NotifyCmd, NotifyReceiver, NotifySender};
 use bitcoin::BlockHash;
 use bitcoin::block::Header;
 use bitcoin::hashes::Hash;
-use bitcoindrpc::BitcoindRpcClient;
+use bitcoindrpc::{BitcoindRpcClient, BlockHeaderSummary};
 use std::str::FromStr;
 use std::time::Duration;
 use tokio::sync::Mutex;
 use tokio::time::{MissedTickBehavior, interval, timeout};
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 /// How often the feeder asks BCHN for its best block.
 const FEED_INTERVAL: Duration = Duration::from_secs(5);
-
-/// The fewest headers a node first learns back from BCHN's tip: 8,400
-/// ten-minute blocks, [`INITIAL_HEADER_TICKS`].
-pub const INITIAL_HEADERS: usize = 8_400;
 
 /// How far back a node first learns BCHN's headers, in ticks (seconds of
 /// target time): about 58 days, enough for the payout window (about 14.7
 /// days with its maturity skip), the depth shares are validated to (about
 /// 29.4 days) and room besides. That is 8,400 ten-minute blocks or 84,000
 /// one-minute blocks (CHIP-2025-03).
-pub const INITIAL_HEADER_TICKS: i64 = INITIAL_HEADERS as i64 * BCH_BLOCK_SPACING;
+pub const INITIAL_HEADER_TICKS: i64 = 8_400 * BCH_BLOCK_SPACING;
 
-/// The most known headers the feeder walks back to find an announced
-/// switch from block times: about a week of one-minute blocks.
-const MAX_ACTIVATION_SEARCH: usize = 10_000;
+/// How many headers a walk with nothing to link to stores at a time.
+pub const STORE_CHUNK: usize = 2_000;
 
 /// How long a node waits for its first round of BCHN's headers before it
-/// syncs shares anyway. A new store's walk of [`INITIAL_HEADERS`] took about
-/// a minute against a BCHN over Tailscale.
+/// syncs shares anyway. A new store's walk of 8,400 ten-minute headers took
+/// about a minute against a BCHN over Tailscale; the first chunk is stored
+/// within seconds.
 pub(crate) const FIRST_SYNC_LIMIT: Duration = Duration::from_secs(300);
 
 /// One header walk at a time in a node process. Without it, the walks of a
 /// new store by the feeder, the template relay and the first round would
-/// each fetch the same [`INITIAL_HEADERS`] from BCHN.
+/// each fetch the same headers from BCHN.
 static WALK: Mutex<()> = Mutex::const_new(());
 
 #[derive(Clone)]
 pub(crate) struct BchHeaderFeeder {
     client: BitcoindRpcClient,
     store: ChainStoreHandle,
-    initial_headers: usize,
     /// How far back, in ticks, a store with nothing to link to learns:
     /// [`INITIAL_HEADER_TICKS`].
     initial_header_ticks: i64,
-    /// The network's move to one-minute blocks, which sets how many
-    /// headers `initial_header_ticks` is.
+    /// How many headers such a walk stores at a time: [`STORE_CHUNK`].
+    store_chunk: usize,
+    /// The network's block intervals, for each header's next interval and,
+    /// where the node reports no ticks, a first walk's starting ticks.
     tick_schedule: TickSchedule,
+}
+
+/// One walk back from a block: the headers walked, newest first, and the
+/// tick info counted down from the first block's ticks for each header whose
+/// ten ancestors are walked.
+struct Walk {
+    /// Height of the first header walked.
+    tip_height: u32,
+    /// Ticks of the first header walked: the node's, or the pins'.
+    tip_ticks: i64,
+    /// The headers walked, newest first.
+    headers: Vec<Header>,
+    /// Tick info of `headers[..settled.len()]`, counted down from the tip.
+    settled: Vec<TickInfo>,
+    /// How many of the newest headers are stored.
+    stored: usize,
+}
+
+impl Walk {
+    fn height(&self, index: usize) -> u32 {
+        self.tip_height.saturating_sub(index as u32)
+    }
+
+    /// The times of the header at `index` and of the walked headers below
+    /// it, newest first, at most [`MEDIAN_TIME_SPAN`].
+    fn times(&self, index: usize) -> Vec<u32> {
+        self.headers[index..]
+            .iter()
+            .take(MEDIAN_TIME_SPAN)
+            .map(|header| header.time)
+            .collect()
+    }
+
+    /// Count ticks down to every header whose ten ancestors are walked: its
+    /// next interval from its median time past, and its ticks the block
+    /// above's less that interval, which is the block above's own.
+    fn settle(&mut self, tick_schedule: &TickSchedule) {
+        while self.settled.len() + MEDIAN_TIME_SPAN <= self.headers.len() {
+            let index = self.settled.len();
+            let next_interval = tick_schedule.next_interval(self.height(index), &self.times(index));
+            let ticks = self
+                .settled
+                .last()
+                .map_or(self.tip_ticks, |above| above.ticks - next_interval);
+            self.settled.push(TickInfo {
+                ticks,
+                next_interval,
+            });
+        }
+    }
+
+    /// The index of the first counted header at least `span` ticks below
+    /// the tip, which the walk does not need.
+    fn span_end(&self, span: i64) -> Option<usize> {
+        let last = self.settled.last()?;
+        (self.tip_ticks - last.ticks >= span).then(|| self.settled.len() - 1)
+    }
+
+    /// The unstored counted headers above `end`, as known headers.
+    fn counted(&self, end: usize) -> Vec<KnownBchHeader> {
+        (self.stored..end)
+            .map(|index| KnownBchHeader {
+                height: self.height(index),
+                header: self.headers[index],
+                ticks: self.settled[index].ticks,
+                next_interval: self.settled[index].next_interval,
+            })
+            .collect()
+    }
+
+    /// The unstored headers worked out upwards, each from its parent and its
+    /// median time past: from `base`, the known parent of the oldest walked,
+    /// whose own time and its ancestors' are `base_times`, or from the
+    /// chain's first block, at ticks 0, when `base` is `None`. Oldest first.
+    fn worked_up(
+        &self,
+        tick_schedule: &TickSchedule,
+        base: Option<TickInfo>,
+        base_times: &[u32],
+    ) -> Vec<KnownBchHeader> {
+        let mut parent = base;
+        let mut known = Vec::with_capacity(self.headers.len() - self.stored);
+        for index in (self.stored..self.headers.len()).rev() {
+            let mut times = self.times(index);
+            let room = MEDIAN_TIME_SPAN - times.len();
+            times.extend(base_times.iter().take(room));
+            let height = self.height(index);
+            let tick_info = match parent {
+                Some(parent) => tick_schedule.tick_info_on(parent, height, &times),
+                None => TickInfo {
+                    ticks: 0,
+                    next_interval: tick_schedule.next_interval(height, &times),
+                },
+            };
+            known.push(KnownBchHeader {
+                height,
+                header: self.headers[index],
+                ticks: tick_info.ticks,
+                next_interval: tick_info.next_interval,
+            });
+            parent = Some(tick_info);
+        }
+        known
+    }
+}
+
+/// Where the node's report on a walk's first block disagrees with the values
+/// P2Pool works out for it: `known`, whose own interval is `interval`. Each
+/// is one line to log; empty when they agree or the node reports none.
+fn report_disagreements(
+    report: &BlockHeaderSummary,
+    known: &KnownBchHeader,
+    interval: Option<i64>,
+) -> Vec<String> {
+    [
+        ("ticks", report.ticks, Some(known.ticks)),
+        ("target_time", report.target_time, interval),
+        (
+            "next_target_time",
+            report.next_target_time,
+            Some(known.next_interval),
+        ),
+    ]
+    .into_iter()
+    .filter_map(|(field, reported, worked_out)| match (reported, worked_out) {
+        (Some(reported), Some(worked_out)) if reported != worked_out => Some(format!(
+            "The node reports {field} {reported} for block {} at height {}, where P2Pool works out {worked_out}: P2Pool's block interval rules (CHIP-2025-03) may be out of date. P2Pool keeps its own value.",
+            known.block_hash(),
+            known.height
+        )),
+        _ => None,
+    })
+    .collect()
 }
 
 impl BchHeaderFeeder {
@@ -103,8 +248,8 @@ impl BchHeaderFeeder {
         Self {
             client,
             store,
-            initial_headers: INITIAL_HEADERS,
             initial_header_ticks: INITIAL_HEADER_TICKS,
+            store_chunk: STORE_CHUNK,
             tick_schedule,
         }
     }
@@ -155,79 +300,222 @@ impl BchHeaderFeeder {
             BlockHash::from_str(&best).map_err(|error| format!("best block hash: {error}"))?;
         let added = self.learn_from(best).await?;
         self.index_best_chain(best).await?;
-        if added > 0
-            && let Err(error) = self.follow_schedule(best).await
-        {
-            warn!("Cannot follow the node's block interval: {error}");
-        }
         Ok(added)
     }
 
     /// Learn `hash` and the headers below it back to a known one, from BCHN,
     /// and return how many were added. BCHN must know `hash`.
     pub(crate) async fn learn_from(&self, hash: BlockHash) -> Result<usize, String> {
-        let _walk = WALK.lock().await;
-        let mut hash = hash;
-        let mut walked: Vec<Header> = Vec::new();
-        let mut limit = self.initial_headers;
-        let oldest_height = loop {
-            if let Some(known) = self.known(&hash)? {
-                if walked.is_empty() {
-                    return Ok(0);
-                }
-                break known.height + 1;
-            }
-            if walked.len() == limit {
-                // A store with nothing to link to: anchor the walk on the
-                // height BCHN gives its oldest header, once the walk spans
-                // `INITIAL_HEADER_TICKS`. One-minute blocks need more
-                // headers than the first limit for that span.
-                let oldest = walked.last().expect("walked is not empty");
-                let summary = self
-                    .client
-                    .get_block_header_summary(&oldest.block_hash().to_string())
-                    .await
-                    .map_err(|error| format!("getblockheader {}: {error}", oldest.block_hash()))?;
-                let height = u32::try_from(summary.height)
-                    .map_err(|_| format!("height {} is too high", summary.height))?;
-                let tip_height = height.saturating_add(walked.len() as u32 - 1);
-                let wanted = self
-                    .tick_schedule
-                    .blocks_spanning(tip_height, self.initial_header_ticks)
-                    .max(self.initial_headers);
-                if walked.len() >= wanted || height == 0 {
-                    info!(
-                        "Learning {} Bitcoin Cash headers back from the node's tip to height {height}",
-                        walked.len()
-                    );
-                    break height;
-                }
-                limit = wanted;
+        // A known block needs no walk and no wait: the template relay passes
+        // on at once while a first walk stores older headers.
+        if self.known(&hash)?.is_some() {
+            return Ok(0);
+        }
+        let mut walking = WALK.lock().await;
+        if self.known(&hash)?.is_some() {
+            return Ok(0);
+        }
+        let report = self
+            .client
+            .get_block_header_summary(&hash.to_string())
+            .await
+            .map_err(|error| format!("getblockheader {hash}: {error}"))?;
+        let tip_height = u32::try_from(report.height)
+            .map_err(|_| format!("height {} is too high", report.height))?;
+        let mut walk = Walk {
+            tip_height,
+            tip_ticks: report
+                .ticks
+                .unwrap_or_else(|| self.tick_schedule.ticks(tip_height)),
+            headers: Vec::new(),
+            settled: Vec::new(),
+            stored: 0,
+        };
+        let mut cursor = hash;
+        let mut added = 0;
+        loop {
+            if let Some(base) = self.known(&cursor)? {
+                added += self.store_on_base(&mut walk, base, &report).await?;
+                break;
             }
             let header = self
                 .client
-                .get_block_header(&hash.to_string())
+                .get_block_header(&cursor.to_string())
                 .await
-                .map_err(|error| format!("getblockheader {hash}: {error}"))?;
-            hash = header.prev_blockhash;
-            walked.push(header);
-            if hash == BlockHash::all_zeros() {
-                // The chain's first block, at height 0.
-                break 0;
+                .map_err(|error| format!("getblockheader {cursor}: {error}"))?;
+            cursor = header.prev_blockhash;
+            walk.headers.push(header);
+            if cursor == BlockHash::all_zeros() {
+                added += self.store_from_first_block(&mut walk, &report).await?;
+                break;
             }
+            walk.settle(&self.tick_schedule);
+            if let Some(end) = walk.span_end(self.initial_header_ticks) {
+                added += self.store_counted(&mut walk, end, &report).await?;
+                info!(
+                    "Learned {} Bitcoin Cash headers back from the node's block {hash} to height {}",
+                    walk.stored,
+                    walk.height(end.saturating_sub(1))
+                );
+                break;
+            }
+            let counted = walk.settled.len();
+            if counted - walk.stored >= self.store_chunk {
+                added += self.store_counted(&mut walk, counted, &report).await?;
+                // A walk waiting for a block now known goes first.
+                drop(walking);
+                walking = WALK.lock().await;
+            }
+        }
+        drop(walking);
+        Ok(added)
+    }
+
+    /// Store the counted headers above `end`, checking the walk's first block
+    /// against the node's report when it is among them.
+    async fn store_counted(
+        &self,
+        walk: &mut Walk,
+        end: usize,
+        report: &BlockHeaderSummary,
+    ) -> Result<usize, String> {
+        let headers = walk.counted(end);
+        if walk.stored == 0
+            && let Some(tip) = headers.first()
+        {
+            let interval = walk.settled.get(1).map(|below| below.next_interval);
+            self.cross_check(report, tip, interval);
+        }
+        walk.stored = end.max(walk.stored);
+        self.store_headers(headers).await
+    }
+
+    /// Store the unstored headers of a walk that reached `base`, a known
+    /// header, worked out upwards from it.
+    async fn store_on_base(
+        &self,
+        walk: &mut Walk,
+        base: KnownBchHeader,
+        report: &BlockHeaderSummary,
+    ) -> Result<usize, String> {
+        let depth = walk.headers.len();
+        if walk.stored == depth {
+            return Ok(0);
+        }
+        if base.height.checked_add(depth as u32) != Some(walk.tip_height) {
+            return Err(format!(
+                "the node puts block {} at height {}, but it builds on known block {} at height {}, {depth} below",
+                walk.headers[0].block_hash(),
+                walk.tip_height,
+                base.block_hash(),
+                base.height
+            ));
+        }
+        let base_times = self.times_back_from(&base)?;
+        let headers = walk.worked_up(&self.tick_schedule, Some(base.tick_info()), &base_times);
+        self.finish_walk(walk, headers, Some(base.next_interval), report)
+            .await
+    }
+
+    /// Store the unstored headers of a walk that reached the chain's first
+    /// block, worked out upwards from it.
+    async fn store_from_first_block(
+        &self,
+        walk: &mut Walk,
+        report: &BlockHeaderSummary,
+    ) -> Result<usize, String> {
+        let depth = walk.headers.len();
+        if walk.tip_height as usize + 1 != depth {
+            return Err(format!(
+                "the node puts block {} at height {}, but it is {depth} blocks above the chain's first",
+                walk.headers[0].block_hash(),
+                walk.tip_height
+            ));
+        }
+        let headers = walk.worked_up(&self.tick_schedule, None, &[]);
+        self.finish_walk(walk, headers, None, report).await
+    }
+
+    /// Store `headers`, the rest of a walk worked out upwards, oldest first,
+    /// with `base_interval` the next interval of the block below the oldest.
+    /// Where the walk stored counted headers above them, the two must meet;
+    /// where it stored none, the walk's first block is checked against the
+    /// node's report.
+    async fn finish_walk(
+        &self,
+        walk: &mut Walk,
+        headers: Vec<KnownBchHeader>,
+        base_interval: Option<i64>,
+        report: &BlockHeaderSummary,
+    ) -> Result<usize, String> {
+        let Some(newest) = headers.last() else {
+            return Ok(0);
         };
-        let added = walked.len();
-        let headers = walked
-            .into_iter()
-            .rev()
-            .zip(oldest_height..)
-            .map(|(header, height)| KnownBchHeader { height, header })
-            .collect();
+        match walk.stored.checked_sub(1) {
+            Some(above) => {
+                let counted = walk.settled[above];
+                if newest.tick_info().next_ticks() != counted.ticks {
+                    error!(
+                        "Bitcoin Cash block {} at height {} has ticks {} counted down from the node's block {} and {} worked out from its parent: P2Pool's block interval rules (CHIP-2025-03) may be out of date",
+                        walk.headers[above].block_hash(),
+                        walk.height(above),
+                        counted.ticks,
+                        walk.headers[0].block_hash(),
+                        newest.tick_info().next_ticks()
+                    );
+                }
+            }
+            None => {
+                let interval = headers
+                    .len()
+                    .checked_sub(2)
+                    .map(|below| headers[below].next_interval)
+                    .or(base_interval);
+                self.cross_check(report, newest, interval);
+            }
+        }
+        walk.stored = walk.headers.len();
+        self.store_headers(headers).await
+    }
+
+    /// Log every disagreement between the node's report on a walk's first
+    /// block and `tip`, the values P2Pool works out for it.
+    fn cross_check(
+        &self,
+        report: &BlockHeaderSummary,
+        tip: &KnownBchHeader,
+        interval: Option<i64>,
+    ) {
+        for disagreement in report_disagreements(report, tip, interval) {
+            error!("{disagreement}");
+        }
+    }
+
+    async fn store_headers(&self, headers: Vec<KnownBchHeader>) -> Result<usize, String> {
+        let added = headers.len();
+        if added == 0 {
+            return Ok(0);
+        }
         self.store
             .add_bch_headers(headers)
             .await
             .map_err(|error| format!("storing headers: {error}"))?;
         Ok(added)
+    }
+
+    /// The times of `from` and of its known ancestors, newest first, at most
+    /// [`MEDIAN_TIME_SPAN`].
+    fn times_back_from(&self, from: &KnownBchHeader) -> Result<Vec<u32>, String> {
+        let mut times = Vec::with_capacity(MEDIAN_TIME_SPAN);
+        let mut current = Some(*from);
+        while let Some(header) = current {
+            times.push(header.header.time);
+            if times.len() == MEDIAN_TIME_SPAN || header.height == 0 {
+                break;
+            }
+            current = self.known(&header.header.prev_blockhash)?;
+        }
+        Ok(times)
     }
 
     /// Point the best-chain index at the chain ending at `tip`: every height
@@ -237,17 +525,9 @@ impl BchHeaderFeeder {
         let tip = self
             .known(&tip)?
             .ok_or_else(|| format!("best block {tip} is not known"))?;
-        // The most entries one update rewrites: a reorg deeper than BCHN
-        // allows (10 blocks), or a first index over the whole store, which
-        // spans at most the initial ticks at this tip.
-        let max_rewrite = self
-            .tick_schedule
-            .blocks_spanning(tip.height, self.initial_header_ticks)
-            .max(self.initial_headers)
-            + 1;
         let mut updates = Vec::new();
         let mut current = tip;
-        while updates.len() < max_rewrite {
+        loop {
             let indexed = self
                 .store
                 .get_bch_best_hash(current.height)
@@ -256,6 +536,11 @@ impl BchHeaderFeeder {
                 break;
             }
             updates.push((current.height, current.block_hash()));
+            // A first index over the whole store spans at most the initial
+            // ticks, far past any reorg BCHN allows.
+            if tip.ticks - current.ticks > self.initial_header_ticks {
+                break;
+            }
             let parent = current.header.prev_blockhash;
             match self.known(&parent)? {
                 Some(parent) if current.height > 0 => current = parent,
@@ -273,82 +558,6 @@ impl BchHeaderFeeder {
             .set_bch_best_chain(updates, tip.height)
             .await
             .map_err(|error| format!("writing the best-chain index: {error}"))
-    }
-
-    /// Follow the node's block intervals (CHIP-2025-03): learn the switch
-    /// its report on `tip` shows (`switch_from_report`), or, from a node
-    /// that reports no ticks, the activation block of an announced switch
-    /// from the median time past of the known headers. A learned switch
-    /// reaches every schedule of the network (`learn_switch`).
-    async fn follow_schedule(&self, tip: BlockHash) -> Result<(), String> {
-        let Some(network) = self.tick_schedule.network() else {
-            return Ok(());
-        };
-        let summary = self
-            .client
-            .get_block_header_summary(&tip.to_string())
-            .await
-            .map_err(|error| format!("getblockheader {tip}: {error}"))?;
-        let report = ReportedTicks {
-            height: u32::try_from(summary.height)
-                .map_err(|_| format!("height {} is too high", summary.height))?,
-            ticks: summary.ticks,
-            interval: summary.target_time,
-            next_interval: summary.next_target_time,
-        };
-        let reports_ticks =
-            report.ticks.is_some() || report.interval.is_some() || report.next_interval.is_some();
-        let switch = if reports_ticks {
-            switch_from_report(&self.tick_schedule, report)?
-        } else {
-            self.announced_switch_from_times(tip)?
-        };
-        let Some(switch) = switch else {
-            return Ok(());
-        };
-        if learn_switch(network, switch)
-            .map_err(|error| format!("the node's switch {switch:?}: {error}"))?
-        {
-            info!(
-                "Following the node's block interval: {} ticks for every block after height {}",
-                switch.interval, switch.height
-            );
-        }
-        Ok(())
-    }
-
-    /// The activation block of the network's announced switch, from the
-    /// known headers below `tip`, once `tip` is dated past the activation
-    /// time. Walks back at most [`MAX_ACTIVATION_SEARCH`] headers.
-    fn announced_switch_from_times(
-        &self,
-        tip: BlockHash,
-    ) -> Result<Option<IntervalSwitch>, String> {
-        let Some(announced) = self.tick_schedule.announced() else {
-            return Ok(None);
-        };
-        let mut times = Vec::new();
-        let mut current = self.known(&tip)?;
-        if current
-            .as_ref()
-            .is_none_or(|header| i64::from(header.header.time) < announced.activation_time)
-        {
-            return Ok(None);
-        }
-        while let Some(header) = current {
-            times.push((header.height, header.header.time));
-            if times.len() == MAX_ACTIVATION_SEARCH || header.height == 0 {
-                break;
-            }
-            current = self.known(&header.header.prev_blockhash)?;
-        }
-        times.reverse();
-        Ok(
-            activation_height_from_times(announced, &times).map(|height| IntervalSwitch {
-                height,
-                interval: announced.interval,
-            }),
-        )
     }
 
     fn known(&self, hash: &BlockHash) -> Result<Option<KnownBchHeader>, String> {

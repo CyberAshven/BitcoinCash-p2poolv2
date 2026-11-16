@@ -73,6 +73,10 @@ pub struct HashrateResponse {
     /// prepared template). Live tracker read, independent of the samples:
     /// None until the first notify is built.
     pub network_difficulty: Option<f64>,
+    /// Seconds between Bitcoin Cash blocks now, which the network hashrate
+    /// spreads the difficulty over: 600, or 60 after a network's switch to
+    /// one-minute blocks (CHIP-2025-03).
+    pub block_interval_secs: f64,
     /// Samples in the window, oldest first.
     pub history: Vec<HashratePoint>,
 }
@@ -123,6 +127,7 @@ async fn hashrate(
     // it feeds before the first sample, and the effort numerator it always
     // carries.
     let metrics = state.app.metrics_handle.get_metrics().await;
+    let block_interval = history::block_interval_seconds(&state.app);
     let current = match samples.last() {
         Some(newest) => HashratePoint::from(newest),
         None => {
@@ -150,7 +155,7 @@ async fn hashrate(
                     .app
                     .tracker_handle
                     .get_network_difficulty()
-                    .map(history::network_hashrate),
+                    .map(|difficulty| history::network_hashrate(difficulty, block_interval)),
             }
         }
     };
@@ -163,6 +168,7 @@ async fn hashrate(
         share_difficulty: state.app.tracker_handle.get_pool_difficulty(),
         work_since_last_block: Some(metrics.work_since_last_block),
         network_difficulty: state.app.tracker_handle.get_network_difficulty(),
+        block_interval_secs: block_interval,
         history: in_window(&samples, window),
     }))
 }

@@ -5,6 +5,8 @@
 use super::*;
 use crate::accounting::payout::payout_tree::{PayoutTree, TreePayee};
 use crate::config::BitcoinCashNetwork;
+use crate::shares::bch_asert::tests::{MAINNET_PAIRS, header};
+use crate::shares::bch_headers::KnownBchHeader;
 use bitcoin::hashes::Hash;
 use bitcoin::{PubkeyHash, ScriptBuf};
 use std::sync::{Arc, Mutex};
@@ -117,11 +119,71 @@ fn stored_tree(count: u32) -> StoredPayoutTree {
 }
 
 fn store_with(tree: StoredPayoutTree) -> ChainStoreHandle {
+    store_with_headers(tree, HashMap::new())
+}
+
+/// A store keeping `tree` and knowing the Bitcoin Cash `headers`.
+fn store_with_headers(
+    tree: StoredPayoutTree,
+    headers: HashMap<BlockHash, KnownBchHeader>,
+) -> ChainStoreHandle {
     let mut store = ChainStoreHandle::default();
     store
         .expect_get_payout_trees()
         .returning(move || Ok(vec![tree.clone()]));
     store
+        .expect_get_bch_header()
+        .returning(move |hash| Ok(headers.get(hash).copied()));
+    store
+}
+
+/// A known header with `ticks` and a next block of `next_interval`.
+fn known_with_ticks(ticks: i64, next_interval: i64) -> KnownBchHeader {
+    KnownBchHeader {
+        height: FAKE_BLOCK_HEIGHT,
+        header: header(MAINNET_PAIRS[0].1),
+        ticks,
+        next_interval,
+    }
+}
+
+/// With the tip's and the coinbase block's headers known, maturity counts
+/// their own ticks, as BCHN's `CheckTxInputs`: on a mainnet branch past its
+/// switch, 100 one-minute confirmations are 6,000 ticks, not mature, though
+/// the pins, with no mainnet switch, would count 100 ten-minute blocks; the
+/// tree goes once the block on the tip is 60,000 ticks past the coinbase's.
+#[tokio::test]
+async fn maturity_counts_the_known_headers_ticks() {
+    let coin_ticks = 1_000_010 * 600;
+    for (confirmations, tip_ticks, broadcast) in [
+        (100, coin_ticks + 99 * 60, false),
+        (999, coin_ticks + 998 * 60, false),
+        (1_000, coin_ticks + 999 * 60, true),
+    ] {
+        let node = FakeNode::new(confirmations);
+        let stored = stored_tree(3);
+        let headers = HashMap::from([
+            (stored.bitcoin_blockhash, known_with_ticks(coin_ticks, 60)),
+            (
+                BlockHash::from_byte_array([1; 32]),
+                known_with_ticks(tip_ticks, 60),
+            ),
+        ]);
+        let mut executor = PayoutTreeExecutor::new(
+            node.clone(),
+            store_with_headers(stored, headers),
+            payout_tree_channel().1,
+        )
+        .with_tick_schedule(TickSchedule::for_network(BitcoinCashNetwork::Mainnet));
+
+        executor.execute_round().await;
+
+        assert_eq!(
+            !node.sent().is_empty(),
+            broadcast,
+            "{confirmations} confirmations"
+        );
+    }
 }
 
 #[tokio::test]

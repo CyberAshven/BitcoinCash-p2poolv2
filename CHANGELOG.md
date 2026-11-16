@@ -7,27 +7,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-P2Pool follows Bitcoin Cash's one-minute blocks (CHIP-2025-03), which
-chipnet activated on 2026-11-15: block 332,450 is its last ten-minute
-block. A block's "ticks" are the sum of the target intervals up to it, 600
-per block up to the activation block and 60 after. ASERT counts ticks
-from its anchor and makes a one-minute block's target ten times easier, and
-a test network block may take the proof-of-work limit after twice its own
-interval, 2 minutes instead of 20. The header check on peers' Bitcoin Cash
-headers, the PPLNS window's sizing nBits and the merge-mining header band
-all use it, and the CHIP's ASERT and tick vectors and real chipnet headers
-on both sides of the switch pass. The payout tree waits for 60,000 ticks of
-coinbase maturity, 1,000 one-minute blocks, before it spends a coinbase. A
-Template Provider's block size floor shrinks to a tenth for a one-minute
-block. `p2poolv2_cli bch-trade refund` prints the first block a Bitcoin
-Cash refund is valid in, since a lock height now counts ten-minute units.
-The intervals are a schedule of switches, as the CHIP defines them, not a
-fixed 60: each new tip, a node reads its Bitcoin Cash node's `ticks`,
-`target_time` and `next_target_time` and learns any switch they show, so
-mainnet's switch on 2027-05-15, and a later one to 30 seconds say, need no
-new release. A node that reports none of them gets mainnet's announced
-switch from its blocks' median time past. A new node learns 58 days of
-headers in ticks, 84,000 one-minute blocks. No share-chain rule changes.
+Share-chain rule change on Bitcoin Cash, a flag day: P2Pool follows Bitcoin
+Cash's one-minute blocks (CHIP-2025-03) the way BCHN does (protocol
+segments `bch-prev-1off-ticks` and `mm2-roots-asert8-ticks`, store format
+10). Nodes start from fresh stores: delete the share-chain store directory
+and restart. Chipnet activated one-minute blocks on 2026-11-15; block
+332,450 is its last ten-minute block. Mainnet, testnet, scalenet and regtest
+switch at median time past 1810382400 (2027-05-15 12:00 UTC), as in BCHN.
+
+- A block's ticks are the sum of the target intervals up to it. Each known
+  Bitcoin Cash header now carries its ticks and the interval of a block
+  built on it, as BCHN's block index does: its ticks are its parent's plus
+  its parent's next interval, and its next interval is 60 once its own
+  median time past (it and its ten ancestors) has reached the network's
+  activation time, else 600. Every node that knows a branch gives its blocks
+  the same values, and a reorg onto a branch that switched at another block
+  follows that branch. Before, each node learned the switch while running,
+  from its own Bitcoin Cash node: nodes learned it at different moments or
+  not at all, forgot it on restart, and kept it across a reorg onto a branch
+  that switched elsewhere, so they could require different nBits of one
+  header and split the share chain.
+- The rules that read those values: the exact nBits a peer's header must
+  carry (ASERT counts ticks from its anchor and makes a one-minute block's
+  target ten times easier; a test network block may take the proof-of-work
+  limit after twice its parent's next interval, 2 minutes instead of 20),
+  the nBits that size a payout window, and a token share's ASERT band, which
+  block validation now computes from the share's BCH prev, while the header
+  gate, which has no store, uses the network's pinned switches by height.
+- The switches are a list of timed switches per network, each an interval
+  the CHIP allows. Chipnet's activation block is also pinned at 332,450,
+  only for headers with fewer than ten known ancestors (the oldest of a new
+  store) and where no header is known; the tests check that the timed rule
+  switches at that block.
+- Headers from this node's Bitcoin Cash node get their values the same way.
+  The node's `ticks`, `target_time` and `next_target_time` only anchor a new
+  store's first walk; elsewhere a disagreement is logged as an error and
+  never followed. A new store learns its tip's height first and stores
+  headers in chunks of 2,000 as the walk goes back, so the tip region is
+  known within seconds, and the template relay no longer waits for the whole
+  walk. It learns 58 days of headers counted in ticks, 84,000 one-minute
+  blocks.
+- Node-local: the payout tree spends a coinbase once the block on the tip is
+  60,000 ticks past the coinbase's block, from both known headers (1,000
+  one-minute blocks); the found-block verifier counts BCHN's finalization
+  depth as 6,000 ticks (100 one-minute blocks); a Template Provider's block
+  size floor follows the interval the node reports for the new block; a
+  share message carries up to 100 headers on a path, BCHN's 6,000-tick reorg
+  limit in one-minute blocks, still within one message's 128; the dashboards
+  estimate the network hashrate over the current block interval, and `/hashrate`
+  reports it as `block_interval_secs`; `p2poolv2_cli bch-trade refund`
+  prints the first block a Bitcoin Cash refund is valid in, since a lock
+  height counts ten-minute units.
+- Open before any token deployment: the SAFA covenant (`p2poolv2_safa`, not
+  deployed) still computes ASERT by height with ten-minute blocks, so after
+  a network's switch it computes a target ten times harder than P2Pool's
+  token band, and a token share P2Pool accepts would fail the covenant. The
+  covenant is not changed here. Mainnet's activation block is not pinned
+  yet, so until a release pins it the header gate refuses mainnet token
+  shares after the switch.
+
+The CHIP's ASERT and tick vectors pass, and real chipnet headers 332,429 to
+332,460 fed through the header path get the ticks and next intervals Knuth
+reports and require each block's real nBits.
 
 The payout simulator has a `scale-levers` table for part 5 of the small
 miners design, the dynamic share period: pools at 10 and 30% of a Bitcoin

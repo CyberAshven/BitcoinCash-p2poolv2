@@ -38,7 +38,7 @@ use crate::pool_difficulty::PoolDifficulty;
 #[cfg(not(test))]
 use crate::pool_difficulty::PoolDifficulty;
 use crate::shares::band::{ParentBand, check_share_band};
-use crate::shares::bch_asert::BchAsert;
+use crate::shares::bch_asert::{BchAsert, TickInfo};
 use crate::shares::bch_headers::BchHeaderRules;
 use crate::shares::bch_script;
 #[cfg(test)]
@@ -893,18 +893,21 @@ impl DefaultShareValidator {
     /// block, builds on it, and any other share that does is invalid. Shares
     /// below the payout zone are not checked (`validate_below_pplns_depth`),
     /// so a new node syncs old shares its header store does not reach.
+    ///
+    /// Returns the BCH prev's tick info, `None` on a Bitcoin node and for
+    /// the chain's first share.
     fn validate_bch_prev_known(
         &self,
         share_header: &ShareHeader,
         chain_store_handle: &ChainStoreHandle,
-    ) -> Result<(), ValidationError> {
+    ) -> Result<Option<TickInfo>, ValidationError> {
         if self.bch_header_rules.is_none() {
-            return Ok(());
+            return Ok(None);
         }
         let prev = share_header.bitcoin_header.prev_blockhash;
         if prev == BlockHash::all_zeros() {
             if share_header.prev_share_blockhash == BlockHash::all_zeros() {
-                return Ok(());
+                return Ok(None);
             }
             return Err(ValidationError::consensus(format!(
                 "Share {} builds on no Bitcoin Cash block",
@@ -912,7 +915,7 @@ impl DefaultShareValidator {
             )));
         }
         match chain_store_handle.get_bch_header(&prev) {
-            Ok(Some(_)) => Ok(()),
+            Ok(Some(known)) => Ok(Some(known.tick_info())),
             Ok(None) => Err(ValidationError::recoverable(format!(
                 "Bitcoin Cash block {prev} that share {} builds on is not known yet",
                 share_header.block_hash()
@@ -986,15 +989,24 @@ impl DefaultShareValidator {
     }
 
     /// The ASERT format check of a token share's bitcoin header: its nBits
-    /// must be what BCH's aserti3-2d gives at the share's BIP34 height,
-    /// within the band agreed for merge-mining proofs
-    /// ([`BchAsert::check_header_bits`]). A token claim's covenant checks the
-    /// same band, so a token share outside it could not be claimed; the
-    /// share chain refuses it at the header. No-token shares are not
-    /// checked: BCHN alone judges their blocks.
+    /// must be what BCH's aserti3-2d gives after its BCH prev, within the
+    /// band agreed for merge-mining proofs ([`BchAsert::check_header_bits`]).
+    /// A token claim's covenant checks a band too, so a token share outside
+    /// it could not be claimed; the share chain refuses it at the header.
+    /// No-token shares are not checked: BCHN alone judges their blocks.
+    ///
+    /// `bch_prev` is the tick info of the share's BCH prev when its header
+    /// is known: block validation has it, since a share in the payout zone
+    /// waits for its BCH prev (`validate_bch_prev_known`). The header gate
+    /// has no store and passes `None`, so there the network's pins give the
+    /// ticks and interval by the share's height. On chipnet they match every
+    /// header on its chain; on mainnet, whose switch is not pinned yet, the
+    /// gate computes ten-minute blocks and refuses token shares after the
+    /// switch until a release pins it.
     fn validate_token_share_asert(
         &self,
         share_header: &ShareHeader,
+        bch_prev: Option<TickInfo>,
     ) -> Result<(), ValidationError> {
         let Some(asert) = self.bch_asert else {
             return Ok(());
@@ -1007,6 +1019,7 @@ impl DefaultShareValidator {
                 share_header.bitcoin_header.bits,
                 share_header.bitcoin_header.time,
                 share_header.bitcoin_height,
+                bch_prev,
             )
             .map_err(|error| {
                 ValidationError::consensus(format!(
@@ -2062,7 +2075,8 @@ impl ShareValidator for DefaultShareValidator {
                 ValidationError::consensus(format!("Invalid share version: {error}"))
             })?;
         }
-        self.validate_token_share_asert(share_header)
+        // No store here: the pins give the BCH prev's ticks by height.
+        self.validate_token_share_asert(share_header, None)
     }
 
     /// Validations run in parallel that don't require the chain context.
@@ -2092,7 +2106,10 @@ impl ShareValidator for DefaultShareValidator {
         self.validate_body_matches_header(share)?;
         self.validate_with_pool_difficulty(&share.header, chain_store_handle)?;
         self.validate_share_version(&share.header, chain_store_handle)?;
-        self.validate_bch_prev_known(&share.header, chain_store_handle)?;
+        // With the BCH prev known, a token share's band follows the prev's
+        // own ticks and next interval, not the pins.
+        let bch_prev = self.validate_bch_prev_known(&share.header, chain_store_handle)?;
+        self.validate_token_share_asert(&share.header, bch_prev)?;
         self.validate_uncles(&share.header, chain_store_handle)?;
         self.validate_uncle_bodies_present(share, chain_store_handle)?;
         self.validate_block_size(share)?;
@@ -2562,28 +2579,55 @@ mod tests {
         let chipnet = validator()
             .for_chain(Chain::BitcoinCash)
             .with_bitcoin_cash_network(Some(BitcoinCashNetwork::Chipnet));
-        chipnet.validate_token_share_asert(&header).unwrap();
+        chipnet.validate_token_share_asert(&header, None).unwrap();
 
         // 256 times harder than ASERT gives is outside the band.
         let mut hard = header.clone();
         hard.bitcoin_header.bits = CompactTarget::from_consensus(0x1b34_e28b);
-        let error = chipnet.validate_token_share_asert(&hard).unwrap_err();
+        let error = chipnet.validate_token_share_asert(&hard, None).unwrap_err();
         assert_eq!(error.kind(), FailureKind::Consensus);
         assert!(error.to_string().contains("ASERT"), "{error}");
 
         // The same header as a no-token share, or on regtest, is not checked.
         let mut no_token = hard.clone();
         no_token.bch_coinbase.as_mut().unwrap().merge_mining = MergeMiningCommitment::empty();
-        chipnet.validate_token_share_asert(&no_token).unwrap();
+        chipnet.validate_token_share_asert(&no_token, None).unwrap();
         let regtest = validator()
             .for_chain(Chain::BitcoinCash)
             .with_bitcoin_cash_network(Some(BitcoinCashNetwork::Regtest));
-        regtest.validate_token_share_asert(&hard).unwrap();
+        regtest.validate_token_share_asert(&hard, None).unwrap();
         // Mainnet's anchor is above this height: refused.
         let mainnet = validator()
             .for_chain(Chain::BitcoinCash)
             .with_bitcoin_cash_network(Some(BitcoinCashNetwork::Mainnet));
-        assert!(mainnet.validate_token_share_asert(&header).is_err());
+        assert!(mainnet.validate_token_share_asert(&header, None).is_err());
+
+        // With its BCH prev known the band follows the prev's own ticks and
+        // next interval. Real mainnet block 900,001 passes on its real
+        // prev's, and on a prev with a one-minute next block its bits are
+        // ten times harder than ASERT gives, outside mainnet's band.
+        let (parent_height, _, child_hex) = crate::shares::bch_asert::tests::MAINNET_PAIRS[6];
+        let mut mainnet_header = header.clone();
+        mainnet_header.bitcoin_header = crate::shares::bch_asert::tests::header(child_hex);
+        mainnet_header.bitcoin_height = u64::from(parent_height) + 1;
+        mainnet
+            .validate_token_share_asert(&mainnet_header, None)
+            .unwrap();
+        let ten_minutes = TickInfo {
+            ticks: i64::from(parent_height) * 600,
+            next_interval: 600,
+        };
+        mainnet
+            .validate_token_share_asert(&mainnet_header, Some(ten_minutes))
+            .unwrap();
+        let one_minute = TickInfo {
+            next_interval: 60,
+            ..ten_minutes
+        };
+        let error = mainnet
+            .validate_token_share_asert(&mainnet_header, Some(one_minute))
+            .unwrap_err();
+        assert!(error.to_string().contains("harder"), "{error}");
     }
 
     /// A share this node mined goes from stratum to the validation worker
@@ -2727,7 +2771,14 @@ mod tests {
             let header = header.bitcoin_header;
             chain_store_handle
                 .expect_get_bch_header()
-                .returning(move |_| Ok(known.then_some(KnownBchHeader { height: 1, header })));
+                .returning(move |_| {
+                    Ok(known.then_some(KnownBchHeader {
+                        height: 1,
+                        header,
+                        ticks: 600,
+                        next_interval: 600,
+                    }))
+                });
             chain_store_handle
         };
 
