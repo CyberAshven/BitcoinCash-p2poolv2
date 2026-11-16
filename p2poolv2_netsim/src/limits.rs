@@ -27,7 +27,8 @@
 //! Every limits scenario validates one share at a time
 //! (`ValidationQueue::Serial`), as a node's validation worker does, at the
 //! costs `validation_cost_at_bitcoin_cash_window_sizes` in `p2poolv2_lib`
-//! measured: the window walk and coinbase build for a 120,960 share window.
+//! measured: the window walk and coinbase build for a 120,960 share window
+//! and a ten-minute block's 3.125 BCH reward (see `ADOPTED`).
 
 use crate::distribution::Distribution;
 use crate::engine::{Forwarding, ValidationQueue, WeakTemplates};
@@ -64,8 +65,11 @@ pub struct MeasuredCost {
 }
 
 /// The adopted rules: every miner at the default payout level 5 (17,472
-/// satoshis), shares without tokens. At 100,000 equal miners a 3.125 BCH
-/// block pays 17,883 of them by the level draw.
+/// satoshis), shares without tokens. Measured before one-minute blocks, with
+/// the 3.125 BCH reward of a ten-minute block, at which the level draw pays
+/// 17,883 of 100,000 equal miners; the 0.3125 BCH of a one-minute block
+/// would pay about 1,790 of them. Kept as measured until the timing test is
+/// run again.
 pub const ADOPTED: [MeasuredCost; 3] = [
     MeasuredCost {
         miners: 1_000,

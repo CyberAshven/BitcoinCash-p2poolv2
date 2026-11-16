@@ -8,16 +8,40 @@ use crate::miners::{MinerKind, MinerMix, TrackedMiner};
 
 #[test]
 fn the_node_default_aims_at_300_shares_a_month_in_a_small_pool() {
-    // 1% of BCH finds 43.2 blocks a month: 4 shares a block is 172.8.
-    let target = node_default_shares_per_month(0.01 * BCH_NETWORK_HASHRATE, BCH_NETWORK_HASHRATE);
+    // 0.1% of BCH finds 43.2 one-minute blocks a month: 4 shares a block is
+    // 172.8. (With ten-minute blocks 1% of BCH found as many.)
+    let target = node_default_shares_per_month(0.001 * BCH_NETWORK_HASHRATE, BCH_NETWORK_HASHRATE);
     assert!((target - 300.0).abs() < 1e-9);
 }
 
 #[test]
+fn the_monthly_floor_binds_until_four_shares_a_pool_block_pass_it() {
+    // The pool's part of Bitcoin Cash at which 4 shares a pool block make
+    // 300 a month: about 0.17% with one-minute blocks.
+    let crossing =
+        NODE_DEFAULT_SHARES_PER_MONTH / (NODE_DEFAULT_SHARES_PER_POOL_BLOCK * BCH_BLOCKS_PER_MONTH);
+    let below =
+        node_default_shares_per_month(0.99 * crossing * BCH_NETWORK_HASHRATE, BCH_NETWORK_HASHRATE);
+    let above =
+        node_default_shares_per_month(1.01 * crossing * BCH_NETWORK_HASHRATE, BCH_NETWORK_HASHRATE);
+    assert!((below - NODE_DEFAULT_SHARES_PER_MONTH).abs() < 1e-9);
+    assert!(above > NODE_DEFAULT_SHARES_PER_MONTH);
+}
+
+#[test]
 fn the_node_default_aims_at_four_shares_a_pool_block_in_a_large_pool() {
-    // 30% of BCH finds 1,296 blocks a month.
+    // 30% of BCH finds 12,960 one-minute blocks a month: 51,840 shares.
     let target = node_default_shares_per_month(0.3 * BCH_NETWORK_HASHRATE, BCH_NETWORK_HASHRATE);
-    assert!((target - 5_184.0).abs() < 1e-6);
+    let expected = NODE_DEFAULT_SHARES_PER_POOL_BLOCK * 0.3 * BCH_BLOCKS_PER_MONTH;
+    assert!((target / expected - 1.0).abs() < 1e-12);
+}
+
+#[test]
+fn at_one_percent_of_bch_the_node_default_aims_at_1728_shares_a_month() {
+    // 432 one-minute blocks a month, four shares each: no longer the 300
+    // a month floor that ten-minute blocks gave at this size.
+    let target = node_default_shares_per_month(0.01 * BCH_NETWORK_HASHRATE, BCH_NETWORK_HASHRATE);
+    assert!((target - 1_728.0).abs() < 1e-6);
 }
 
 #[test]
@@ -100,8 +124,10 @@ fn the_band_lowers_the_minimum_when_big_miners_mine_heavier_shares() {
 
 #[test]
 fn a_miner_inside_the_band_makes_the_node_default_target() {
-    // At 1% of BCH with 90% industrial the ASIC wants about 21 times the
-    // minimum, inside a cap of 64, so it makes the default's 300 a month.
+    // At 1% of BCH with 90% industrial the ASIC wants about 3.4 times the
+    // minimum, inside a cap of 64, so it makes the default's 1,728 a month
+    // (four shares for each of the pool's 432 one-minute blocks). With
+    // ten-minute blocks it wanted about 21 times, for 300 a month.
     let pool = 0.01 * BCH_NETWORK_HASHRATE;
     let asic = TrackedMiner::asic().class();
     let mut classes = MinerMix::MostlyIndustrial.classes(pool - asic.hashrate, 5);
@@ -119,7 +145,10 @@ fn a_miner_inside_the_band_makes_the_node_default_target() {
     let shares_per_month =
         found_share_rate(&classes[asic_index], solution.class_difficulty[asic_index])
             * MONTH_SECONDS;
-    assert!((shares_per_month - 300.0).abs() < 1e-6);
+    assert!((multiple - 3.43).abs() < 0.01, "multiple {multiple}");
+    let target = node_default_shares_per_month(pool, BCH_NETWORK_HASHRATE);
+    assert!((shares_per_month - target).abs() < 1e-6);
+    assert!((shares_per_month - 1_728.0).abs() < 1e-6);
 }
 
 #[test]
