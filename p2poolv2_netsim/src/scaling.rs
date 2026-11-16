@@ -189,7 +189,10 @@ fn compact_coinbase_variants(base: &Scenario) -> Vec<Scenario> {
             ..large.clone()
         },
         Scenario {
-            label: "34 KB coinbase, without payouts".to_string(),
+            label: format!(
+                "{} KB coinbase, without payouts",
+                (base.share_sizes().coinbase_bytes() as f64 / 1_000.0).round()
+            ),
             relay: ShareRelay::WithoutPayouts,
             ..base.clone()
         },

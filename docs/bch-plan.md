@@ -678,10 +678,11 @@ move most BCH hashrate to the share chain.
       up to and including the first one that brings the window's work (share
       plus uncle difficulty) to `K` times the difficulty of the paying
       share's own BCH header, at most 120,960 shares. The window spans about
-      `K` of this pool's blocks at any pool size: about 600 shares (100
-      minutes) at 30% of BCH's hashrate, 18,000 (50 hours) at 1%, and the
-      full 120,960 below about 0.15%, where the rule pays exactly upstream's
-      window. It shrinks by itself if blocks get faster (CHIP-2025-03).
+      `K` of this pool's blocks at any pool size. With one-minute blocks
+      (CHIP-2025-03: chipnet since 2026-11-15, mainnet from 2027-05-15) that
+      is about 60 shares (10 minutes) at 30% of BCH's hashrate, 1,800 (5
+      hours) at 1%, and the full 120,960 below about 0.015%, where the rule
+      pays exactly upstream's window: a tenth of the ten-minute-block span.
     - **Difficulty source.** The paying share's header bits, never a node's
       own BCHN, template or config. BCH only accepts a block with the correct
       ASERT bits, so every coinbase that reaches the chain was sized by the

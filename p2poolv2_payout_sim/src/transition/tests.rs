@@ -190,10 +190,18 @@ fn without_any_change_home_miners_are_paid_fairly() {
 
 #[test]
 fn a_big_miner_joining_pays_home_miners_more_until_the_window_turns_over() {
-    // At 10% of Bitcoin Cash the window is five hours; for the first hour
-    // after the pool doubles, blocks come twice as often and pay from a
-    // window of mostly the old pool's work. The big miner mines at the
-    // minimum, so its credit in a window is not a few heavy shares.
+    // At 10% of Bitcoin Cash the window is three one-minute blocks of the
+    // pool's work, half an hour, behind a skip of 100 shares (about 17
+    // minutes). When the pool doubles, blocks come twice as often and for
+    // about the next half hour pay from a window of mostly the old pool's
+    // work, so the first hour pays home miners about 1.36 times fair, and by
+    // the second hour the window has turned over. (Ten-minute blocks gave a
+    // five-hour window, and the whole first hour paid about twice fair.) The
+    // big miner mines at the minimum, so its credit in a window is not a few
+    // heavy shares.
+    let window_seconds = BCH_PPLNS_WINDOW_BLOCKS * BCH_BLOCK_INTERVAL_SECONDS / 0.1;
+    let skip_seconds = MATURITY_SKIP_SHARES * 10.0;
+    assert!(window_seconds + skip_seconds < HOUR_SECONDS);
     let pool_hashrate = 3.7e17;
     let mut classes = MinerMix::HalfIndustrial.classes(pool_hashrate, 5);
     let big_miner = classes.len();
@@ -229,7 +237,10 @@ fn a_big_miner_joining_pays_home_miners_more_until_the_window_turns_over() {
     let hours = simulate_transition(&inputs, &mut SimulationRandom::from_seed(2));
     let first_hour = hours[HOURS_BEFORE_EVENT];
     let ratio = first_hour.home_income / first_hour.home_fair_income;
-    assert!(ratio > 1.5, "{ratio}");
+    assert!(ratio > 1.2 && ratio < 1.5, "{ratio}");
+    let second_hour = hours[HOURS_BEFORE_EVENT + 1];
+    let turned_over = second_hour.home_income / second_hour.home_fair_income;
+    assert!((turned_over - 1.0).abs() < 0.05, "{turned_over}");
     let mut last_hours = HourSample::default();
     hours[hours.len() - 6..]
         .iter()
