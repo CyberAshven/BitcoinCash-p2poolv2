@@ -138,7 +138,11 @@ the body against the header using the share alone:
    and carries no witness.
 4. On Bitcoin Cash, the carried weak shares are the ones the header commits:
    as many as its weak count, no proof-of-work hash twice, and the merkle
-   root of their whole encodings equal to its weak root (below).
+   root of their whole encodings, hashed with their summary, equal to its
+   weak root (below). A body served after the weak shares were pruned, one
+   payout depth below the serving node's tip, carries that merkle root and
+   the summary instead, and passes when the two hash to the weak root
+   (`docs/architecture/pruning.md`, "Weak Shares").
 
 A body that fails is a bad copy, not a bad share: the node discards it and can
 fetch the share again from another peer. Once a body passes, the proof of
@@ -150,7 +154,10 @@ covered their proof-of-work hashes alone, so a peer could alter a carried
 weak share's coinbase value, branch, scriptSig or coinbase proof, the body
 still passed, and the weak share's later coinbase or header check marked an
 honest share invalid. The weak root now covers each weak share's whole
-encoding, so every such change fails item 4 as a bad copy.
+encoding, so every such change fails item 4 as a bad copy. Since 2026-11-16 it
+also covers their summary, the proof-of-work hashes and credit groups the
+payouts read: `SHA-256d(merkle root || SHA-256d(summary))`, so a summary
+changed by the serving peer fails item 4 too.
 
 ## Uncles follow the rules
 

@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Whole weak shares are pruned one payout depth below the tip, a share-chain
+rule change on the same flag day as the asks: protocol segment
+`weak4-640-100-48-256-320-64-4096-64-32-summary` and store format 11. A
+Bitcoin Cash share's weak root now commits the summary of the weak shares it
+carries, `SHA-256d(leaf root || SHA-256d(summary))`, so a node keeps them
+whole for 121,423 shares (`BCH_PAYOUT_DEPTH` and the pruner's lag) and only
+their leaf root and summary, which the payouts read, until the body goes at
+242,486 shares. A body asked for below that depth is served with the leaf
+root and summary in their place, and a syncing node checks them against the
+header. At 32 weak shares a share a node keeps 4.3 GB of them instead of 7.4
+GB, and 43 GB instead of 74 GB at 320. `store.keep_whole_weak_shares = true`
+keeps them whole to the body prune depth, for an explorer or an archive. The
+Bitcoin Cash node sees no change.
+
 Weak shares follow the asks (issue #79, part 6), a flag day: protocol
 segment `weak4-640-100-48-256-320-64-4096-64-32`, store format 10 and new
 genesis shares. A weak share asks when its `wanted_bits` is easier than the

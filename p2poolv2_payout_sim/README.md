@@ -944,19 +944,30 @@ What the storage table shows:
    1,000 payees, 82.5 GB with 10,000, 148 GB at the default level's ceiling
    and 242 GB when every coinbase is a full 1 MB. A 30-day cap doubles each.
    Never pruned, they would grow by 108 GB to 3.2 TB a year.
-3. **Stored without its payouts it takes 367 bytes,** 0.09 GB for 28 days.
-   Every node can rebuild the payouts from the chain, as it already does to
-   check a share.
-4. **Weak shares take 6.2 GB for 28 days at 32 a share and 62 GB at part
-   6's ceiling of 320.** Kept for one payout depth instead of two, which
-   they allow because they hold no share chain outputs, 3.1 and 31 GB.
+3. **A coinbase cannot be stored without its payouts.** A node serves every
+   body a syncing peer asks for, down to two payout depths, and the peer
+   checks its coinbase against the txid the header's proof gives, so the
+   coinbase goes whole. Rebuilding it from the chain for a share between one
+   and two payout depths would need that share's window, down to three
+   payout depths, where neither weak share summaries nor share transactions
+   are kept.
+4. **Weak shares take 4.3 GB for 28 days at 32 a share and 43 GB at part
+   6's ceiling of 320.** A node keeps them whole for one payout depth and
+   the pruner's lag, 121,423 shares, then only their leaf root and summary,
+   at most 156 bytes a weak share, with the body: 3.1 GB whole and 1.2 GB of
+   summaries at 32 a share. Payouts read the summaries down to two payout
+   depths: a syncing node's deepest fully checked share, one payout depth
+   below the tip, pays shares down to two. Since the weak root commits the
+   summary, a node serves those shares with the summary in place of the
+   whole weak shares and the peer checks it against the header. A node set
+   to keep them whole (`store.keep_whole_weak_shares`, for an explorer or an
+   archive) keeps 7.4 and 74 GB.
 5. **Headers, kept for ever, take 3.15 GB a year.**
 
-With coinbases stored without their payouts and weak shares kept for one
-payout depth, a node at part 6's ceiling with a million payees keeps about
-31 GB and 3 GB more a year, against 62 GB of weak shares and 148 to 242 GB
-of coinbases now. Fees are left out: at level 5 each 1 BCH of fees adds
-about 5,700 outputs.
+With weak shares kept whole for one payout depth, a node at part 6's
+ceiling with a million payees keeps about 43 GB of weak shares and 148 to
+242 GB of coinbases for 28 days, and 3 GB more of headers a year. Fees are
+left out: at level 5 each 1 BCH of fees adds about 5,700 outputs.
 
 ## Code
 
@@ -1959,11 +1970,10 @@ difficulty, to push the cap up.
 | 1,000,000 | 5 (17,472 sat) | 17,885 | 0 | 608 | 148 | 316 | 1,919 | 0 |
 | 1,000,000 | 1 (1,092 sat) | 286,172 | 256,772 | 1,000 | 242 | 519 | 3,153 | 11.6 |
 
-| Stored | GB for two payout depths, 14-day cap | GB for two payout depths, 30-day cap | GB for one payout depth, 14-day cap | GB for one payout depth, 30-day cap | GB a year |
+| Stored | GB kept: whole one payout depth, summary two, 14-day cap | GB kept: whole one payout depth, summary two, 30-day cap | GB kept with keep_whole_weak_shares: both two payout depths, 14-day cap | GB kept with keep_whole_weak_shares: both two payout depths, 30-day cap | GB a year if never pruned |
 |---|---|---|---|---|---|
-| 32 weak shares a share | 6.21 | 13.3 | 3.10 | 6.64 | 80.7 |
-| 320 weak shares a share | 62.1 | 133 | 31.0 | 66.4 | 807 |
-| A coinbase stored without its payouts | 0.089 | 0.190 | 0.044 | 0.095 | 1.16 |
+| 32 weak shares a share | 4.33 | 9.26 | 7.43 | 15.9 | 96.6 |
+| 320 weak shares a share | 43.2 | 92.4 | 74.2 | 159 | 965 |
 | Share headers, kept for ever | - | - | - | - | 3.15 |
 
 ## Proposal: weak shares that follow the asks, where they settle (band-weak-levels, weak work, 50% industrial)

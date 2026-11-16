@@ -915,7 +915,7 @@ store format 10, because the header gains `weak_asking`.
 | 3 Weak shares | `weak-64-500-6`, then `weak2-64-500-6`, then `weak2-64-100-48-256`, then `weak3-64-100-48-256` | 5, then 6, then 7, then 9 | same flag day; old nodes cannot read the new header or the weak share message; the weak root's leaves then became whole encodings, a second flag day, and study #85's cut, depth and `R_MAX` a third |
 | 4 Payout levels | `levels-546x2`, then `levels-546x2-k1` | 4, then 8 | same flag day; old nodes cannot read the longer header |
 | 5 Share period | none; share version 2 | 3 | share-version vote; not planned (section 5) |
-| 6 Weak shares that follow the asks | `weak4-640-100-48-256-320-64-4096-64-32` | 10 | flag day: the header gains `weak_asking` and a new genesis |
+| 6 Weak shares that follow the asks | `weak4-640-100-48-256-320-64-4096-64-32`, then `-summary` appended | 10, then 11 | flag day: the header gains `weak_asking` and a new genesis; the weak root also commits the summary, so whole weak shares are pruned one payout depth below the tip |
 
 A part that changes what a stored share holds raises the store format when
 it merges, so the numbers follow the merge order: part 4 raised it to 4
