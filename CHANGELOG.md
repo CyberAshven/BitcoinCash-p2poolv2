@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+The Umbrel apps' dashboards move from ports 46890 and 46891 to 36890 and
+36891. umbrelOS 2.0 keeps host ports 40000 to 49999 for Umbrel Machines'
+port forwards, and upstream's Umbrel app left 46884 for 36884 for the same
+reason; a test now keeps every app port out of that range. The nightly fuzz
+run also starts from upstream's shared corpus for the same decoder target
+(`p2poolv2/fuzz-corpus`). Upstream's website, docs and difficulty analysis
+repositories have nothing new to port.
+
 A share a peer sent is relayed once its header checks out, before its body
 is validated, as BIP152 high-bandwidth peers relay compact blocks (#128).
 Uncles are now chosen from fully validated shares only. No share-chain rule,

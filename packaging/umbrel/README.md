@@ -7,8 +7,8 @@ the Bitcoin version on Umbrel's Bitcoin Node app.
 
 | App | Bitcoin Cash Node | Network | Stratum V1 | Share chain P2P | Dashboard |
 |---|---|---|---|---|---|
-| P2Pool for Bitcoin Cash (`bch-p2pool`) | Umbrel's Bitcoin Cash Node app | mainnet | 3340 | 6890 | 46890 |
-| P2Pool for Bitcoin Cash (external node) (`bch-p2pool-external`) | BCHN on another computer | chipnet by default, or mainnet | 3341 | 6891 | 46891 |
+| P2Pool for Bitcoin Cash (`bch-p2pool`) | Umbrel's Bitcoin Cash Node app | mainnet | 3340 | 6890 | 36890 |
+| P2Pool for Bitcoin Cash (external node) (`bch-p2pool-external`) | BCHN on another computer | chipnet by default, or mainnet | 3341 | 6891 | 36891 |
 
 Both apps run the fork's image,
 `ghcr.io/cyberashven/bitcoincash-p2poolv2:v0.0.1-alpha` (amd64 and arm64),
@@ -208,9 +208,9 @@ address.
 
 | Port | Used by |
 |---|---|
-| 3340, 6890, 46890 | `bch-p2pool`: Stratum V1, share chain P2P, dashboard |
-| 3341, 6891, 46891 | `bch-p2pool-external`: Stratum V1, share chain P2P, dashboard |
-| 3333, 6884, 46884 | P2Poolv2 for Bitcoin (`p2poolv2/umbrel-app`) |
+| 3340, 6890, 36890 | `bch-p2pool`: Stratum V1, share chain P2P, dashboard |
+| 3341, 6891, 36891 | `bch-p2pool-external`: Stratum V1, share chain P2P, dashboard |
+| 3333, 6884, 36884 | P2Poolv2 for Bitcoin (`p2poolv2/umbrel-app`) |
 | 2100, 8332 to 8335, 28332 to 28336 | Bitcoin Node |
 | 2105, 8334, 9332, 9333, 9335, 48332 to 48336 | Bitcoin Knots |
 | 3330, 8335 | Bitcoin Cash Node (dashboard, P2P); its RPC 8332 and ZMQ 28332 stay on Umbrel's network |
@@ -221,7 +221,10 @@ address.
 The two apps here use ports none of the others take, so any of them can run
 side by side. They were also checked against every port the apps in the
 official Umbrel App Store published on 2026-10-23, and
-`p2poolv2_config/tests/umbrel_apps.rs` checks them against the table. Inside the
+`p2poolv2_config/tests/umbrel_apps.rs` checks them against the table. No
+host port is in 40000 to 49999, which umbrelOS 2.0 keeps for Umbrel
+Machines' port forwards; the dashboards were 46890 and 46891 until upstream's
+app hit that range with 46884 and moved to 36884. Inside the
 container the node listens on the same Stratum and P2P ports it publishes;
 its API stays on 46884 and only Umbrel's app proxy reaches it. Forward the
 P2P port on your router (6890 or 6891) and set the external address if other
@@ -273,7 +276,11 @@ browser, finish the setup, and add the store as above.
 ## Credits and licence
 
 Ported from [p2poolv2/umbrel-app](https://github.com/p2poolv2/umbrel-app) at
-`5b1a3ae`, by Juwon Ogunseye and the P2Poolv2 developers, under the Apache
+`5b1a3ae`, and followed through `b4e19f96` (2026-11-06): the dashboard ports
+left umbrelOS's Machines range, and the `APP_DATA_DIR` mounts and the
+double-underscore `P2POOL_*__*` variables were already here. Upstream's
+Grafana and Prometheus services (`dbf8ae48`) are not ported yet. By Juwon
+Ogunseye and the P2Poolv2 developers, under the Apache
 License 2.0; [LICENSE](LICENSE) is upstream's licence file. Changes from
 upstream: Bitcoin Cash in place of Bitcoin (the fork's image and config
 keys, the Bitcoin Cash Node app in place of Bitcoin Node), a second app for a

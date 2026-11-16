@@ -5,7 +5,7 @@ tagline: Peer-to-peer Bitcoin Cash mining pool on a BCHN you run elsewhere
 icon: https://raw.githubusercontent.com/CyberAshven/BitcoinCash-p2poolv2/main/packaging/umbrel/bch-p2pool/icon.png
 category: crypto
 version: "0.0.1-alpha"
-port: 46891
+port: 36891
 description: >-
   P2Poolv2 for Bitcoin Cash is a mining pool with no operator. Nodes keep a
   share chain together, and every block the pool finds pays each miner
