@@ -2648,14 +2648,16 @@ struct TestShareWeak {
 #[cfg(any(test, feature = "test-utils"))]
 impl TestShareWeak {
     /// The weak ratio, count, number asking and root a share owned by
-    /// `share_owner` commits: the set ratio or the genesis ratio, and its
-    /// carried weak shares, on Bitcoin Cash; zero on Bitcoin, which carries
-    /// none.
+    /// `share_owner` commits: the set ratio or `R_MAX`, and its carried weak
+    /// shares, on Bitcoin Cash; zero on Bitcoin, which carries none. A
+    /// parent at `R_MAX` carrying no weak shares keeps its ratio
+    /// (`shares::weak::next_weak_ratio`), so a test chain of such shares
+    /// keeps the weak ratio rule without setting it.
     fn commitment_fields(&self, share_owner: &ShareOwner) -> (u32, u16, u16, sha256d::Hash) {
         match share_owner {
             ShareOwner::CashP2pkh(_) => (
                 self.weak_ratio
-                    .unwrap_or(crate::shares::weak::GENESIS_WEAK_RATIO),
+                    .unwrap_or(crate::shares::weak::WEAK_RATIO_MAX),
                 self.weak_shares.len() as u16,
                 self.weak_asking,
                 crate::shares::weak::weak_root(&self.weak_shares),

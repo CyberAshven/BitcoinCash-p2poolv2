@@ -31,7 +31,8 @@ use crate::shares::share_version::ShareVersion;
 use crate::shares::transactions::coinbase::compute_witness_root;
 use crate::shares::validation::BLOCK_TXS_SIZE_LIMIT;
 use crate::shares::weak::{
-    GENESIS_WEAK_RATIO, WEAK_BYTES, WEAK_CAP, WeakShare, empty_weak_root, weak_root,
+    GENESIS_WEAK_RATIO, WEAK_BYTES, WEAK_CAP, WeakShare, empty_weak_root, weak_cap_for_asking,
+    weak_count_allowed, weak_root,
 };
 use crate::shares::witness_commitment::WitnessCommitment;
 use crate::stratum::parse_password::MINER_DONATION_STEP;
@@ -1315,8 +1316,9 @@ pub(crate) fn fit_weak_shares(weak_shares: Vec<WeakShare>) -> Vec<WeakShare> {
 
 /// `weak_shares` as a share carries them with `weak_asking` of them asking,
 /// or why no share can: more than fit one share ([`fit_weak_shares`]), of
-/// which the number asking would no longer be known, or more asking than
-/// carried. A share built on either would be invalid.
+/// which the number asking would no longer be known, more asking than
+/// carried, or more carried than the asking ones allow
+/// ([`weak_count_allowed`]). A share built on any would be invalid.
 fn checked_weak_shares(
     weak_shares: Vec<WeakShare>,
     weak_asking: u16,
@@ -1335,6 +1337,15 @@ fn checked_weak_shares(
             message: format!(
                 "{weak_asking} asking weak shares are more than the {} carried",
                 carried.len()
+            ),
+        });
+    }
+    if !weak_count_allowed(carried.len(), usize::from(weak_asking)) {
+        return Err(WorkError {
+            message: format!(
+                "{} weak shares with {weak_asking} asking are more than the {} they allow",
+                carried.len(),
+                weak_cap_for_asking(usize::from(weak_asking))
             ),
         });
     }

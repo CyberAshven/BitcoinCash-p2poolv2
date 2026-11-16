@@ -69,7 +69,7 @@ const STORE_FORMAT_KEY: &[u8] = b"store_format";
 /// - 10 (2026-11-15): Bitcoin Cash share headers count the weak shares they
 ///   carry that ask for an easier weak target, and the weak ratio follows
 ///   those asks (`BCH_WEAK_SHARE_RULE_TAG`,
-///   `weak4-640-100-48-256-320-64-4096`). A stored header has no such count
+///   `weak4-640-100-48-256-320-64-4096-64-32`). A stored header has no such count
 ///   and would not decode, and the chain starts from a new genesis.
 pub const STORE_FORMAT_VERSION: u32 = 10;
 

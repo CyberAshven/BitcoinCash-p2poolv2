@@ -353,7 +353,7 @@ mod tests {
     };
     use p2poolv2_lib::monitoring_events::create_monitoring_event_channel;
     use p2poolv2_lib::node::actor::NodeHandle;
-    use p2poolv2_lib::shares::weak::{GENESIS_WEAK_RATIO, empty_weak_root};
+    use p2poolv2_lib::shares::weak::{WEAK_RATIO_MAX, empty_weak_root};
     use p2poolv2_lib::stratum::work::tracker::start_tracker_actor;
     use p2poolv2_lib::test_utils::{
         TestShareBlockBuilder, build_confirmed_test_chain, confirm_test_block, genesis_for_tests,
@@ -515,7 +515,7 @@ mod tests {
         let output = &result.0[0];
         assert_eq!(output.weak_count, 1);
         assert_eq!(output.weak_asking, 1);
-        assert_eq!(output.weak_ratio, GENESIS_WEAK_RATIO);
+        assert_eq!(output.weak_ratio, WEAK_RATIO_MAX);
         assert_eq!(output.weak_root, weak_share.committed_hash().to_string());
         assert_eq!(output.weak_shares.len(), 1);
         let weak_output = &output.weak_shares[0];

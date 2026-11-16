@@ -346,7 +346,7 @@ fn harder_of(first: CompactTarget, second: CompactTarget) -> CompactTarget {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shares::weak::{GENESIS_WEAK_RATIO, WEAK_FILL};
+    use crate::shares::weak::{GENESIS_WEAK_RATIO, WEAK_FILL, WEAK_RATIO_MAX};
     use crate::test_utils::TestShareBlockBuilder;
     use p2poolv2_wallet::share_owner::ShareOwner;
 
@@ -437,7 +437,7 @@ mod tests {
             asert_bits: CompactTarget::from_consensus(MINIMUM),
             wanted_bits: CompactTarget::from_consensus(MINIMUM_OVER_TWO),
             band_cap: 2048,
-            weak_ratio: GENESIS_WEAK_RATIO,
+            weak_ratio: WEAK_RATIO_MAX,
             weak_count: 0,
             weak_asking: 0,
         };
@@ -454,7 +454,7 @@ mod tests {
             asert_bits: CompactTarget::from_consensus(MINIMUM),
             wanted_bits: CompactTarget::from_consensus(MINIMUM_OVER_EIGHT),
             band_cap: 4096,
-            weak_ratio: GENESIS_WEAK_RATIO,
+            weak_ratio: WEAK_RATIO_MAX,
             weak_count: 0,
             weak_asking: 0,
         };
@@ -471,7 +471,7 @@ mod tests {
             asert_bits: CompactTarget::from_consensus(MINIMUM),
             wanted_bits: CompactTarget::from_consensus(MINIMUM_OVER_TWO),
             band_cap: BAND_CAP_UNIT,
-            weak_ratio: GENESIS_WEAK_RATIO,
+            weak_ratio: WEAK_RATIO_MAX,
             weak_count: 0,
             weak_asking: 0,
         };
@@ -487,7 +487,7 @@ mod tests {
             asert_bits: CompactTarget::from_consensus(MINIMUM),
             wanted_bits: CompactTarget::from_consensus(FAR_HARDER),
             band_cap: 2048,
-            weak_ratio: GENESIS_WEAK_RATIO,
+            weak_ratio: WEAK_RATIO_MAX,
             weak_count: 0,
             weak_asking: 0,
         };
@@ -505,7 +505,7 @@ mod tests {
             asert_bits: CompactTarget::from_consensus(MINIMUM),
             wanted_bits: two_fifths.to_compact_lossy(),
             band_cap: 2048,
-            weak_ratio: GENESIS_WEAK_RATIO,
+            weak_ratio: WEAK_RATIO_MAX,
             weak_count: 0,
             weak_asking: 0,
         };
@@ -520,7 +520,7 @@ mod tests {
             asert_bits: CompactTarget::from_consensus(MINIMUM),
             wanted_bits: CompactTarget::from_consensus(FAR_HARDER),
             band_cap: BAND_CAP_MAX,
-            weak_ratio: GENESIS_WEAK_RATIO,
+            weak_ratio: WEAK_RATIO_MAX,
             weak_count: 0,
             weak_asking: 0,
         };
@@ -535,7 +535,7 @@ mod tests {
             asert_bits: CompactTarget::from_consensus(MINIMUM),
             wanted_bits: CompactTarget::from_consensus(MINIMUM),
             band_cap: BAND_CAP_UNIT,
-            weak_ratio: GENESIS_WEAK_RATIO,
+            weak_ratio: WEAK_RATIO_MAX,
             weak_count: 0,
             weak_asking: 0,
         };
@@ -557,7 +557,7 @@ mod tests {
                 asert_bits: CompactTarget::from_consensus(MINIMUM),
                 wanted_bits: CompactTarget::from_consensus(MINIMUM),
                 band_cap,
-                weak_ratio: GENESIS_WEAK_RATIO,
+                weak_ratio: WEAK_RATIO_MAX,
                 weak_count: 0,
                 weak_asking: 0,
             })
@@ -568,7 +568,7 @@ mod tests {
             asert_bits: CompactTarget::from_consensus(MINIMUM),
             wanted_bits: wanted_thirty_times,
             band_cap: BAND_CAP_UNIT,
-            weak_ratio: GENESIS_WEAK_RATIO,
+            weak_ratio: WEAK_RATIO_MAX,
             weak_count: 0,
             weak_asking: 0,
         });
@@ -595,7 +595,7 @@ mod tests {
             asert_bits: CompactTarget::from_consensus(MINIMUM),
             wanted_bits: CompactTarget::from_consensus(MINIMUM),
             band_cap: 4104,
-            weak_ratio: GENESIS_WEAK_RATIO,
+            weak_ratio: WEAK_RATIO_MAX,
             weak_count: 0,
             weak_asking: 0,
         };
@@ -620,7 +620,7 @@ mod tests {
             asert_bits: CompactTarget::from_consensus(MINIMUM),
             wanted_bits: CompactTarget::from_consensus(MINIMUM),
             band_cap: 4104,
-            weak_ratio: GENESIS_WEAK_RATIO,
+            weak_ratio: WEAK_RATIO_MAX,
             weak_count: 0,
             weak_asking: 0,
         };
@@ -645,7 +645,7 @@ mod tests {
             asert_bits: CompactTarget::from_consensus(MINIMUM),
             wanted_bits: CompactTarget::from_consensus(MINIMUM),
             band_cap: 4104,
-            weak_ratio: GENESIS_WEAK_RATIO,
+            weak_ratio: WEAK_RATIO_MAX,
             weak_count: 0,
             weak_asking: 0,
         };
@@ -677,7 +677,7 @@ mod tests {
             asert_bits: CompactTarget::from_consensus(MINIMUM),
             wanted_bits: CompactTarget::from_consensus(MINIMUM),
             band_cap: 4104,
-            weak_ratio: GENESIS_WEAK_RATIO,
+            weak_ratio: WEAK_RATIO_MAX,
             weak_count: 0,
             weak_asking: 0,
         };
@@ -709,7 +709,7 @@ mod tests {
             asert_bits: CompactTarget::from_consensus(MINIMUM),
             wanted_bits: CompactTarget::from_consensus(MINIMUM),
             band_cap: 4104,
-            weak_ratio: GENESIS_WEAK_RATIO,
+            weak_ratio: WEAK_RATIO_MAX,
             weak_count: 0,
             weak_asking: 0,
         };
@@ -740,7 +740,7 @@ mod tests {
             asert_bits: CompactTarget::from_consensus(MINIMUM),
             wanted_bits: CompactTarget::from_consensus(MINIMUM),
             band_cap: 4104,
-            weak_ratio: GENESIS_WEAK_RATIO,
+            weak_ratio: WEAK_RATIO_MAX,
             weak_count: 0,
             weak_asking: 0,
         };
@@ -773,7 +773,7 @@ mod tests {
             asert_bits: CompactTarget::from_consensus(MINIMUM),
             wanted_bits: CompactTarget::from_consensus(MINIMUM),
             band_cap: 4104,
-            weak_ratio: GENESIS_WEAK_RATIO,
+            weak_ratio: WEAK_RATIO_MAX,
             weak_count: 0,
             weak_asking: 0,
         };
@@ -812,7 +812,7 @@ mod tests {
             asert_bits: CompactTarget::from_consensus(MINIMUM),
             wanted_bits: CompactTarget::from_consensus(FAR_EASIER),
             band_cap: 4096,
-            weak_ratio: GENESIS_WEAK_RATIO,
+            weak_ratio: WEAK_RATIO_MAX,
             weak_count: 0,
             weak_asking: 0,
         };
@@ -874,7 +874,7 @@ mod tests {
             asert_bits: minimum,
             wanted_bits: CompactTarget::from_consensus(FAR_HARDER),
             band_cap: BAND_CAP_MAX,
-            weak_ratio: GENESIS_WEAK_RATIO,
+            weak_ratio: WEAK_RATIO_MAX,
             weak_count: 0,
             weak_asking: 0,
         };

@@ -22,7 +22,9 @@
 //! with its parent at most `WEAK_DEPTH` shares below it, and carry none an
 //! ancestor of it already carries. Its header's `weak_asking` must be the
 //! number of them that ask for an easier weak target
-//! (`shares::weak::weak_share_asks`, part 6 of the design page). These are
+//! (`shares::weak::weak_share_asks`, part 6 of the design page), and it may
+//! carry more than `WEAK_IDLE_CAP` of them only while more than one in
+//! `WEAK_ASK_DIVISOR` ask (`shares::weak::weak_count_allowed`). These are
 //! share-chain rules; a Bitcoin Cash node never sees them.
 
 #[cfg(test)]
@@ -45,7 +47,8 @@ use crate::shares::share_block::{ShareBlock, ShareHeader, is_terminal_blockhash}
 use crate::shares::share_commitment::ShareCommitment;
 use crate::shares::share_version::check_share_version_alone;
 use crate::shares::weak::{
-    WEAK_BYTES, WEAK_CAP, WEAK_DEPTH, WeakShare, parent_weak_target, weak_root, weak_share_asks,
+    WEAK_BYTES, WEAK_CAP, WEAK_DEPTH, WeakShare, parent_weak_target, weak_cap_for_asking,
+    weak_count_allowed, weak_root, weak_share_asks,
 };
 use crate::sim_overrides;
 use crate::store::writer::StoreError;
@@ -303,6 +306,20 @@ fn check_weak_asking_matches_header(
         return Err(ValidationError::consensus(format!(
             "Share header commits {} asking weak shares, its body carries {asking}",
             header.weak_asking
+        )));
+    }
+    check_weak_count_allowed(usize::from(header.weak_count), asking)
+}
+
+/// A share carries more than `WEAK_IDLE_CAP` weak shares only while more
+/// than one in `WEAK_ASK_DIVISOR` of them ask
+/// (`shares::weak::weak_count_allowed`). A header breaking it does not
+/// decode; this holds a share built in this node to it too.
+fn check_weak_count_allowed(weak_count: usize, asking: usize) -> Result<(), ValidationError> {
+    if !weak_count_allowed(weak_count, asking) {
+        return Err(ValidationError::consensus(format!(
+            "Share carries {weak_count} weak shares with {asking} asking, more than the {} they allow",
+            weak_cap_for_asking(asking)
         )));
     }
     Ok(())

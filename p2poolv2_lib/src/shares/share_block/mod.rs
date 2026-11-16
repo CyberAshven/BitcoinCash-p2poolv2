@@ -516,6 +516,14 @@ impl ShareHeader {
                         "share header counts more asking weak shares than it carries",
                     ));
                 }
+                if !crate::shares::weak::weak_count_allowed(
+                    usize::from(weak_count),
+                    usize::from(weak_asking),
+                ) {
+                    return Err(ParseFailed(
+                        "share header carries more weak shares than its asking ones allow",
+                    ));
+                }
                 (
                     weak_ratio,
                     weak_count,
@@ -1229,6 +1237,7 @@ mod tests {
             .share_owner(ShareOwner::CashP2pkh([0x22; 20]))
             .build();
         share.header.weak_count = WEAK_CAP as u16;
+        share.header.weak_asking = 11;
         share.weak_shares = vec![weak_share.clone(); WEAK_CAP];
         assert_eq!(WEAK_CAP, 640);
 
@@ -1252,6 +1261,44 @@ mod tests {
                 .contains("share header carries too many weak shares"),
             "{error}"
         );
+    }
+
+    /// More than `WEAK_IDLE_CAP` (64) weak shares only while more than one
+    /// in 64 of them ask: a header counting fewer asking ones does not
+    /// decode, wherever a header is read.
+    #[test]
+    fn a_header_carrying_more_than_64_weak_shares_needs_enough_asking() {
+        let mut header = TestShareBlockBuilder::new()
+            .share_owner(ShareOwner::CashP2pkh([0x22; 20]))
+            .build()
+            .header;
+        let decodes = |header: &ShareHeader| deserialize::<ShareHeader>(&serialize(header));
+
+        for (weak_count, weak_asking, allowed) in [
+            (64, 0, true),
+            (65, 1, false),
+            (65, 2, true),
+            (127, 2, true),
+            (128, 2, false),
+            (640, 10, false),
+            (640, 11, true),
+        ] {
+            header.weak_count = weak_count;
+            header.weak_asking = weak_asking;
+            match decodes(&header) {
+                Ok(decoded) => {
+                    assert!(allowed, "{weak_count} with {weak_asking} asking decoded");
+                    assert_eq!(decoded.weak_count, weak_count);
+                }
+                Err(error) => {
+                    assert!(!allowed, "{weak_count} with {weak_asking} asking: {error}");
+                    assert!(
+                        error.to_string().contains("than its asking ones allow"),
+                        "{error}"
+                    );
+                }
+            }
+        }
     }
 
     /// A Bitcoin header and block carry no weak shares: nothing is encoded,

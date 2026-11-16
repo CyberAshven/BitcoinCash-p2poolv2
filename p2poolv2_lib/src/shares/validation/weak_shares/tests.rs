@@ -9,7 +9,7 @@ use crate::pool_difficulty::{AsertParent, MockPoolDifficulty};
 use crate::shares::chain::chain_store_handle::MockChainStoreHandle;
 use crate::shares::validation::FailureKind;
 use crate::shares::weak::{
-    GENESIS_WEAK_RATIO, WEAK_DEPTH, WEAK_RATIO_UNIT, WeakSummary, next_weak_ratio,
+    GENESIS_WEAK_RATIO, WEAK_DEPTH, WEAK_RATIO_MAX, WEAK_RATIO_UNIT, WeakSummary, next_weak_ratio,
 };
 use crate::store::block_tx_metadata::{BlockMetadata, ChainMembership, Status};
 use crate::test_utils::{
@@ -322,7 +322,7 @@ fn header_rule_fixture() -> (WeakShare, MockChainStoreHandle, MockPoolDifficulty
         parent_hash: parent.block_hash(),
         bits: CompactTarget::from_consensus(HARD),
         minimum: CompactTarget::from_consensus(HARD),
-        weak_ratio: next_weak_ratio(GENESIS_WEAK_RATIO, 0, 0),
+        weak_ratio: next_weak_ratio(WEAK_RATIO_MAX, 0, 0),
         distribution: &HashMap::from([(
             PayoutAddress::from(Address::p2pkh(
                 PubkeyHash::from_byte_array([0x55; 20]),
@@ -466,7 +466,7 @@ fn a_weak_share_meeting_its_own_bits_is_refused() {
         parent_hash: parent.block_hash(),
         bits: CompactTarget::from_consensus(EASY),
         minimum: CompactTarget::from_consensus(EASY),
-        weak_ratio: next_weak_ratio(GENESIS_WEAK_RATIO, 0, 0),
+        weak_ratio: next_weak_ratio(WEAK_RATIO_MAX, 0, 0),
         distribution: &HashMap::from([(
             PayoutAddress::from(Address::p2pkh(
                 PubkeyHash::from_byte_array([0x55; 20]),
@@ -568,7 +568,7 @@ fn a_weak_share_from_a_job_above_the_minimum_is_refused() {
         parent_hash: parent.block_hash(),
         bits: CompactTarget::from_consensus(0x1c00_ffff),
         minimum: CompactTarget::from_consensus(HARD),
-        weak_ratio: next_weak_ratio(GENESIS_WEAK_RATIO, 0, 0),
+        weak_ratio: next_weak_ratio(WEAK_RATIO_MAX, 0, 0),
         distribution: &HashMap::from([(
             PayoutAddress::from(Address::p2pkh(
                 PubkeyHash::from_byte_array([0x55; 20]),

@@ -69,17 +69,32 @@ pub const WEAK_RATIO_ASK_MAX_MULTIPLE: u32 = 4096;
 /// The largest `weak_ratio` asks may reach, `R_ASK_MAX` in units of 1/1024.
 pub const WEAK_RATIO_ASK_MAX: u32 = WEAK_RATIO_ASK_MAX_MULTIPLE * WEAK_RATIO_UNIT;
 
-/// The genesis share's `weak_ratio`: the easiest weak target without asks,
-/// so a young chain's first weak shares are easy and `R` falls as the slots
-/// fill.
-pub const GENESIS_WEAK_RATIO: u32 = WEAK_RATIO_MAX;
+/// The genesis share's ratio as a multiple of the minimum: where a chain
+/// whose shares carry [`WEAK_FILL`] weak shares settles in a pool at a
+/// tenth of today's Bitcoin Cash (`R_MAX`, 256, until 2026-11-16).
+pub const GENESIS_WEAK_RATIO_MULTIPLE: u32 = 32;
+
+/// The genesis share's `weak_ratio`, [`GENESIS_WEAK_RATIO_MULTIPLE`] in
+/// units of 1/1024. From `R_MAX` a young chain's shares carried far more
+/// weak shares than [`WEAK_FILL`] until `R` had fallen, hundreds of shares
+/// later (the payout simulator's `weak-asks-genesis`); from 32 they carry
+/// about as many as a settled chain, and `R` rises from there where the
+/// pool is smaller.
+pub const GENESIS_WEAK_RATIO: u32 = GENESIS_WEAK_RATIO_MULTIPLE * WEAK_RATIO_UNIT;
 
 /// One step of the weak ratio is `1 / WEAK_RATIO_STEP_DIVISOR` of the ratio.
 pub const WEAK_RATIO_STEP_DIVISOR: u32 = 256;
 
 /// `WEAK_CAP`: the most weak shares one share may carry, twice
-/// [`WEAK_FILL_MAX`] (64 until 2026-11-15, twice [`WEAK_FILL`]).
+/// [`WEAK_FILL_MAX`] (64 until 2026-11-15, twice [`WEAK_FILL`]), and more
+/// than [`WEAK_IDLE_CAP`] only while enough of them ask
+/// ([`weak_count_allowed`]).
 pub const WEAK_CAP: usize = 640;
+
+/// `WEAK_IDLE_CAP`: the most weak shares a share may carry unless more than
+/// one in [`WEAK_ASK_DIVISOR`] of them ask, twice [`WEAK_FILL`], the cap
+/// before the asks.
+pub const WEAK_IDLE_CAP: usize = 64;
 
 /// `WEAK_FILL`: the number of carried weak shares `R` steers towards while
 /// none ask. More lower `R`, fewer raise it.
@@ -118,9 +133,10 @@ pub const MAX_WEAK_SCRIPT_SIG_BYTES: usize = 100;
 /// Name of the weak-share rule in Bitcoin Cash protocol strings: at most
 /// [`WEAK_CAP`] (640) weak shares a share, an includer cut of
 /// [`INCLUDER_CUT`] (100) basis points, a depth of [`WEAK_DEPTH`] (48), an
-/// `R_MAX` of [`WEAK_RATIO_MAX_MULTIPLE`] (256), and for the asks a
+/// `R_MAX` of [`WEAK_RATIO_MAX_MULTIPLE`] (256), for the asks a
 /// [`WEAK_FILL_MAX`] of 320, a [`WEAK_ASK_DIVISOR`] of 64 and an `R_ASK_MAX`
-/// of [`WEAK_RATIO_ASK_MAX_MULTIPLE`] (4096).
+/// of [`WEAK_RATIO_ASK_MAX_MULTIPLE`] (4096), then a [`WEAK_IDLE_CAP`] of 64
+/// and a genesis ratio of [`GENESIS_WEAK_RATIO_MULTIPLE`] (32).
 ///
 /// `weak2` since 2026-11-12: a share's weak root commits each carried weak
 /// share's whole encoding ([`WeakShare::committed_hash`]), where `weak`
@@ -147,8 +163,69 @@ pub const MAX_WEAK_SCRIPT_SIG_BYTES: usize = 100;
 /// and the tag gained `WEAK_FILL_MAX`, `WEAK_ASK_DIVISOR` and `R_ASK_MAX`. A
 /// node on `weak3` cannot read the longer header and steps the weak ratio
 /// without the asks, and the header change gives the chain a new genesis: a
-/// flag day, with a fresh store.
-pub const BCH_WEAK_SHARE_RULE_TAG: &str = "weak4-640-100-48-256-320-64-4096";
+/// flag day, with a fresh store. Before any node ran it, the tag gained
+/// `WEAK_IDLE_CAP` and the genesis ratio on 2026-11-16: a share may carry
+/// more than 64 weak shares only while more than one in 64 of them ask, and
+/// the genesis ratio is 32, where `R_MAX` let a young chain's shares carry
+/// 640 each (the payout simulator's `weak-asks-rules`, rule v4).
+pub const BCH_WEAK_SHARE_RULE_TAG: &str = "weak4-640-100-48-256-320-64-4096-64-32";
+
+/// Whether a share may carry `weak_count` weak shares of which
+/// `weak_asking` ask ([`weak_share_asks`]):
+///
+/// ```text
+/// weak_count <= WEAK_CAP
+/// and (weak_count <= WEAK_IDLE_CAP or weak_asking * WEAK_ASK_DIVISOR > weak_count)
+/// ```
+///
+/// Where nobody asks a share carries at most [`WEAK_IDLE_CAP`], the cap
+/// before the asks, so a pool that needs no easier weak shares, or a young
+/// chain whose ratio has not yet settled, never carries more than it did.
+/// More opens only as far as the asks reach: a share carrying 640 needs 11
+/// of them asking. Read from the header alone, `weak_count` and
+/// `weak_asking`, which validation holds to the weak shares the body
+/// carries.
+pub fn weak_count_allowed(weak_count: usize, weak_asking: usize) -> bool {
+    weak_count <= weak_cap_for_asking(weak_asking)
+}
+
+/// The most weak shares a share may carry when `weak_asking` of them ask
+/// ([`weak_count_allowed`]): [`WEAK_IDLE_CAP`], or one fewer than
+/// `weak_asking * WEAK_ASK_DIVISOR`, never more than [`WEAK_CAP`].
+pub fn weak_cap_for_asking(weak_asking: usize) -> usize {
+    (weak_asking.saturating_mul(WEAK_ASK_DIVISOR as usize))
+        .saturating_sub(1)
+        .clamp(WEAK_IDLE_CAP, WEAK_CAP)
+}
+
+/// The weak shares a share carries out of `offered`, each with whether it
+/// asks, oldest parent first as the weak pool offers them, so that the
+/// share is valid ([`weak_count_allowed`]): all of them when they are
+/// allowed, otherwise every asking one and the oldest silent ones, dropping
+/// the newest silent ones until the count is allowed. A dropped weak share
+/// stays in the pool for a later share while its parent is within
+/// [`WEAK_DEPTH`].
+pub fn keep_within_asks<T>(offered: Vec<(T, bool)>) -> Vec<(T, bool)> {
+    let asking = offered.iter().filter(|(_, asks)| *asks).count();
+    let allowed = weak_cap_for_asking(asking);
+    let mut excess = offered.len().saturating_sub(allowed);
+    if excess == 0 {
+        return offered;
+    }
+    let mut kept: Vec<(T, bool)> = Vec::with_capacity(allowed);
+    for (weak_share, asks) in offered.into_iter().rev() {
+        if excess > 0 && !asks {
+            excess -= 1;
+        } else {
+            kept.push((weak_share, asks));
+        }
+    }
+    kept.reverse();
+    //* Only more asking weak shares than WEAK_CAP leave the count above it;
+    //* the oldest WEAK_CAP of them all ask, which is allowed.
+    kept.truncate(WEAK_CAP);
+    kept
+}
 
 /// The weak ratio of a share whose parent has `parent_weak_ratio`, carried
 /// `parent_weak_count` weak shares and counted `parent_weak_asking` of them
@@ -657,7 +734,7 @@ mod tests {
         assert_eq!(
             BCH_WEAK_SHARE_RULE_TAG,
             format!(
-                "weak4-{WEAK_CAP}-{INCLUDER_CUT}-{WEAK_DEPTH}-{WEAK_RATIO_MAX_MULTIPLE}-{WEAK_FILL_MAX}-{WEAK_ASK_DIVISOR}-{WEAK_RATIO_ASK_MAX_MULTIPLE}"
+                "weak4-{WEAK_CAP}-{INCLUDER_CUT}-{WEAK_DEPTH}-{WEAK_RATIO_MAX_MULTIPLE}-{WEAK_FILL_MAX}-{WEAK_ASK_DIVISOR}-{WEAK_RATIO_ASK_MAX_MULTIPLE}-{WEAK_IDLE_CAP}-{GENESIS_WEAK_RATIO_MULTIPLE}"
             )
         );
     }
@@ -686,9 +763,110 @@ mod tests {
         assert_eq!(next_weak_ratio(256_000, WEAK_FILL, 0), 256_000);
     }
 
+    /// A chain starts at a weak ratio of 32, where one at a tenth of today's
+    /// Bitcoin Cash settles, and rises from there one step a share while its
+    /// shares carry fewer than `WEAK_FILL`.
     #[test]
-    fn a_genesis_parent_keeps_the_easiest_ratio() {
-        assert_eq!(next_weak_ratio(GENESIS_WEAK_RATIO, 0, 0), WEAK_RATIO_MAX);
+    fn a_genesis_parent_carrying_none_raises_the_ratio_from_32() {
+        assert_eq!(GENESIS_WEAK_RATIO, 32 * WEAK_RATIO_UNIT);
+        assert_eq!(
+            next_weak_ratio(GENESIS_WEAK_RATIO, 0, 0),
+            GENESIS_WEAK_RATIO + GENESIS_WEAK_RATIO / WEAK_RATIO_STEP_DIVISOR
+        );
+    }
+
+    /// More than `WEAK_IDLE_CAP` weak shares only while more than one in
+    /// `WEAK_ASK_DIVISOR` of them ask, and never more than `WEAK_CAP`.
+    #[test]
+    fn the_asking_weak_shares_bound_how_many_a_share_carries() {
+        assert_eq!(weak_cap_for_asking(0), WEAK_IDLE_CAP);
+        assert_eq!(weak_cap_for_asking(1), WEAK_IDLE_CAP);
+        assert_eq!(weak_cap_for_asking(2), 127);
+        assert_eq!(weak_cap_for_asking(10), 639);
+        assert_eq!(weak_cap_for_asking(11), WEAK_CAP);
+        assert_eq!(weak_cap_for_asking(usize::MAX), WEAK_CAP);
+        assert!(weak_count_allowed(64, 0));
+        assert!(!weak_count_allowed(65, 1));
+        assert!(weak_count_allowed(65, 2));
+        assert!(!weak_count_allowed(128, 2));
+        assert!(!weak_count_allowed(WEAK_CAP + 1, WEAK_CAP + 1));
+    }
+
+    /// A share keeps every asking weak share and the oldest silent ones, as
+    /// many as the asking ones allow; the newest silent ones wait.
+    #[test]
+    fn a_share_leaves_its_newest_silent_weak_shares_waiting() {
+        //* 100 weak shares, oldest first; numbers 10 and 90 ask.
+        let offered: Vec<(usize, bool)> = (0..100).map(|n| (n, n == 10 || n == 90)).collect();
+
+        let kept = keep_within_asks(offered.clone());
+
+        assert_eq!(weak_cap_for_asking(2), 127);
+        assert_eq!(kept, offered, "two asking allow 127, so all 100 fit");
+
+        //* One asking: 64 allowed, the asking one and the 63 oldest silent.
+        let one_asking: Vec<(usize, bool)> = (0..100).map(|n| (n, n == 90)).collect();
+        let kept = keep_within_asks(one_asking);
+        assert_eq!(kept.len(), WEAK_IDLE_CAP);
+        assert_eq!(kept.iter().filter(|(_, asks)| *asks).count(), 1);
+        assert_eq!(
+            kept[..63],
+            (0..63).map(|n| (n, false)).collect::<Vec<_>>()[..]
+        );
+        assert_eq!(kept[63], (90, true));
+
+        //* None asking: the 64 oldest.
+        let silent: Vec<(usize, bool)> = (0..640).map(|n| (n, false)).collect();
+        let kept = keep_within_asks(silent);
+        assert_eq!(kept, (0..64).map(|n| (n, false)).collect::<Vec<_>>());
+
+        //* Fewer than 64 always fit.
+        let few: Vec<(usize, bool)> = (0..10).map(|n| (n, false)).collect();
+        assert_eq!(keep_within_asks(few.clone()), few);
+
+        //* More asking than WEAK_CAP: the oldest 640, all asking.
+        let all_asking: Vec<(usize, bool)> = (0..700).map(|n| (n, true)).collect();
+        let kept = keep_within_asks(all_asking);
+        assert_eq!(kept.len(), WEAK_CAP);
+        assert_eq!(kept[WEAK_CAP - 1], (WEAK_CAP - 1, true));
+    }
+
+    /// Whatever a pool offers, what a share keeps is allowed, and it drops
+    /// only silent weak shares, the newest first.
+    #[test]
+    fn what_a_share_keeps_is_always_allowed() {
+        for len in [0, 1, 63, 64, 65, 127, 128, 300, 640] {
+            for asking_every in [0, 1, 2, 3, 7, 31, 63, 64, 65, 200] {
+                let offered: Vec<(usize, bool)> = (0..len)
+                    .map(|n| (n, asking_every > 0 && n % asking_every == 0))
+                    .collect();
+                let kept = keep_within_asks(offered.clone());
+                let asking = kept.iter().filter(|(_, asks)| *asks).count();
+                assert!(
+                    weak_count_allowed(kept.len(), asking),
+                    "{len} offered, one in {asking_every} asking: kept {} with {asking}",
+                    kept.len()
+                );
+                assert_eq!(
+                    asking,
+                    offered.iter().filter(|(_, asks)| *asks).count(),
+                    "every asking weak share is kept"
+                );
+                let dropped: Vec<usize> = offered
+                    .iter()
+                    .map(|(n, _)| *n)
+                    .filter(|n| !kept.iter().any(|(k, _)| k == n))
+                    .collect();
+                if let Some(first_dropped) = dropped.first() {
+                    assert!(
+                        kept.iter()
+                            .filter(|(_, asks)| !*asks)
+                            .all(|(n, _)| n < first_dropped),
+                        "the newest silent ones are dropped first"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

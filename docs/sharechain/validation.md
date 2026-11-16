@@ -211,7 +211,10 @@ its proof-of-work hash. It is valid when:
    A full share with that hash would have the same header, whose bits the
    hash misses, so the carried-once rule below covers it.
 
-A share carries at most 640 weak shares (`WEAK_CAP`) in 960 KiB (`WEAK_BYTES`).
+A share carries at most 640 weak shares (`WEAK_CAP`) in 960 KiB (`WEAK_BYTES`),
+and more than 64 (`WEAK_IDLE_CAP`) only while more than one in 64 of them ask:
+`weak_count <= 64` or `weak_asking * 64 > weak_count`, so 640 needs 11 asking.
+A header breaking either does not decode, wherever a header is read.
 Its header commits to them under tag `0x26`: its weak ratio, their count, how
 many of them ask (`weak_asking`, never more than the count) and
 the merkle root of their whole encodings, each leaf the SHA-256d of one weak

@@ -440,10 +440,17 @@ fn the_builder_refuses_weak_shares_whose_number_asking_it_cannot_keep() {
 
     let more_asking_than_carried = checked_weak_shares(vec![weak_share.clone()], 2);
     let more_than_fit = checked_weak_shares(vec![weak_share.clone(); WEAK_CAP + 1], 0);
+    let more_than_the_asks_allow = checked_weak_shares(vec![weak_share.clone(); 65], 1);
     let a_full_share = checked_weak_shares(vec![weak_share; WEAK_CAP], WEAK_CAP as u16);
 
     assert!(more_asking_than_carried.is_err());
     assert!(more_than_fit.is_err());
+    let error = more_than_the_asks_allow.unwrap_err();
+    assert!(
+        error.message.contains("more than the 64 they allow"),
+        "{}",
+        error.message
+    );
     assert_eq!(a_full_share.unwrap().len(), WEAK_CAP);
 }
 

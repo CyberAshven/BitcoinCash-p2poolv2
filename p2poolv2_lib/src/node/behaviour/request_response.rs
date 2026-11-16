@@ -177,7 +177,7 @@ fn genesis_tag(genesis_hash: BlockHash) -> String {
 /// share stamped two minutes ahead was valid on a node whose clock had
 /// passed that time and invalid for good on one whose clock had not.
 ///
-/// The weak segment became `weak4-640-100-48-256-320-64-4096` on 2026-11-15,
+/// The weak segment became `weak4-640-100-48-256-320-64-4096-64-32` on 2026-11-15,
 /// another flag day (issue #79, part 6 of the design page): the weak ratio
 /// follows the weak shares that ask. A weak share asks when its
 /// `wanted_bits` is easier than the weak target it met, each share header
@@ -496,7 +496,7 @@ mod tests {
         assert_eq!(
             protocol_string(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash),
             format!(
-                "/p2pool/test/{expected_tag}/pplns-k3-m100/asert-parent/trade-htlc/payout-holder/payout-hybrid-t3072-f500-r1to3-z8-cov1/cuts-per-share/uncle-once/body-1000000-204800/payee-p2pkh-p2sh20-p2sh32/merkle32/depths-m100/sigchecks3000-1452/no-segwit/weight-work/mm2-roots-asert8/version-vote/bch-prev-1off/genesis-last-resort/band-c64/levels-546x2-k1/weak4-640-100-48-256-320-64-4096/weak-by-hash/1.0.0"
+                "/p2pool/test/{expected_tag}/pplns-k3-m100/asert-parent/trade-htlc/payout-holder/payout-hybrid-t3072-f500-r1to3-z8-cov1/cuts-per-share/uncle-once/body-1000000-204800/payee-p2pkh-p2sh20-p2sh32/merkle32/depths-m100/sigchecks3000-1452/no-segwit/weight-work/mm2-roots-asert8/version-vote/bch-prev-1off/genesis-last-resort/band-c64/levels-546x2-k1/weak4-640-100-48-256-320-64-4096-64-32/weak-by-hash/1.0.0"
             )
         );
     }
@@ -517,10 +517,13 @@ mod tests {
 
         assert_ne!(current, before, "weak shares by hash change the messages");
         assert!(
-            current.ends_with("/weak4-640-100-48-256-320-64-4096/weak-by-hash/1.0.0"),
+            current.ends_with("/weak4-640-100-48-256-320-64-4096-64-32/weak-by-hash/1.0.0"),
             "{current}"
         );
-        assert!(before.ends_with("/weak4-640-100-48-256-320-64-4096/1.0.0"), "{before}");
+        assert!(
+            before.ends_with("/weak4-640-100-48-256-320-64-4096-64-32/1.0.0"),
+            "{before}"
+        );
         let kad = kad_protocol_string(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash);
         assert!(kad.ends_with("/weak-by-hash/kad/1.0.0"), "{kad}");
     }
@@ -615,7 +618,7 @@ mod tests {
             genesis_hash,
         ));
         let before = current.replace(
-            "/bch-prev-1off/genesis-last-resort/band-c64/levels-546x2-k1/weak4-640-100-48-256-320-64-4096/",
+            "/bch-prev-1off/genesis-last-resort/band-c64/levels-546x2-k1/weak4-640-100-48-256-320-64-4096-64-32/",
             "/",
         );
 
@@ -638,7 +641,7 @@ mod tests {
             genesis_hash,
         ));
         let before = current.replace(
-            "/genesis-last-resort/band-c64/levels-546x2-k1/weak4-640-100-48-256-320-64-4096/",
+            "/genesis-last-resort/band-c64/levels-546x2-k1/weak4-640-100-48-256-320-64-4096-64-32/",
             "/",
         );
 
@@ -660,7 +663,10 @@ mod tests {
             Chain::BitcoinCash,
             genesis_hash,
         ));
-        let before = current.replace("/band-c64/levels-546x2-k1/weak4-640-100-48-256-320-64-4096/", "/");
+        let before = current.replace(
+            "/band-c64/levels-546x2-k1/weak4-640-100-48-256-320-64-4096-64-32/",
+            "/",
+        );
 
         assert_ne!(current, before);
         assert!(before.ends_with("/genesis-last-resort/1.0.0"), "{before}");
@@ -680,7 +686,10 @@ mod tests {
             Chain::BitcoinCash,
             genesis_hash,
         ));
-        let before = current.replace("/levels-546x2-k1/weak4-640-100-48-256-320-64-4096/", "/");
+        let before = current.replace(
+            "/levels-546x2-k1/weak4-640-100-48-256-320-64-4096-64-32/",
+            "/",
+        );
 
         assert_ne!(current, before);
         assert!(before.ends_with("/band-c64/1.0.0"), "{before}");
@@ -700,7 +709,10 @@ mod tests {
             Chain::BitcoinCash,
             genesis_hash,
         ));
-        let before = current.replace("/levels-546x2-k1/weak4-640-100-48-256-320-64-4096/", "/levels-546x2/");
+        let before = current.replace(
+            "/levels-546x2-k1/weak4-640-100-48-256-320-64-4096-64-32/",
+            "/levels-546x2/",
+        );
 
         assert_ne!(current, before);
         assert!(before.ends_with("/levels-546x2/1.0.0"), "{before}");
@@ -723,7 +735,7 @@ mod tests {
             genesis_hash,
         ));
         let before = current.replace(
-            "/levels-546x2-k1/weak4-640-100-48-256-320-64-4096/",
+            "/levels-546x2-k1/weak4-640-100-48-256-320-64-4096-64-32/",
             "/levels-546x2/weak-64-500-6/",
         );
 
@@ -750,7 +762,7 @@ mod tests {
             genesis_hash,
         ));
         let before = current.replace(
-            "/levels-546x2-k1/weak4-640-100-48-256-320-64-4096/",
+            "/levels-546x2-k1/weak4-640-100-48-256-320-64-4096-64-32/",
             "/levels-546x2/weak2-64-500-6/",
         );
 
@@ -774,11 +786,14 @@ mod tests {
             Chain::BitcoinCash,
             genesis_hash,
         ));
-        let before = current.replace("/weak4-640-100-48-256-320-64-4096/", "/weak2-64-100-48-256/");
+        let before = current.replace(
+            "/weak4-640-100-48-256-320-64-4096-64-32/",
+            "/weak2-64-100-48-256/",
+        );
 
         assert_ne!(current, before, "carried weak time flag day");
         assert!(
-            current.ends_with("/levels-546x2-k1/weak4-640-100-48-256-320-64-4096/1.0.0"),
+            current.ends_with("/levels-546x2-k1/weak4-640-100-48-256-320-64-4096-64-32/1.0.0"),
             "{current}"
         );
     }
@@ -800,7 +815,7 @@ mod tests {
             genesis_hash,
         ));
         let before = current.replace(
-            "/weak4-640-100-48-256-320-64-4096/",
+            "/weak4-640-100-48-256-320-64-4096-64-32/",
             "/weak3-64-100-48-256/",
         );
 
@@ -832,7 +847,7 @@ mod tests {
             "protocol string holds levels-546x2-k1: {current}"
         );
         assert!(
-            before.ends_with("/levels-546x2/weak4-640-100-48-256-320-64-4096/1.0.0"),
+            before.ends_with("/levels-546x2/weak4-640-100-48-256-320-64-4096-64-32/1.0.0"),
             "{before}"
         );
     }
@@ -925,7 +940,7 @@ mod tests {
         assert_eq!(
             kad_protocol_string(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash),
             format!(
-                "/p2pool/test/{expected_tag}/pplns-k3-m100/asert-parent/trade-htlc/payout-holder/payout-hybrid-t3072-f500-r1to3-z8-cov1/cuts-per-share/uncle-once/body-1000000-204800/payee-p2pkh-p2sh20-p2sh32/merkle32/depths-m100/sigchecks3000-1452/no-segwit/weight-work/mm2-roots-asert8/version-vote/bch-prev-1off/genesis-last-resort/band-c64/levels-546x2-k1/weak4-640-100-48-256-320-64-4096/weak-by-hash/kad/1.0.0"
+                "/p2pool/test/{expected_tag}/pplns-k3-m100/asert-parent/trade-htlc/payout-holder/payout-hybrid-t3072-f500-r1to3-z8-cov1/cuts-per-share/uncle-once/body-1000000-204800/payee-p2pkh-p2sh20-p2sh32/merkle32/depths-m100/sigchecks3000-1452/no-segwit/weight-work/mm2-roots-asert8/version-vote/bch-prev-1off/genesis-last-resort/band-c64/levels-546x2-k1/weak4-640-100-48-256-320-64-4096-64-32/weak-by-hash/kad/1.0.0"
             )
         );
     }

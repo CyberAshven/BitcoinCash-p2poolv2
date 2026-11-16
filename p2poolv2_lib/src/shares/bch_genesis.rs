@@ -270,12 +270,13 @@ mod tests {
     /// the genesis weak ratio is `R_MAX`, which fell from 4096 to 256. Pinned
     /// again on 2026-11-15: the header gained `weak_asking`, how many of the
     /// weak shares a share carries ask (`shares::weak`), none at genesis.
+    /// Pinned again on 2026-11-16: the genesis weak ratio is 32, not `R_MAX`.
     #[test]
     fn mainnet_mini_genesis_hash_is_pinned() {
         let genesis = build(BchShareNetwork::Mainnet).unwrap();
         assert_eq!(
             genesis.block_hash().to_string(),
-            "5a278a988ed58030314763c10c53615e521178fc60bec02e78a29c77b7881ec3"
+            "e51d6c0a6a7a83abcfcdbf08617c2f5c395fafde2e0fa24dd4a87accf72bd093"
         );
     }
 
@@ -284,7 +285,7 @@ mod tests {
         let genesis = build(BchShareNetwork::Chipnet).unwrap();
         assert_eq!(
             genesis.block_hash().to_string(),
-            "eb1cdd1ee6289cd72c97e0206c3a9891bf952cc07625193b71c0763633a2e3ab"
+            "ebfe6801d28d5b0222d99a38f1c133bbcc3019318ee02f60c289d05f8877f26e"
         );
     }
 
@@ -293,7 +294,7 @@ mod tests {
         let genesis = build(BchShareNetwork::Regtest).unwrap();
         assert_eq!(
             genesis.block_hash().to_string(),
-            "2e20e7e95dc3b894d6a023286d5f169789c6df9d53d27061e1c45882ec154002"
+            "08a272275a0de2efd36299bcd94cfe60c7f0c34777483624cdfbdac575024c02"
         );
     }
 

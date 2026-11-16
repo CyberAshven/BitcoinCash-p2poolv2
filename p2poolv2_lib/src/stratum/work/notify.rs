@@ -25,7 +25,7 @@ use crate::shares::share_version::{ShareVersion, next_share_version};
 use crate::shares::transaction_pool::ShareTransactionPool;
 use crate::shares::validation::tally_share_version_votes;
 use crate::shares::weak::{
-    WEAK_DEPTH, WeakShare, next_weak_ratio, parent_weak_target, weak_share_asks,
+    WEAK_DEPTH, WeakShare, keep_within_asks, next_weak_ratio, parent_weak_target, weak_share_asks,
 };
 use crate::shares::weak_pool::WeakPool;
 use crate::store::writer::StoreError;
@@ -236,10 +236,11 @@ fn build_prepared_notify(
 /// `mining_base_height`): the weak ratio its shares carry, one step from the
 /// mining base's; the weak shares they carry, from the node's weak pool,
 /// oldest parent first, as many as fit one share
-/// (`prepared_notify::fit_weak_shares`); how many of those ask for an easier
-/// weak target ([`count_asking_weak_shares`]); and the mining base's weak
-/// target, which jobs at the minimum turn submissions into weak shares at.
-/// Without a weak pool the shares carry none.
+/// (`prepared_notify::fit_weak_shares`) and more than `WEAK_IDLE_CAP` only
+/// as far as the asking ones allow (`shares::weak::keep_within_asks`); how
+/// many of those ask for an easier weak target ([`asking_weak_shares`]); and
+/// the mining base's weak target, which jobs at the minimum turn submissions
+/// into weak shares at. Without a weak pool the shares carry none.
 ///
 /// A share commits how many of its weak shares ask, so when that cannot be
 /// counted, a parent's header failing to read, the shares carry none, which
@@ -259,13 +260,21 @@ fn template_weak_shares(
             .map(|pool| pool.select_for_share(tip, mining_base_height))
             .unwrap_or_default(),
     );
-    let (weak_shares, weak_asking) = match count_asking_weak_shares(
-        &weak_shares,
+    let (weak_shares, weak_asking) = match asking_weak_shares(
+        weak_shares,
         (tip, weak_target),
         ceiling,
         &context.chain_store_handle,
     ) {
-        Ok(weak_asking) => (weak_shares, weak_asking),
+        Ok(offered) => {
+            let kept = keep_within_asks(offered);
+            let weak_asking = kept.iter().filter(|(_, asks)| *asks).count();
+            (
+                kept.into_iter().map(|(weak_share, _)| weak_share).collect(),
+                //* At most WEAK_CAP, 640, of them.
+                weak_asking as u16,
+            )
+        }
         Err(error) => {
             debug!("No weak shares for a share on {tip}: cannot count the ones asking: {error}");
             (Vec::new(), 0)
@@ -283,24 +292,24 @@ fn template_weak_shares(
     )
 }
 
-/// How many of `weak_shares` ask for an easier weak target
-/// (`shares::weak::weak_share_asks`): those whose `wanted_bits` is easier
-/// than the weak target each met, its own parent's. The number a share
-/// carrying them commits as `weak_asking`, exactly as every node counts it
-/// when it validates that share.
+/// `weak_shares`, each with whether it asks for an easier weak target
+/// (`shares::weak::weak_share_asks`): whether its `wanted_bits` is easier
+/// than the weak target it met, its own parent's. A share carrying them
+/// commits the number asking as `weak_asking`, exactly as every node counts
+/// it when it validates that share.
 ///
 /// `mining_base` is the mining base's hash and its weak target, already in
 /// hand; the header of each other parent is read once, at most `WEAK_DEPTH`
 /// of them.
-fn count_asking_weak_shares(
-    weak_shares: &[WeakShare],
+fn asking_weak_shares(
+    weak_shares: Vec<WeakShare>,
     mining_base: (bitcoin::BlockHash, bitcoin::Target),
     ceiling: bitcoin::CompactTarget,
     chain_store_handle: &ChainStoreHandle,
-) -> Result<u16, StoreError> {
+) -> Result<Vec<(WeakShare, bool)>, StoreError> {
     let mut weak_targets = HashMap::with_capacity(WEAK_DEPTH as usize);
     weak_targets.insert(mining_base.0, mining_base.1);
-    let mut asking: u16 = 0;
+    let mut offered = Vec::with_capacity(weak_shares.len());
     for weak_share in weak_shares {
         let parent = weak_share.header.prev_share_blockhash;
         let weak_target = match weak_targets.get(&parent) {
@@ -312,9 +321,10 @@ fn count_asking_weak_shares(
                 weak_target
             }
         };
-        asking += u16::from(weak_share_asks(&weak_share.header, weak_target));
+        let asks = weak_share_asks(&weak_share.header, weak_target);
+        offered.push((weak_share, asks));
     }
-    Ok(asking)
+    Ok(offered)
 }
 
 /// The Bitcoin Cash pool's hashrate from the newest
