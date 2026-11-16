@@ -7,24 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Weak shares follow the asks (issue #79, part 6), a flag day: protocol
-segment `weak4-640-100-48-256-320-64-4096-64-32`, store format 10 and new
-genesis shares. A weak share asks when its `wanted_bits` is easier than the
-weak target it met; each Bitcoin Cash share header counts the asking weak
-shares it carries (`weak_asking`, under tag `0x26`, never more than the
-count). While a share carries at most 320 weak shares and more than one in 64
-of them ask, the weak ratio rises, up to 4096; otherwise it steps as before.
-A share may carry 640 weak shares in 960 KiB, but more than 64 only while
-more than one in 64 of them ask (`weak_asking * 64 > weak_count`), and a
-header breaking that does not decode; a node building a share leaves its
-newest weak shares that do not ask for a later share until the count is
-allowed. A new chain starts at a weak ratio of 32, not 256. The P2P message
-limit is 2,144 KiB. A node asks for a miner that would find fewer than 16
-weak shares a month. The
-sim build's `[sim] weak_asks` and the swarm's `WEAK_ASKS` make chosen nodes
-ask, and the sim stats line shows how many weak shares a share carries and
-how many of them ask. `wanted_bits` easier than `bits` no longer makes a share
-invalid.
+Weak shares follow the asks (#118, issue #79 part 6), a flag day: protocol
+segment `weak4-640-100-48-256-320-64-4096-64-32`, store format 10, new
+genesis shares. A share header counts the weak shares it carries that ask
+for an easier target (`weak_asking`); while more than one in 64 ask, the weak
+ratio rises (up to 4096) and a share may carry more than 64 of them (up to
+640). A new chain starts at a weak ratio of 32.
 
 A share a peer sent is relayed once its header checks out, before its body
 is validated, as BIP152 high-bandwidth peers relay compact blocks (#128).
