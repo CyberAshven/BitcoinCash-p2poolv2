@@ -496,12 +496,13 @@ impl TransitionCase {
             includer_cut: PAGE_INCLUDER_CUT,
             event_seconds: TRANSITION_EVENT_SECONDS,
             after_seconds: TRANSITION_AFTER_SECONDS,
+            asks: None,
         }
     }
 }
 
 /// The sum of `hours[start..end]`.
-fn hours_sum(hours: &[HourSample], start: usize, end: usize) -> HourSample {
+pub(crate) fn hours_sum(hours: &[HourSample], start: usize, end: usize) -> HourSample {
     let mut sum = HourSample::default();
     hours[start..end.min(hours.len())]
         .iter()
@@ -684,6 +685,7 @@ fn genesis_inputs(base: &Scenario, pool_fraction: f64, ratio_max: u64) -> Transi
         includer_cut: PAGE_INCLUDER_CUT,
         event_seconds: 0.0,
         after_seconds: GENESIS_SECONDS,
+        asks: None,
     }
 }
 
@@ -1325,14 +1327,14 @@ const SCALE_HASHRATE_MULTIPLES: [f64; 5] = [1.0, 10.0, 100.0, 270.0, 1_000.0];
 /// The hashrate that finds `NODE_MIN_PAYMENTS_PER_MONTH` weak shares a month
 /// at `weak_difficulty`: below it a miner's credit comes less often than a
 /// node's payment floor, whatever its payout level.
-fn smallest_regular_miner(weak_difficulty: f64) -> f64 {
+pub(crate) fn smallest_regular_miner(weak_difficulty: f64) -> f64 {
     NODE_MIN_PAYMENTS_PER_MONTH * weak_difficulty * HASHES_PER_DIFFICULTY / MONTH_SECONDS
 }
 
 /// One row of the scale table: `multiple` times today's Bitcoin Cash
 /// hashrate and a pool that is `fraction` of it, each class at the level a
 /// node would leave a machine of that hashrate.
-fn scale_scenario(base: &Scenario, multiple: f64, fraction: f64) -> Scenario {
+pub(crate) fn scale_scenario(base: &Scenario, multiple: f64, fraction: f64) -> Scenario {
     let network = BCH_NETWORK_HASHRATE * multiple;
     let pool_blocks = BCH_BLOCKS_PER_MONTH * fraction;
     let home_level = node_level(HOME_MINER_HASHRATE, network, pool_blocks);

@@ -480,7 +480,7 @@ async fn test_get_mining_base_and_uncles_returns_sibling_uncle() {
         .nonce(0xe9695793)
         .work(1)
         .build();
-    store.store_with_valid_metadata(&sibling);
+    store.store_with_block_valid_metadata(&sibling);
 
     // With no BlockValid block, the mining base is the confirmed tip. The
     // sibling is returned as an uncle, and the mining base is never listed
@@ -516,7 +516,7 @@ async fn test_get_mining_base_and_uncles_excludes_fork_ancestry() {
         .nonce(0xe9695793)
         .work(5)
         .build();
-    store.store_with_valid_metadata(&fork);
+    store.store_with_block_valid_metadata(&fork);
     let mut batch = Store::get_write_batch();
     store
         .mark_block_valid(&fork.block_hash(), &mut batch)
@@ -530,7 +530,7 @@ async fn test_get_mining_base_and_uncles_excludes_fork_ancestry() {
         .nonce(0xe9695794)
         .work(1)
         .build();
-    store.store_with_valid_metadata(&sibling);
+    store.store_with_block_valid_metadata(&sibling);
 
     let (base, uncles) = chain_handle.get_mining_base_and_uncles().unwrap();
     // The mining base is the validated block above the confirmed tip; it

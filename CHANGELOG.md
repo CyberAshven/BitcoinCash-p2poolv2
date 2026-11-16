@@ -7,25 +7,97 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-A node keeps at least 16 outgoing peers (`[network] target_outgoing_peers`,
-0 turns it off). Before, it kept whatever its `dial_peers` and Kademlia's
-queries left connected. While it has fewer, it dials one known peer a
-second from a book of up to 1,000 peers that Kademlia and Identify reported
-at public IPv4 or IPv6 addresses, chosen at random by network group and
-never in an IPv4 /16 or IPv6 /32 where it already has an outgoing peer
-(`dial_peers` hold no group), as Bitcoin Cash Node and P2Pool v1 do. It
-never goes past `max_established_outgoing`, leaves half of
-`max_pending_outgoing` to `dial_peers` and Kademlia, skips blocked IPs, and
-backs a peer off 60 seconds after each dial, doubled after each failure (a
-connection closed within 60 seconds counts as one) and forgotten after five.
-`/metrics` adds `p2p_outgoing_peers`, `p2p_incoming_peers` and
-`p2p_outgoing_target_dials_total`. Which peers a share is relayed to, and
-how, is unchanged, and no share-chain rule changes. In the network
-simulation, 16 peers instead of 8, with shares sent without their payouts
-and relayed after the header check, let 1,000 nodes carry a share every
-4.21 seconds instead of 5.01 and cut stale shares at 10-second shares from
-2.32% to 1.99%; with whole shares, as relayed today, more peers alone made
-propagation slower (`docs/p2p-network.md`, "Outgoing peers").
+A node keeps at least 16 outgoing peers (`[network] target_outgoing_peers`),
+at most one per IPv4 /16 or IPv6 /32, dialed from the peers Kademlia and
+Identify report, with a 60-second backoff that doubles (#122).
+
+A share a peer sent is relayed once its header checks out, before its body
+is validated, as BIP152 high-bandwidth peers relay compact blocks (#128).
+Uncles are now chosen from fully validated shares only. No share-chain rule,
+message or store change.
+
+P2Poolv2 takes templates from a node that serves no long polling, such as
+Knuth. Every Knuth template failed to parse ("missing field `longpollid`"),
+so the pool gave its miners no work. BIP 22 makes `longpollid` part of long
+polling, which Knuth does not serve, and the pool never long-polls, so a
+template without it now reads as one with an empty id. No share-chain rule
+changes.
+
+A new share is relayed with the weak shares it carries listed by hash, not
+whole (protocol segment `weak-by-hash`). Weak shares already travel ahead of
+the share that carries them: a node pushes the ones its miners find to every
+peer and announces the ones it takes by hash, each fetched once. The share
+message still carried every one of them whole, so a node downloaded each
+weak share twice and the share message grew with every weak share in it. On
+1,000 nodes at 10-second shares the network simulation put stale shares at
+5.27% with 32 weak shares a share carried whole, 8.66% with 160 and 14.11%
+with 320, against 4.20% when they travel only beside the shares; the weak
+shares that follow the asks (#117, #118) let a share carry 320. A share
+carrying weak shares now goes as `ShareWithWeakHashes`: every weak share it
+carries listed by proof-of-work hash, 32 bytes each, and the ones its peers
+probably lack also sent whole beside the list, as BIP152 prefills
+transactions. Those are the weak shares this node's weak pool took less
+than 400 ms ago, two of the weak share announce intervals (one for this
+node's announcement to go out, one for a peer's fetch and check), and those
+it does not hold at all. The receiver fills the list from its weak pool's
+checked weak shares, then from the prefilled ones, asks the sender for the
+rest (`GetCarriedWeakShares`, answered from the sender's store with
+`CarriedWeakShares`), and checks the rebuilt share exactly as a share sent
+whole, weak root included. A prefilled or fetched weak share that filled a
+gap also goes to the weak share worker, checked as any relayed weak share,
+so the gossip does not fetch it again. A share still missing a weak share
+after 10 seconds, or whose weak shares do not rebuild its weak root, is
+never stored or validated: the block fetcher fetches it whole, from another
+peer that relayed it meanwhile if one did. A list that does not hold
+exactly the weak shares the header counts, each once, or that prefills a
+weak share it does not list or one twice, is refused as a bad copy is.
+Header sync and block requests still send weak shares whole: a node
+catching up was never sent old weak shares. On a 12-node swarm before the
+prefilling, a relayed share message fell from 23.4 KB to 4.7 KB and 2.4% of
+the weak shares were fetched, but the round trip for them took shares that
+did not make the chain from 9.69% to 12.37%. No share-chain rule changes
+and no store change; nodes before it cannot read the new messages, so the
+two derive different protocol strings and fail the handshake, and every
+node restarts on the new binary. New series:
+`p2p_share_relay_messages_total`, `p2p_share_relay_bytes_total`,
+`p2p_share_relay_whole_bytes_total` (what the same messages would have taken
+with every weak share whole) and `p2p_share_relay_prefilled_weak_shares_total`,
+and `weak_shares_filled_from_pool_total`, `weak_shares_prefilled_total`,
+`weak_shares_prefilled_unused_total` (prefilled ones the pool already had),
+`weak_shares_fetched_for_shares_total` and
+`weak_share_fills_fetched_whole_total`.
+
+The payout simulator runs the weak ratio's path under the weak shares that
+ask, share by share, in five tables (`weak-asks-genesis`,
+`weak-asks-big-miner`, `weak-asks-rules`, `weak-asks-rule-mixes`,
+`weak-asks-rule-attacks`), for the rule as #118 builds it and five
+variants; its transition model gains the asks. From genesis in a pool at
+10% of today's Bitcoin Cash, where nobody asks, the rule as written carries
+132 weak shares a share in the first hour and more than 64 in 769 of the
+first 2,100 shares, where today's cap holds 64; a 1 TH/s miner joining a
+10 GH/s test network pool, whose ratio the ceiling held, does the same. A
+faster way down (to `R * 32 / count`) settles far below the asks in every
+pool and makes every attack worse; a genesis ratio of 32 fixes only
+genesis. A cap that follows the asks (more than 64 weak shares only when
+more than one in 64 of them ask) with a genesis ratio of 32 keeps every
+start at or under 64 where nobody asks, loses no weak share at genesis and
+keeps section 6's steady states where the asks open the count; where fewer
+than one weak share in 64 asks (the 99% industrial mix) it opens less, 50 a
+share instead of 82. No node code changes.
+
+The small miners design page has a section 6, a proposal that is not built:
+weak shares that follow the asks. A weak share would ask for an easier weak
+target when its node wanted one for its miner, and while more than one in 64
+of the weak shares a share carried ask, the weak ratio would rise instead of
+steering towards 32 weak shares a share, up to 320. Without asks the rule is
+today's. The payout simulator runs it share by share in four tables
+(`weak-asks`, `weak-asks-mixes`, `weak-asks-constants`,
+`weak-asks-attacks`): a pool whose small miners find enough weak shares
+stays near today's count, and one at 30% of a Bitcoin Cash ten times today's
+opens to the ceiling, where a Bitaxe's months without a payment go from 41%
+to 2.7%. An attacker can hold the count at the ceiling or at the floor, no
+further. The section lists what the ceiling costs a node and what has to be
+built first.
 
 The payout simulator has a `window-cap` table and a `storage` table. The
 first runs pools at 0.01 to 1% of Bitcoin Cash with the PPLNS window capped

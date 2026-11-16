@@ -177,6 +177,7 @@ fn without_any_change_home_miners_are_paid_fairly() {
         includer_cut: 0.05,
         event_seconds: 2.0 * 86_400.0,
         after_seconds: 86_400.0,
+        asks: None,
     };
     let hours = simulate_transition(&inputs, &mut SimulationRandom::from_seed(1));
     let mut after = HourSample::default();
@@ -223,6 +224,7 @@ fn a_big_miner_joining_pays_home_miners_more_until_the_window_turns_over() {
         includer_cut: 0.05,
         event_seconds: 86_400.0,
         after_seconds: 86_400.0,
+        asks: None,
     };
     let hours = simulate_transition(&inputs, &mut SimulationRandom::from_seed(2));
     let first_hour = hours[HOURS_BEFORE_EVENT];
@@ -268,10 +270,109 @@ fn a_big_miner_at_the_minimum_raises_the_minimum_when_it_joins() {
         includer_cut: 0.05,
         event_seconds: 86_400.0,
         after_seconds: 86_400.0,
+        asks: None,
     };
     let hours = simulate_transition(&inputs, &mut SimulationRandom::from_seed(3));
     let before = hours[HOURS_BEFORE_EVENT - 1].minimum();
     let after = hours[hours.len() - 1].minimum();
     // Every miner at the minimum and the hashrate doubled.
     assert!((after / before - 2.0).abs() < 0.2, "{}", after / before);
+}
+
+#[test]
+fn a_measure_that_never_leaves_its_level_stays_from_the_first_hour() {
+    assert_eq!(stay_hour(&[1.1, 0.9, 1.0], 1.0, 0.25), Some(0));
+}
+
+#[test]
+fn a_measure_stays_from_the_hour_after_its_last_one_outside() {
+    // Reached in hour 1, left in hour 2, back for good from hour 3.
+    assert_eq!(stay_hour(&[3.0, 1.0, 2.0, 1.1, 0.9], 1.0, 0.25), Some(3));
+}
+
+#[test]
+fn a_measure_outside_its_level_at_the_end_does_not_stay() {
+    assert_eq!(stay_hour(&[1.0, 1.0, 2.0], 1.0, 0.25), None);
+}
+
+#[test]
+fn weak_slots_take_a_part_of_a_depth_with_its_part_of_the_work() {
+    let mut slots = WeakSlots::new(2);
+    slots.deepen(WeakBatch {
+        count: 4,
+        work: 8.0,
+        home_work: 4.0,
+    });
+    let taken = slots.take(0, 1);
+    assert_eq!(taken.count, 1);
+    assert!((taken.work - 2.0).abs() < 1e-12);
+    assert!((taken.home_work - 1.0).abs() < 1e-12);
+    assert_eq!(slots.count[0], 3);
+    assert_eq!(slots.take(0, 0), WeakBatch::default());
+}
+
+/// A pool of home miners at 30% of a Bitcoin Cash ten times today's, from
+/// genesis for `seconds`, with `asks`.
+fn home_pool_from_genesis(asks: Option<WeakAsks>, seconds: f64) -> HourSample {
+    let pool_hashrate = 0.3 * 3.7e19;
+    let mut classes = MinerMix::Home.classes(pool_hashrate, 5);
+    let big_miner = classes.len();
+    classes.push(MinerClass {
+        name: "nobody".to_string(),
+        kind: MinerKind::Industrial,
+        hashrate: pool_hashrate,
+        count: 0.0,
+        follows_node_default: true,
+        on_carrying_node: true,
+        level: 5,
+    });
+    let inputs = TransitionInputs {
+        classes,
+        big_miner,
+        big_miner_leaves: false,
+        network_hashrate: 3.7e19,
+        period_seconds: 10.0,
+        stale_rate: 0.021,
+        ceiling_difficulty: 4.55,
+        cap_max: 64,
+        band_step_divisor: 512,
+        overstating: None,
+        weak_cap: 64,
+        weak_fill: 32,
+        weak_depth: 48,
+        ratio_max: 256,
+        includer_cut: 0.01,
+        event_seconds: 0.0,
+        after_seconds: seconds,
+        asks,
+    };
+    let hours = simulate_transition(&inputs, &mut SimulationRandom::from_seed(5));
+    let mut last_hour = HourSample::default();
+    hours[hours.len() - 1..]
+        .iter()
+        .for_each(|hour| last_hour.add(hour));
+    last_hour
+}
+
+/// The steady-state model puts this pool at the ceiling, 344 weak shares a
+/// share, with every home miner asking; share by share the asks open it
+/// there too, and today's rule holds it at 32.
+#[test]
+fn share_by_share_the_asks_open_a_pool_whose_home_miners_need_them() {
+    let hours = 3.0 * 3_600.0;
+    let asking = home_pool_from_genesis(Some(WeakAsks::default()), hours);
+    let today = home_pool_from_genesis(None, hours);
+    assert!(
+        (280.0..420.0).contains(&asking.carried_per_share()),
+        "{} weak shares a share",
+        asking.carried_per_share()
+    );
+    assert!(asking.weak_asking > 0.9 * asking.weak_carried);
+    assert!(
+        today.carried_per_share() < 64.0,
+        "{} weak shares a share today",
+        today.carried_per_share()
+    );
+    assert_eq!(today.weak_asking, 0.0);
+    assert!(today.largest_carried <= 64.0);
 }

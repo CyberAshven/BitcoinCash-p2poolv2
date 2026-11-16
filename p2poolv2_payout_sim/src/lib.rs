@@ -17,6 +17,9 @@
 //!
 //! See `README.md` for the model, its assumptions and the results.
 
+pub mod ask_paths;
+pub mod ask_study;
+pub mod asks;
 pub mod constants;
 pub mod difficulty;
 pub mod levels;

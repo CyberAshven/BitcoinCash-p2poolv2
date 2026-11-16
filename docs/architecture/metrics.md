@@ -313,6 +313,10 @@ the simulation count nothing.
 | `p2p_inbound_failures_total` | counter | node request-response handler |
 | `p2p_responses_dropped_total` | counter | node request-response handler |
 | `p2p_response_queue_depth` | gauge | live read of response worker queue |
+| `p2p_share_relay_messages_total` | counter | node actor, at each share broadcast |
+| `p2p_share_relay_bytes_total` | counter | node actor, at each share broadcast |
+| `p2p_share_relay_whole_bytes_total` | counter | node actor, at each share broadcast |
+| `p2p_share_relay_prefilled_weak_shares_total` | counter | node actor, at each share broadcast |
 
 The counters are plain integers kept where their events happen and updated
 on the node actor loop. They are **not** sent to the `MetricsActor`: every
@@ -334,6 +338,16 @@ connection and `p2p_incoming_peers` the rest of `p2p_connected_peers`.
 fewer outgoing peers than `[network] target_outgoing_peers`
 (`node/outgoing_peer_target.rs`; see `docs/p2p-network.md`).
 
+The share relay counters count the share messages a node sends its peers
+when it relays a new share, one a peer, and their payload bytes as encoded.
+A Bitcoin Cash share carrying weak shares goes with them listed by hash
+(`ShareWithWeakHashes`); `p2p_share_relay_whole_bytes_total` counts what the
+same messages would have taken with every weak share whole, so one run shows
+the saving, and `p2p_share_relay_prefilled_weak_shares_total` the weak
+shares those messages sent whole beside the hashes, for peers likely to
+lack them (pooled less than 400 ms before, or not in the pool). Answers to
+block requests in sync are not counted.
+
 **Grafana / alerting:**
 - *P2P is up but broken* -- the signature of the 2026-09-17 incident:
   `rate(p2p_outbound_failures_total[5m]) > 0 and p2p_connected_peers > 0`
@@ -348,6 +362,9 @@ fewer outgoing peers than `[network] target_outgoing_peers`
 - *Response backlog*: `p2p_response_queue_depth` and
   `rate(p2p_responses_dropped_total[5m])`; drops during catch-up mean the
   response worker is falling behind.
+- *Bytes a relayed share message*:
+  `rate(p2p_share_relay_bytes_total[5m]) / rate(p2p_share_relay_messages_total[5m])`,
+  beside the same with `p2p_share_relay_whole_bytes_total`.
 
 ### Weak shares (Bitcoin Cash)
 
@@ -368,6 +385,11 @@ them, and fills its own shares from the pool.
 | `weak_shares_refused_total{reason}` | counter | live read of the weak pool | Weak shares the pool did not take, by reason (below) |
 | `weak_pool_size` | gauge | live read of the weak pool | Weak shares waiting in the pool for a share to carry them |
 | `weak_pool_waiting_for_parent` | gauge | live read of the weak pool | Weak shares held, unchecked, until their parent arrives |
+| `weak_shares_filled_from_pool_total` | counter | live read of the weak pool | Weak shares of shares relayed by hash (`ShareWithWeakHashes`) that this node filled from its weak pool |
+| `weak_shares_prefilled_total` | counter | live read of the weak pool | Weak shares the sender prefilled, whole beside the hashes, that filled one the pool lacked |
+| `weak_shares_prefilled_unused_total` | counter | live read of the weak pool | Prefilled weak shares the pool already had, so sent for nothing |
+| `weak_shares_fetched_for_shares_total` | counter | live read of the weak pool | Weak shares of shares relayed by hash that the pool lacked, the sender did not prefill, and the sender then sent (`GetCarriedWeakShares`) |
+| `weak_share_fills_fetched_whole_total` | counter | live read of the weak pool | Shares relayed by hash whose weak shares could not all be filled -- the sender did not answer in 10 s, sent too few, or listed hashes that do not rebuild the weak root -- asked for whole instead |
 | `sharechain_weak_ratio` | gauge | live read of the confirmed tip header | The tip's weak ratio `R` as a multiple: the weak target over the minimum |
 | `sharechain_band_cap` | gauge | live read of the confirmed tip header | The tip's band cap `C` as a multiple: how many times harder than the minimum a share may be |
 
@@ -404,6 +426,12 @@ share.
 - *Difficulty state*: `sharechain_weak_ratio` and `sharechain_band_cap` as
   stats; `R` falls while shares carry more than half the cap of weak
   shares, and `C` grows while heavy miners are held back by it.
+- *Weak shares of relayed shares*: `rate()` of the filled-from-pool,
+  prefilled and fetched counters; the fetched part shows how often a weak
+  share reaches a node after the share that carries it and was not
+  prefilled, each one a round trip, the unused prefilled part what the
+  prefill bound costs for nothing, and a rise in
+  `weak_share_fills_fetched_whole_total` a peer that does not answer.
 
 ## Planned metrics (later releases)
 

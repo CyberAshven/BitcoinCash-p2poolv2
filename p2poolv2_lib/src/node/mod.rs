@@ -20,6 +20,7 @@ pub mod request_sender;
 pub mod response_worker;
 pub mod validation_worker;
 mod weak_share_fetch;
+mod weak_share_fill;
 pub mod weak_share_worker;
 pub use crate::config::Config;
 pub mod actor;
@@ -99,8 +100,9 @@ pub enum SwarmSend<C> {
     /// Broadcast a full ShareBlock to connected peers, filtering by
     /// peer_block_knowledge. The actor records each recipient so that
     /// subsequent broadcasts of the same block are suppressed.
-    /// A validated share block to relay, with the Bitcoin Cash headers it
-    /// carries.
+    /// A share block to relay, with the Bitcoin Cash headers it carries: one
+    /// this node mined, once validated, or one a peer sent, once its header
+    /// checked out and before its body is validated.
     BroadcastBlock(ShareBlock, Vec<bitcoin::block::Header>),
     Disconnect(PeerId),
     /// Dial an address once, without reconnect tracking. Used for
@@ -437,6 +439,7 @@ impl Node {
             inbound_failures_total: self.request_response_handler.inbound_failures_total(),
             responses_dropped_total: self.request_response_handler.responses_dropped_total(),
             response_queue_depth: self.request_response_handler.response_queue_depth(),
+            share_relay: self.request_response_handler.share_relay(),
         }
     }
 

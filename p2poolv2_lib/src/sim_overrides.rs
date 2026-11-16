@@ -320,6 +320,26 @@ fn alter_weak_copy(share_block: &mut ShareBlock) {
     }
 }
 
+/// Whether a new share relayed to peers lists its carried weak shares by
+/// proof-of-work hash (`ShareWithWeakHashes`).
+///
+/// Production: always.
+/// Sim: unless this copy was altered ([`alter_weak_copy`]): an altered weak
+/// share keeps its proof-of-work hash, so listing the hashes would relay the
+/// honest share, and the altered copy goes whole instead.
+#[inline(always)]
+pub fn relays_weak_shares_by_hash(share_block: &crate::shares::share_block::ShareBlock) -> bool {
+    #[cfg(feature = "sim")]
+    {
+        crate::shares::weak::weak_root(&share_block.weak_shares) == share_block.header.weak_root
+    }
+    #[cfg(not(feature = "sim"))]
+    {
+        let _ = share_block;
+        true
+    }
+}
+
 // ---------------------------------------------------------------------------
 // refusing to carry others' weak shares
 // ---------------------------------------------------------------------------

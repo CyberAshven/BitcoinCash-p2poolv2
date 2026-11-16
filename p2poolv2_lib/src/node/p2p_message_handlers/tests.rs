@@ -1,7 +1,9 @@
 use super::*;
 use crate::node::SwarmSend;
 use crate::node::messages::InventoryMessage;
-use crate::node::p2p_message_handlers::receivers::block_receiver::create_block_receiver_channel;
+use crate::node::p2p_message_handlers::receivers::block_receiver::{
+    BlockReceiverEvent, create_block_receiver_channel,
+};
 use crate::node::request_response_handler::block_fetcher::BlockFetcherHandle;
 use crate::node::request_response_handler::block_fetcher::create_block_fetcher_channel;
 use crate::node::validation_worker::ValidationSender;
@@ -11,7 +13,7 @@ use crate::pool_difficulty::PoolDifficulty;
 #[mockall_double::double]
 use crate::shares::chain::chain_store_handle::ChainStoreHandle;
 use crate::shares::share_block::Txids;
-use crate::shares::validation::MockDefaultShareValidator;
+use crate::shares::validation::{MockDefaultShareValidator, ValidationError};
 use crate::test_utils::setup_header_chain_validation_mocks;
 use crate::test_utils::share_header_batch_with_empty_branches;
 use crate::test_utils::{
@@ -638,6 +640,119 @@ async fn test_handle_request_share_block_missing_parent_sends_getheaders() {
         swarm_rx.try_recv().is_err(),
         "No additional messages expected"
     );
+}
+
+/// Peer scoring under header-check forwarding. Every node relays a share
+/// once its header checks out, before its body is validated, so a peer
+/// relaying a share whose body later fails may only have forwarded it: the
+/// request is acknowledged and succeeds, so the peer is kept, and the body's
+/// verdict comes later from the validation worker, which disconnects no one
+/// (`test_consensus_failure_reports_invalid_block_to_organise_worker`). A
+/// share that fails the header check is relayed by no node, so only its
+/// miner sends it, and it is refused as before: the request fails and the
+/// peer's service disconnects the peer.
+#[tokio::test]
+async fn test_a_peer_relaying_a_share_whose_header_checks_out_is_kept_one_failing_it_is_refused() {
+    let forwarder = libp2p::PeerId::random();
+    let (swarm_tx, mut swarm_rx) = mpsc::channel(32);
+    let mut chain_store_handle = ChainStoreHandle::default();
+    chain_store_handle
+        .expect_share_block_exists()
+        .returning(|_| false);
+    chain_store_handle.expect_is_current().returning(|| false);
+    let mut share_validator = MockDefaultShareValidator::default();
+    share_validator
+        .expect_validate_share_header()
+        .returning(|_| Ok(()));
+    share_validator
+        .expect_validate_coinbase_proof()
+        .returning(|_, _| Ok(()));
+    share_validator
+        .expect_validate_block_size()
+        .returning(|_| Ok(()));
+    share_validator
+        .expect_validate_body_matches_header()
+        .returning(|_| Ok(()));
+    let (block_fetcher_handle, validation_tx, _) = test_handles();
+    let (block_receiver_handle, mut block_receiver_rx) = create_block_receiver_channel();
+    let block_receiver = tokio::spawn(async move {
+        if let Some(BlockReceiverEvent::ShareBlockReceived { result_tx, .. }) =
+            block_receiver_rx.recv().await
+        {
+            let _ = result_tx.send(Ok(()));
+        }
+    });
+
+    let forwarded = handle_request(RequestContext {
+        peer: forwarder,
+        request: Message::ShareBlock(TestShareBlockBuilder::new().nonce(1).build(), Vec::new()),
+        chain_store_handle,
+        response_channel: 1u32,
+        swarm_tx,
+        time_provider: TestTimeProvider::new(SystemTime::now()),
+        block_fetcher_handle,
+        validation_tx,
+        block_receiver_handle,
+        share_validator: Arc::new(share_validator),
+        share_transaction_pool: None,
+        weak_share_tx: None,
+    })
+    .await;
+
+    assert!(forwarded.is_ok(), "{}", forwarded.unwrap_err());
+    block_receiver.await.unwrap();
+    assert!(matches!(
+        swarm_rx.recv().await,
+        Some(SwarmSend::Response(1u32, Message::Ack))
+    ));
+    assert!(
+        swarm_rx.recv().await.is_none(),
+        "the forwarder must not be disconnected"
+    );
+
+    let miner = libp2p::PeerId::random();
+    let (swarm_tx, mut swarm_rx) = mpsc::channel(32);
+    let mut chain_store_handle = ChainStoreHandle::default();
+    chain_store_handle
+        .expect_share_block_exists()
+        .returning(|_| false);
+    let mut share_validator = MockDefaultShareValidator::default();
+    share_validator
+        .expect_validate_share_header()
+        .returning(|_| {
+            Err(ValidationError::consensus(
+                "Insufficient work: block hash does not meet share target",
+            ))
+        });
+    let (block_fetcher_handle, validation_tx, block_receiver_handle) = test_handles();
+
+    let refused = handle_request(RequestContext {
+        peer: miner,
+        request: Message::ShareBlock(TestShareBlockBuilder::new().nonce(2).build(), Vec::new()),
+        chain_store_handle,
+        response_channel: 2u32,
+        swarm_tx,
+        time_provider: TestTimeProvider::new(SystemTime::now()),
+        block_fetcher_handle,
+        validation_tx,
+        block_receiver_handle,
+        share_validator: Arc::new(share_validator),
+        share_transaction_pool: None,
+        weak_share_tx: None,
+    })
+    .await;
+
+    assert!(
+        refused
+            .unwrap_err()
+            .to_string()
+            .contains("Invalid share header"),
+        "a share failing the header check must fail the request"
+    );
+    assert!(matches!(
+        swarm_rx.recv().await,
+        Some(SwarmSend::Response(2u32, Message::Ack))
+    ));
 }
 
 #[tokio::test]
