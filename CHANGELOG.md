@@ -22,6 +22,11 @@ documented tables are regenerated, and where a conclusion moved the text
 says so. The study of the weak ratio's path with the asks (#124) is still
 the ten-minute run. No node code changes.
 
+A share a peer sent is relayed once its header checks out, before its body
+is validated, as BIP152 high-bandwidth peers relay compact blocks (#128).
+Uncles are now chosen from fully validated shares only. No share-chain rule,
+message or store change.
+
 P2Poolv2 takes templates from a node that serves no long polling, such as
 Knuth. Every Knuth template failed to parse ("missing field `longpollid`"),
 so the pool gave its miners no work. BIP 22 makes `longpollid` part of long

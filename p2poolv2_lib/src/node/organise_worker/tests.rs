@@ -210,6 +210,9 @@ async fn test_organise_worker_calls_organise_block() {
     let (organise_tx, organise_rx) = create_organise_channel();
     let mut mock_chain_handle = MockChainStoreHandle::new();
     mock_chain_handle
+        .expect_has_status()
+        .returning(|_, _| false);
+    mock_chain_handle
         .expect_get_candidate_blocks_needing_validation()
         .returning(|_, _| Ok(Vec::new()));
     // The confirmed-block follow-up reads each newly confirmed block
@@ -283,6 +286,9 @@ async fn test_organise_worker_calls_organise_block() {
 async fn test_organise_worker_marks_prune_window_block_block_valid() {
     let (organise_tx, organise_rx) = create_organise_channel();
     let mut mock_chain_handle = MockChainStoreHandle::new();
+    mock_chain_handle
+        .expect_has_status()
+        .returning(|_, _| false);
     mock_chain_handle
         .expect_get_candidate_blocks_needing_validation()
         .returning(|_, _| Ok(Vec::new()));
@@ -443,6 +449,9 @@ async fn test_organise_worker_advances_confirmed_after_consensus_invalidation() 
     let (organise_tx, organise_rx) = create_organise_channel();
     let mut mock_chain_handle = MockChainStoreHandle::new();
     mock_chain_handle
+        .expect_has_status()
+        .returning(|_, _| false);
+    mock_chain_handle
         .expect_get_candidate_blocks_needing_validation()
         .returning(|_, _| Ok(Vec::new()));
     // The confirmed-block follow-up reads the block back; this test is
@@ -591,6 +600,9 @@ async fn test_organise_worker_fatal_on_channel_closed() {
     let (organise_tx, organise_rx) = create_organise_channel();
     let mut mock_chain_handle = MockChainStoreHandle::new();
     mock_chain_handle
+        .expect_has_status()
+        .returning(|_, _| false);
+    mock_chain_handle
         .expect_get_candidate_blocks_needing_validation()
         .returning(|_, _| Ok(Vec::new()));
     // The confirmed-block follow-up reads each newly confirmed block
@@ -657,6 +669,9 @@ async fn test_organise_worker_continues_on_non_fatal_error() {
     let (tx, rx) = create_organise_channel();
     let mut mock_chain_handle = MockChainStoreHandle::new();
     mock_chain_handle
+        .expect_has_status()
+        .returning(|_, _| false);
+    mock_chain_handle
         .expect_get_candidate_blocks_needing_validation()
         .returning(|_, _| Ok(Vec::new()));
     // The confirmed-block follow-up reads each newly confirmed block
@@ -722,6 +737,9 @@ async fn test_organise_worker_continues_on_non_fatal_error() {
 async fn test_organise_worker_sends_new_notify_when_confirmed_catches_up() {
     let (organise_tx, organise_rx) = create_organise_channel();
     let mut mock_chain_handle = MockChainStoreHandle::new();
+    mock_chain_handle
+        .expect_has_status()
+        .returning(|_, _| false);
     mock_chain_handle
         .expect_get_candidate_blocks_needing_validation()
         .returning(|_, _| Ok(Vec::new()));
@@ -797,6 +815,9 @@ async fn test_organise_worker_sends_new_notify_when_confirmed_catches_up() {
 async fn test_organise_worker_no_new_notify_when_confirmed_below_candidate() {
     let (organise_tx, organise_rx) = create_organise_channel();
     let mut mock_chain_handle = MockChainStoreHandle::new();
+    mock_chain_handle
+        .expect_has_status()
+        .returning(|_, _| false);
     mock_chain_handle
         .expect_get_candidate_blocks_needing_validation()
         .returning(|_, _| Ok(Vec::new()));
@@ -939,6 +960,9 @@ async fn test_organise_worker_does_not_buffer_when_parent_at_confirmed_tip() {
     let (organise_tx, organise_rx) = create_organise_channel();
     let mut mock_chain_handle = MockChainStoreHandle::new();
     mock_chain_handle
+        .expect_has_status()
+        .returning(|_, _| false);
+    mock_chain_handle
         .expect_get_candidate_blocks_needing_validation()
         .returning(|_, _| Ok(Vec::new()));
     // The confirmed-block follow-up reads the block back; this test is
@@ -1017,6 +1041,9 @@ async fn test_organise_worker_does_not_buffer_when_parent_at_confirmed_tip() {
 async fn test_confirming_a_prefix_reports_every_block_at_its_own_height() {
     let (_organise_tx, organise_rx) = create_organise_channel();
     let mut mock_chain_handle = MockChainStoreHandle::new();
+    mock_chain_handle
+        .expect_has_status()
+        .returning(|_, _| false);
     mock_chain_handle
         .expect_get_candidate_blocks_needing_validation()
         .returning(|_, _| Ok(Vec::new()));
@@ -1112,6 +1139,9 @@ async fn test_confirmed_block_skips_effort_while_syncing() {
     let (organise_tx, organise_rx) = create_organise_channel();
     let mut mock_chain_handle = MockChainStoreHandle::new();
     mock_chain_handle
+        .expect_has_status()
+        .returning(|_, _| false);
+    mock_chain_handle
         .expect_get_candidate_blocks_needing_validation()
         .returning(|_, _| Ok(Vec::new()));
     let share = TestShareBlockBuilder::new().nonce(0xe9695791).build();
@@ -1197,6 +1227,9 @@ async fn test_confirmed_share_counts_its_weak_shares_as_carried_on_the_chain() {
     let (organise_tx, organise_rx) = create_organise_channel();
     let mut mock_chain_handle = MockChainStoreHandle::new();
     mock_chain_handle
+        .expect_has_status()
+        .returning(|_, _| false);
+    mock_chain_handle
         .expect_get_candidate_blocks_needing_validation()
         .returning(|_, _| Ok(Vec::new()));
     let share = TestShareBlockBuilder::new()
@@ -1277,6 +1310,9 @@ async fn test_confirmed_share_counts_its_weak_shares_as_carried_on_the_chain() {
 async fn test_confirmed_claimed_bitcoin_target_does_not_reset_block_effort() {
     let (organise_tx, organise_rx) = create_organise_channel();
     let mut mock_chain_handle = MockChainStoreHandle::new();
+    mock_chain_handle
+        .expect_has_status()
+        .returning(|_, _| false);
     mock_chain_handle
         .expect_get_candidate_blocks_needing_validation()
         .returning(|_, _| Ok(Vec::new()));
@@ -1361,6 +1397,9 @@ async fn test_confirmed_claimed_bitcoin_target_does_not_reset_block_effort() {
 async fn test_organise_worker_drains_buffered_block_after_promotion() {
     let (organise_tx, organise_rx) = create_organise_channel();
     let mut mock_chain_handle = MockChainStoreHandle::new();
+    mock_chain_handle
+        .expect_has_status()
+        .returning(|_, _| false);
     mock_chain_handle
         .expect_get_candidate_blocks_needing_validation()
         .returning(|_, _| Ok(Vec::new()));
@@ -1476,6 +1515,9 @@ async fn test_organise_worker_drains_buffered_block_after_promotion() {
 async fn test_stalled_confirmation_retries_the_block_wedging_it() {
     let (_organise_tx, organise_rx) = create_organise_channel();
     let mut mock_chain_handle = MockChainStoreHandle::new();
+    mock_chain_handle
+        .expect_has_status()
+        .returning(|_, _| false);
     mock_chain_handle
         .expect_get_candidate_blocks_needing_validation()
         .returning(|_, _| Ok(Vec::new()));
@@ -1725,6 +1767,9 @@ async fn test_transient_promote_failure_rebuffers_the_block() {
     let (_organise_tx, organise_rx) = create_organise_channel();
     let mut mock_chain_handle = MockChainStoreHandle::new();
     mock_chain_handle
+        .expect_has_status()
+        .returning(|_, _| false);
+    mock_chain_handle
         .expect_get_candidate_blocks_needing_validation()
         .returning(|_, _| Ok(Vec::new()));
     // The confirmed-block follow-up reads each newly confirmed block
@@ -1791,6 +1836,9 @@ async fn test_transient_promote_failure_rebuffers_the_block() {
 /// with the given validator.
 fn worker_in_pplns_zone(share_validator: Arc<dyn ShareValidator + Send + Sync>) -> OrganiseWorker {
     let mut mock_chain_handle = MockChainStoreHandle::new();
+    mock_chain_handle
+        .expect_has_status()
+        .returning(|_, _| false);
     mock_chain_handle
         .expect_get_candidate_blocks_needing_validation()
         .returning(|_, _| Ok(Vec::new()));
@@ -1882,6 +1930,65 @@ async fn test_content_validated_block_skips_the_full_content_checks() {
     assert!(matches!(outcome, ProcessOutcome::Advanced(_)));
 }
 
+/// A block already BlockValid, delivered again or drained again from the
+/// buffer, is promoted without its checks running again: neither the
+/// content checks nor the chain-context ones, which rebuild the coinbase of
+/// every weak share it carries. Promotion still runs, as it may now confirm.
+#[tokio::test]
+async fn test_block_valid_block_is_promoted_without_checking_it_again() {
+    let mut mock_validator = MockDefaultShareValidator::new();
+    mock_validator.expect_validate_share_block().never();
+    mock_validator.expect_validate_with_chain_context().never();
+
+    let share = TestShareBlockBuilder::new().nonce(0xe9695791).build();
+    let blockhash = share.block_hash();
+    let mut mock_chain_handle = MockChainStoreHandle::new();
+    mock_chain_handle
+        .expect_has_status()
+        .returning(move |hash, status| *hash == blockhash && status == Status::BlockValid);
+    mock_chain_handle
+        .expect_get_tip_height()
+        .returning(|| Ok(None));
+    mock_chain_handle
+        .expect_get_block_metadata()
+        .returning(|_| {
+            Ok(BlockMetadata {
+                expected_height: Some(5),
+                chain_work: bitcoin::Work::from_be_bytes([0u8; 32]),
+                status: Status::BlockValid,
+                chain: ChainMembership::Confirmed,
+            })
+        });
+    mock_chain_handle
+        .expect_get_candidate_tip_height()
+        .returning(|| Ok(Some(6)));
+    mock_chain_handle
+        .expect_mark_block_valid()
+        .times(1)
+        .returning(|_| Ok(()));
+    mock_chain_handle
+        .expect_promote_block()
+        .times(1)
+        .returning(|_| Ok(None));
+
+    let (_organise_tx, organise_rx) = create_organise_channel();
+    let monitoring_tx = create_monitoring_event_channel();
+    let (notify_tx, _notify_rx) = create_test_notify_channel();
+    let mut worker = OrganiseWorker::new(
+        organise_rx,
+        create_validation_channel().0,
+        mock_chain_handle,
+        monitoring_tx,
+        notify_tx,
+        create_test_metrics_handle(),
+        create_test_pplns_window(),
+        Arc::new(mock_validator),
+    );
+
+    let outcome = worker.process_share_block(share, true).await.unwrap();
+    assert!(matches!(outcome, ProcessOutcome::Advanced(_)));
+}
+
 /// A failed mark_invalid must not be reported as an invalidation.
 ///
 /// The whole batch is dropped uncommitted, so the block keeps its
@@ -1894,6 +2001,9 @@ async fn test_content_validated_block_skips_the_full_content_checks() {
 async fn test_failed_mark_invalid_rebuffers_instead_of_reporting_invalidated() {
     let (_organise_tx, organise_rx) = create_organise_channel();
     let mut mock_chain_handle = MockChainStoreHandle::new();
+    mock_chain_handle
+        .expect_has_status()
+        .returning(|_, _| false);
     mock_chain_handle
         .expect_get_candidate_blocks_needing_validation()
         .returning(|_, _| Ok(Vec::new()));
@@ -2060,6 +2170,9 @@ async fn test_unresolvable_validation_error_drops_without_buffering() {
     let (_organise_tx, organise_rx) = create_organise_channel();
     let mut mock_chain_handle = MockChainStoreHandle::new();
     mock_chain_handle
+        .expect_has_status()
+        .returning(|_, _| false);
+    mock_chain_handle
         .expect_get_candidate_blocks_needing_validation()
         .returning(|_, _| Ok(Vec::new()));
     // The confirmed-block follow-up reads each newly confirmed block
@@ -2130,6 +2243,9 @@ async fn test_invalid_status_transition_does_not_rebuffer() {
     let (_organise_tx, organise_rx) = create_organise_channel();
     let mut mock_chain_handle = MockChainStoreHandle::new();
     mock_chain_handle
+        .expect_has_status()
+        .returning(|_, _| false);
+    mock_chain_handle
         .expect_get_candidate_blocks_needing_validation()
         .returning(|_, _| Ok(Vec::new()));
     // The confirmed-block follow-up reads each newly confirmed block
@@ -2192,6 +2308,9 @@ async fn test_drain_reattempts_all_blocks_sharing_a_parent_height() {
     // height, not a single block.
     let (_organise_tx, organise_rx) = create_organise_channel();
     let mut mock_chain_handle = MockChainStoreHandle::new();
+    mock_chain_handle
+        .expect_has_status()
+        .returning(|_, _| false);
     mock_chain_handle
         .expect_get_candidate_blocks_needing_validation()
         .returning(|_, _| Ok(Vec::new()));
@@ -2285,6 +2404,9 @@ async fn test_out_of_order_child_becomes_valid_after_parent() {
 
     let (organise_tx, organise_rx) = create_organise_channel();
     let mut mock_chain_handle = MockChainStoreHandle::new();
+    mock_chain_handle
+        .expect_has_status()
+        .returning(|_, _| false);
     mock_chain_handle
         .expect_get_candidate_blocks_needing_validation()
         .returning(|_, _| Ok(Vec::new()));
@@ -2426,6 +2548,9 @@ async fn test_buffered_follow_up_drains_intermediate_confirmed_heights() {
     let (_organise_tx, organise_rx) = create_organise_channel();
     let mut mock_chain_handle = MockChainStoreHandle::new();
     mock_chain_handle
+        .expect_has_status()
+        .returning(|_, _| false);
+    mock_chain_handle
         .expect_get_candidate_blocks_needing_validation()
         .returning(|_, _| Ok(Vec::new()));
     // The confirmed-block follow-up reads the block back; this test is
@@ -2530,6 +2655,9 @@ async fn test_buffered_follow_up_drains_intermediate_confirmed_heights() {
 async fn test_organise_worker_fatal_on_store_access_validation_error() {
     let (organise_tx, organise_rx) = create_organise_channel();
     let mut mock_chain_handle = MockChainStoreHandle::new();
+    mock_chain_handle
+        .expect_has_status()
+        .returning(|_, _| false);
     mock_chain_handle
         .expect_get_candidate_blocks_needing_validation()
         .returning(|_, _| Ok(Vec::new()));

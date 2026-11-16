@@ -642,6 +642,11 @@ second the idea lets 1,000 nodes carry for the stale rate they have today.
   proof of work and header check out (1 ms, an estimate), which needs the
   parent's and uncles' headers checked there, and validates the body after.
   It mines on, and names as an uncle, only a share it has fully validated.
+  Since 2026-11-16 the node does this for a share a peer sent: it relays the
+  share once it passes the checks made before storing it, with the parent and
+  uncles stored, and still validates a share its own miners found before
+  sending it ("Relay after the header check" in
+  `docs/architecture/share-processing-pipeline.md`).
 - **4. Fewer hops:** 16, 32 or 64 peers per node instead of 8, in the same
   small-world graph. A push to `k` peers still shares the node's upload, so
   more peers mean fewer hops but longer pushes.
