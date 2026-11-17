@@ -64,6 +64,7 @@ pub async fn handle_stratum_share(
         template_merkle_branches,
         bitcoin_coinbase,
         weak_shares: weak_shares.to_vec(),
+        pruned_weak_shares: None,
     };
 
     debug!(

@@ -168,7 +168,7 @@ fn the_default_budget_holds_the_count_bound_of_honest_shares() {
     assert_eq!(ORGANISE_CHANNEL_BYTES, 64 * 1024 * 1024);
     // 512 shares of 128 KiB: honest shares meet the count bound first.
     const { assert!(ORGANISE_CHANNEL_BYTES >= ORGANISE_CHANNEL_CAPACITY * 128 * 1024) };
-    // At least 51 of the largest shares a peer can send.
-    const { assert!(ORGANISE_CHANNEL_BYTES / MAX_P2P_MESSAGE_SIZE >= 51) };
+    // At least 30 of the largest shares a peer can send.
+    const { assert!(ORGANISE_CHANNEL_BYTES / MAX_P2P_MESSAGE_SIZE >= 30) };
     assert!(u32::try_from(ORGANISE_CHANNEL_BYTES).is_ok());
 }

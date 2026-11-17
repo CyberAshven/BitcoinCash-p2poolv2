@@ -579,6 +579,31 @@ struct ShareLookupOutput {
     template_merkle_branches_count: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     transactions: Option<Vec<String>>,
+    /// What the store holds of the weak shares the share carries: "whole",
+    /// "pruned" (their summary, kept with the body once they are pruned one
+    /// payout depth below the tip) or "none" (the body was pruned). Only
+    /// serialized for a share carrying weak shares.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    weak_shares: Option<&'static str>,
+}
+
+/// What `store` holds of the weak shares of the share `blockhash`, whose
+/// header commits `weak_count` of them (`ShareLookupOutput::weak_shares`).
+fn stored_weak_shares(
+    store: &Store,
+    blockhash: &BlockHash,
+    weak_count: u16,
+) -> Result<Option<&'static str>, Box<dyn Error>> {
+    if weak_count == 0 {
+        return Ok(None);
+    }
+    if !store.get_weak_shares(blockhash)?.is_empty() {
+        return Ok(Some("whole"));
+    }
+    if store.get_pruned_weak_shares(blockhash)?.is_some() {
+        return Ok(Some("pruned"));
+    }
+    Ok(Some("none"))
 }
 
 fn build_share_output(
@@ -664,6 +689,7 @@ fn build_share_output(
         bitcoin_header: bitcoin_header_output,
         template_merkle_branches_count,
         transactions: transaction_ids,
+        weak_shares: stored_weak_shares(store, blockhash, share_header.weak_count)?,
     })
 }
 
@@ -969,6 +995,7 @@ mod tests {
             timestamp: 200,
             bits: CompactTarget::from_consensus(0x1d00ffff),
             weak_count: 0,
+            weak_asking: 0,
             uncles: vec![UncleInfo {
                 blockhash: BlockHash::all_zeros(),
                 prev_blockhash: BlockHash::all_zeros(),
@@ -1114,6 +1141,7 @@ mod tests {
             timestamp: 1700000000,
             bits: CompactTarget::from_consensus(0x1d00ffff),
             weak_count: 0,
+            weak_asking: 0,
             uncles: vec![p2poolv2_lib::store::dag_store::UncleInfo {
                 blockhash: BlockHash::from_str(
                     "00000000000000000000000000000000000000000000000000000000000000ff",

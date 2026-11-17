@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Share-chain rule change on Bitcoin Cash, a flag day: P2Pool follows Bitcoin
 Cash's one-minute blocks (CHIP-2025-03) the way BCHN does (protocol
 segments `bch-prev-1off-ticks` and `mm2-roots-asert8-ticks`, store format
-10). Nodes start from fresh stores: delete the share-chain store directory
+12). Nodes start from fresh stores: delete the share-chain store directory
 and restart. Chipnet activated one-minute blocks on 2026-11-15; block
 332,450 is its last ten-minute block. Mainnet, testnet, scalenet and regtest
 switch at median time past 1810382400 (2027-05-15 12:00 UTC), as in BCHN.
@@ -88,6 +88,24 @@ switch at median time past 1810382400 (2027-05-15 12:00 UTC), as in BCHN.
 The CHIP's ASERT and tick vectors pass, and real chipnet headers 332,429 to
 332,460 fed through the header path get the ticks and next intervals Knuth
 reports and require each block's real nBits.
+
+Whole weak shares are pruned one payout depth below the tip (#129, on #118's
+flag day): protocol segment `weak4-640-100-48-256-320-64-4096-64-32-summary`,
+store format 11. The weak root commits the weak shares' summary, so a deeper
+body is served with the summary and checked against the header; a node keeps
+4.3 GB of weak shares instead of 7.4 at 32 a share.
+`store.keep_whole_weak_shares = true` keeps them whole, for an archive.
+
+A syncing Bitcoin Cash node no longer marks an honest share invalid over a
+weak share paid from shares it never fetched: the body prune depth adds
+`WEAK_DEPTH` (242,174 shares, 414 in the sim). No share-chain rule change.
+
+Weak shares follow the asks (#118, issue #79 part 6), a flag day: protocol
+segment `weak4-640-100-48-256-320-64-4096-64-32`, store format 10, new
+genesis shares. A share header counts the weak shares it carries that ask
+for an easier target (`weak_asking`); while more than one in 64 ask, the weak
+ratio rises (up to 4096) and a share may carry more than 64 of them (up to
+640). A new chain starts at a weak ratio of 32.
 
 Upstream P2Poolv2 is merged through fdbf85df (its 0.18.0 and two commits
 after it). A node now dials only the host names listed in `dial_peers`, never

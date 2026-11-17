@@ -92,6 +92,9 @@ pub struct ShareInfoDisplay {
     pub bits: CompactTarget,
     /// How many weak shares this share's body carries, as its header commits.
     pub weak_count: u16,
+    /// How many of those weak shares ask for an easier weak target, as its
+    /// header commits.
+    pub weak_asking: u16,
     pub uncles: Vec<UncleInfoDisplay>,
 }
 
@@ -113,6 +116,7 @@ impl ShareInfoDisplay {
             timestamp: share.timestamp,
             bits: share.bits,
             weak_count: share.weak_count,
+            weak_asking: share.weak_asking,
             uncles: share
                 .uncles
                 .iter()
@@ -310,6 +314,7 @@ mod tests {
             timestamp: 200,
             bits: CompactTarget::from_consensus(0x1d00ffff),
             weak_count: 0,
+            weak_asking: 0,
             uncles: vec![UncleInfo {
                 blockhash: BlockHash::all_zeros(),
                 prev_blockhash: BlockHash::all_zeros(),

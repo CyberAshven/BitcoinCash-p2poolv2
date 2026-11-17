@@ -69,6 +69,9 @@ pub struct ShareInfo {
     /// How many weak shares this share's body carries, as its header commits.
     /// Only carriers have one; uncles never do.
     pub weak_count: u16,
+    /// How many of those weak shares ask for an easier weak target, as its
+    /// header commits.
+    pub weak_asking: u16,
     pub uncles: Vec<UncleInfo>,
 }
 
@@ -729,6 +732,7 @@ impl Store {
                 timestamp: header.time,
                 bits: header.bits,
                 weak_count: header.weak_count,
+                weak_asking: header.weak_asking,
                 uncles,
             });
         }
