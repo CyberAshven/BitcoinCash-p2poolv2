@@ -255,6 +255,39 @@ large templates extension`. Any other provider is asked for each template's
 transactions, and a template is then limited to 65,535 transactions in one
 16 MiB message.
 
+#### A Template Provider over Tor or I2P
+
+A provider behind a Tor onion service or an I2P server tunnel is reached
+through that network's SOCKS5 proxy on this computer:
+
+```toml
+template_source = "sv2"
+template_provider_address = "<56 characters>.onion:3335"
+template_provider_authority_public_key = "9b..."
+template_provider_proxy = "127.0.0.1:9050"   # Tor's SOCKS port
+```
+
+For I2P, give the provider's `.b32.i2p` name with the port of its server
+tunnel, and the router's SOCKS proxy (i2pd: `127.0.0.1:4447`).
+
+- The provider's name goes to the proxy as a name. It is never resolved on
+  this computer, and when the proxy cannot reach the provider the node does
+  not connect directly: it waits and tries the proxy again.
+- Each connection brings its own SOCKS username, so Tor puts it on its own
+  circuit and a reconnect does not ride the circuit that just failed.
+- The authority public key is always required with a proxy.
+- A redirect (`Reconnect`) from the provider is followed through the proxy
+  too.
+- The provider has 20 seconds to accept a connection through the proxy and
+  15 seconds for each setup answer; an I2P name has 90 and 45 seconds. A
+  provider the node connects to directly has 10 seconds for each.
+
+The provider needs no setting for this. Its operator points an onion
+service (`HiddenServicePort 3335 127.0.0.1:3335` in `torrc`) or an i2pd
+server tunnel at its Template Distribution port.
+
+`[bitcoinrpc]` still names a node this computer reaches itself.
+
 ## 4. Point miners at the node
 
 Every option (`p2p=`, `d=`, `th=` and the Stratum V2 identity) is in

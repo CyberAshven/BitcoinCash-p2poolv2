@@ -495,6 +495,13 @@ pub struct StratumConfig<State = Raw> {
     /// unless the provider listens on this computer (a loopback address).
     #[serde(default)]
     pub template_provider_authority_public_key: Option<String>,
+    /// `HOST:PORT` of a SOCKS5 proxy the Template Provider is reached
+    /// through: Tor's SOCKS port for a `.onion` address, an I2P router's
+    /// SOCKS proxy for a `.i2p` address. The provider's name goes to the
+    /// proxy and is never resolved on this computer. Needs
+    /// `template_provider_authority_public_key`.
+    #[serde(default)]
+    pub template_provider_proxy: Option<String>,
     /// The version mask to use for version-rolling
     #[serde(deserialize_with = "deserialize_version_mask")]
     pub version_mask: i32,
@@ -756,6 +763,7 @@ impl StratumConfig<Raw> {
             self.template_source,
             self.template_provider_address.as_deref(),
             self.template_provider_authority_public_key.as_deref(),
+            self.template_provider_proxy.as_deref(),
         )?;
         let sv2_coinbase_only_networks = parse_client_networks(&self.sv2_coinbase_only_from)?;
 
@@ -788,6 +796,7 @@ impl StratumConfig<Raw> {
             template_source: self.template_source,
             template_provider_address: self.template_provider_address,
             template_provider_authority_public_key: self.template_provider_authority_public_key,
+            template_provider_proxy: self.template_provider_proxy,
             version_mask: self.version_mask,
             ignore_difficulty: self.ignore_difficulty,
             pool_signature: self.pool_signature,
@@ -893,14 +902,19 @@ pub struct TemplateProvider {
     pub authority_public_key: Option<[u8; 32]>,
     /// The Bitcoin Cash network its templates must be for.
     pub network: BitcoinCashNetwork,
+    /// `HOST:PORT` of the SOCKS5 proxy every connection to the provider is
+    /// opened through, a redirected one included. `None` connects directly.
+    pub proxy: Option<String>,
 }
 
 impl TemplateProvider {
     /// The provider a `Reconnect` from this one names: `host` and `port`,
     /// or this provider's own when `host` is empty or `port` is 0.
     ///
-    /// The pinned key and the network carry over, so a provider spoken to
-    /// without encryption may only redirect to this computer.
+    /// The pinned key, the network and the proxy carry over, so a provider
+    /// spoken to without encryption may only redirect to this computer, and
+    /// one reached through a proxy never redirects the node to a direct
+    /// connection. Without a proxy, a Tor or I2P name cannot be reached.
     pub fn redirected(&self, host: &str, port: u16) -> Result<TemplateProvider, ConfigError> {
         let (current_host, current_port) = self
             .address
@@ -921,6 +935,13 @@ impl TemplateProvider {
                 ),
             });
         }
+        if self.proxy.is_none() && is_overlay_host(host) {
+            return Err(ConfigError {
+                message: format!(
+                    "a Template Provider reached without a proxy may not redirect to {host}"
+                ),
+            });
+        }
         let address = if host.contains(':') && !host.starts_with('[') {
             format!("[{host}]:{port}")
         } else {
@@ -930,6 +951,7 @@ impl TemplateProvider {
             address,
             authority_public_key: self.authority_public_key,
             network: self.network,
+            proxy: self.proxy.clone(),
         })
     }
 }
@@ -956,17 +978,23 @@ fn validate_light_templates(chain: Chain, source: TemplateSource) -> Result<(), 
 /// is on this computer: the specification allows unencrypted frames only
 /// between local roles, and an unauthenticated provider could keep every
 /// found block.
+///
+/// `proxy` is a SOCKS5 proxy the provider is reached through. It always
+/// needs the provider's key: the proxy, and a Tor exit behind it, carry the
+/// connection. A `.onion` or `.i2p` address needs a proxy, since nothing
+/// else can reach it and the name must not go to this computer's resolver.
 fn parse_template_provider(
     chain: Chain,
     bitcoin_cash_network: Option<BitcoinCashNetwork>,
     source: TemplateSource,
     address: Option<&str>,
     authority_public_key: Option<&str>,
+    proxy: Option<&str>,
 ) -> Result<Option<TemplateProvider>, ConfigError> {
     if source != TemplateSource::Sv2 {
-        if address.is_some() || authority_public_key.is_some() {
+        if address.is_some() || authority_public_key.is_some() || proxy.is_some() {
             return Err(ConfigError {
-                message: "template_provider_address and template_provider_authority_public_key need template_source = \"sv2\"".to_string(),
+                message: "template_provider_address, template_provider_authority_public_key and template_provider_proxy need template_source = \"sv2\"".to_string(),
             });
         }
         return Ok(None);
@@ -1001,11 +1029,50 @@ fn parse_template_provider(
             ),
         });
     }
+    match proxy {
+        Some(proxy) => {
+            if !is_host_port(proxy) {
+                return Err(ConfigError {
+                    message: format!("template_provider_proxy must be HOST:PORT, got {proxy}"),
+                });
+            }
+            if authority_public_key.is_none() {
+                return Err(ConfigError {
+                    message: format!(
+                        "template_provider_authority_public_key is required for a Template Provider reached through a proxy ({proxy})"
+                    ),
+                });
+            }
+        }
+        None if is_overlay_host(host) => {
+            return Err(ConfigError {
+                message: format!(
+                    "template_provider_proxy is required for a Tor or I2P Template Provider ({address})"
+                ),
+            });
+        }
+        None => (),
+    }
     Ok(Some(TemplateProvider {
         address: address.to_string(),
         authority_public_key,
         network,
+        proxy: proxy.map(str::to_string),
     }))
+}
+
+/// Whether `address` is `HOST:PORT` with a host and a port number.
+fn is_host_port(address: &str) -> bool {
+    address
+        .rsplit_once(':')
+        .is_some_and(|(host, port)| !host.is_empty() && port.parse::<u16>().is_ok())
+}
+
+/// Whether `host` is a Tor or I2P name, which only a proxy of that network
+/// can reach.
+fn is_overlay_host(host: &str) -> bool {
+    let host = host.to_ascii_lowercase();
+    host.ends_with(".onion") || host.ends_with(".i2p")
 }
 
 /// Whether `host` names this computer: `localhost` or a loopback IP,
@@ -1235,6 +1302,7 @@ impl StratumConfig<Raw> {
             template_source: TemplateSource::Rpc,
             template_provider_address: None,
             template_provider_authority_public_key: None,
+            template_provider_proxy: None,
             version_mask: DEFAULT_VERSION_MASK,
             ignore_difficulty: None,
             pool_signature: None,
@@ -3528,6 +3596,7 @@ mod template_provider_tests {
                 address: "127.0.0.1:8442".to_string(),
                 authority_public_key: None,
                 network: BitcoinCashNetwork::Regtest,
+                proxy: None,
             })
         );
     }
@@ -3633,6 +3702,7 @@ mod template_provider_tests {
             address: "127.0.0.1:8442".to_string(),
             authority_public_key: None,
             network: BitcoinCashNetwork::Regtest,
+            proxy: None,
         };
         assert_eq!(provider.redirected("", 0).unwrap(), provider);
     }
@@ -3643,6 +3713,7 @@ mod template_provider_tests {
             address: "127.0.0.1:8442".to_string(),
             authority_public_key: None,
             network: BitcoinCashNetwork::Regtest,
+            proxy: None,
         };
         assert_eq!(
             provider.redirected("::1", 8443).unwrap().address,
@@ -3656,6 +3727,7 @@ mod template_provider_tests {
             address: "127.0.0.1:8442".to_string(),
             authority_public_key: None,
             network: BitcoinCashNetwork::Regtest,
+            proxy: None,
         };
         let error = provider.redirected("192.0.2.7", 8442).unwrap_err();
         assert!(
@@ -3671,6 +3743,7 @@ mod template_provider_tests {
             address: "127.0.0.1:8442".to_string(),
             authority_public_key: Some([7; 32]),
             network: BitcoinCashNetwork::Regtest,
+            proxy: None,
         };
         assert_eq!(
             provider.redirected("node.example", 0).unwrap(),
@@ -3678,7 +3751,108 @@ mod template_provider_tests {
                 address: "node.example:8442".to_string(),
                 authority_public_key: Some([7; 32]),
                 network: BitcoinCashNetwork::Regtest,
+                proxy: None,
             }
+        );
+    }
+
+    const ONION_PROVIDER: &str =
+        "abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrstuvwx.onion:3335";
+
+    #[test]
+    fn a_tor_provider_is_reached_through_the_proxy_with_its_key() {
+        let mut config = bitcoin_cash_config();
+        config.template_source = TemplateSource::Sv2;
+        config.template_provider_address = Some(ONION_PROVIDER.to_string());
+        config.template_provider_authority_public_key = Some(PUBLIC_KEY.to_string());
+        config.template_provider_proxy = Some("127.0.0.1:9050".to_string());
+        let parsed = config.parse().unwrap();
+        let provider = parsed.template_provider().unwrap();
+        assert_eq!(provider.address, ONION_PROVIDER);
+        assert_eq!(provider.proxy.as_deref(), Some("127.0.0.1:9050"));
+    }
+
+    #[test]
+    fn a_tor_or_i2p_provider_without_a_proxy_is_rejected() {
+        for address in [ONION_PROVIDER, "abcdefgh.b32.i2p:3335"] {
+            let mut config = bitcoin_cash_config();
+            config.template_source = TemplateSource::Sv2;
+            config.template_provider_address = Some(address.to_string());
+            config.template_provider_authority_public_key = Some(PUBLIC_KEY.to_string());
+            let error = config.parse().unwrap_err();
+            assert!(
+                error
+                    .message
+                    .contains("template_provider_proxy is required"),
+                "{}",
+                error.message
+            );
+        }
+    }
+
+    /// The proxy carries the connection, so it is never spoken to without
+    /// the provider's key, a provider on this computer included.
+    #[test]
+    fn a_provider_behind_a_proxy_without_a_key_is_rejected() {
+        let mut config = bitcoin_cash_config();
+        config.template_source = TemplateSource::Sv2;
+        config.template_provider_address = Some("127.0.0.1:8442".to_string());
+        config.template_provider_proxy = Some("127.0.0.1:9050".to_string());
+        let error = config.parse().unwrap_err();
+        assert!(
+            error.message.contains("reached through a proxy"),
+            "{}",
+            error.message
+        );
+    }
+
+    #[test]
+    fn a_proxy_without_a_port_or_without_sv2_templates_is_rejected() {
+        let mut config = bitcoin_cash_config();
+        config.template_source = TemplateSource::Sv2;
+        config.template_provider_address = Some(ONION_PROVIDER.to_string());
+        config.template_provider_authority_public_key = Some(PUBLIC_KEY.to_string());
+        config.template_provider_proxy = Some("127.0.0.1".to_string());
+        let error = config.parse().unwrap_err();
+        assert!(error.message.contains("HOST:PORT"), "{}", error.message);
+
+        let mut config = bitcoin_cash_config();
+        config.template_provider_proxy = Some("127.0.0.1:9050".to_string());
+        let error = config.parse().unwrap_err();
+        assert!(
+            error.message.contains("template_source = \"sv2\""),
+            "{}",
+            error.message
+        );
+    }
+
+    /// A redirect stays behind the proxy, and a provider reached directly
+    /// cannot send the node to a name only a proxy reaches.
+    #[test]
+    fn a_redirect_keeps_the_proxy_and_needs_one_for_a_tor_name() {
+        let behind_proxy = TemplateProvider {
+            address: ONION_PROVIDER.to_string(),
+            authority_public_key: Some([7; 32]),
+            network: BitcoinCashNetwork::Regtest,
+            proxy: Some("127.0.0.1:9050".to_string()),
+        };
+        let redirected = behind_proxy.redirected("node.example", 8442).unwrap();
+        assert_eq!(redirected.address, "node.example:8442");
+        assert_eq!(redirected.proxy.as_deref(), Some("127.0.0.1:9050"));
+
+        let direct = TemplateProvider {
+            address: "node.example:8442".to_string(),
+            authority_public_key: Some([7; 32]),
+            network: BitcoinCashNetwork::Regtest,
+            proxy: None,
+        };
+        let error = direct
+            .redirected(ONION_PROVIDER.trim_end_matches(":3335"), 3335)
+            .unwrap_err();
+        assert!(
+            error.message.contains("without a proxy"),
+            "{}",
+            error.message
         );
     }
 
