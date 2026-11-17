@@ -121,6 +121,9 @@ zmqpubhashblock = "tcp://127.0.0.1:28332"
 # runs the Noise handshake; it is required unless the provider is on this
 # computer (a loopback address).
 # template_provider_authority_public_key = "9b..."
+# HOST:PORT of a SOCKS5 proxy to reach the provider through (Tor, or an I2P
+# router's SOCKS proxy). Needs the provider's authority public key.
+# template_provider_proxy = "127.0.0.1:9050"
 # The share-chain network can be "main", "testnet4" or "signet".
 # On Bitcoin this also selects the bech32m share address. On Bitcoin Cash it
 # is ignored and derived from bitcoin_cash_network, so every node on one
