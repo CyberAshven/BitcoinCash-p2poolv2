@@ -167,8 +167,8 @@ month, so the band changes nothing in a pool at 10% of Bitcoin Cash or
 more; and a coinbase at the default payout level pays at most 1,788
 outputs, while no level reaches the payout tree from the reward alone. The
 documented tables are regenerated, and where a conclusion moved the text
-says so. The study of the weak ratio's path with the asks (#124) is still
-the ten-minute run. No node code changes.
+says so. The study of the weak ratio's path with the asks (#124) is rerun
+too, and its rule v4 still fixes the start. No node code changes.
 
 A share a peer sent is relayed once its header checks out, before its body
 is validated, as BIP152 high-bandwidth peers relay compact blocks (#128).
