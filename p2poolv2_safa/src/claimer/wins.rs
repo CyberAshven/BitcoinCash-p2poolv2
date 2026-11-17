@@ -67,12 +67,15 @@ pub fn parse_win(line: &[u8], category_wire: &str) -> Result<Option<Win>, String
     Ok(Some(win))
 }
 
-/// Select distinct, unattempted wins above the vault state and at the tip or below.
+/// Select distinct, unattempted wins above the vault state and at `claimable`
+/// or below: the highest coinbase height whose claim's lock is final in the
+/// next block (`NetworkParameters::last_claimable_height`), which is the tip
+/// while blocks are ten minutes.
 /// Height is the primary ordering, with time and identity breaking ties.
 pub fn candidates(
     wins: &[Win],
     state_height: u32,
-    tip: u32,
+    claimable: u32,
     claimed: &[String],
     dropped: &[String],
 ) -> Vec<Win> {
@@ -83,7 +86,7 @@ pub fn candidates(
         .filter(|(height, win)| {
             let identity = win.id();
             *height > state_height
-                && *height <= tip
+                && *height <= claimable
                 && !claimed.contains(&identity)
                 && !dropped.contains(&identity)
                 && distinct.insert(identity)
@@ -186,7 +189,6 @@ pub fn build_win_claim(
         "split": split,
         "proof": win.proof,
         "fee_rate": fee_rate,
-        "locktime": win.height().map_err(ClaimError::Invalid)?,
     });
     match claim(covenant, deployment, &input) {
         Ok(claim) => Ok(claim),

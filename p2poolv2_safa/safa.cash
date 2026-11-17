@@ -313,6 +313,22 @@
     OP_ENDIF
 > <20> OP_DEFINE
 
+// Function 21: the lock height of a claim on a coinbase at a block height.
+// CHIP-2025-03 counts a lock height in units of 600 ticks: a transaction
+// locked to L is final in the first block whose ticks pass 600 * L. This is
+// the coinbase block's ticks in those units, rounded up, by the pinned
+// switch: the block height itself up to SWITCH_HEIGHT, and one unit for
+// every 600 / SWITCH_INTERVAL blocks after it. The claim is then never final
+// in the coinbase's own block or before it, and is final at most
+// 600 / SWITCH_INTERVAL blocks after it.
+// [height] -> [lock_height]
+<
+    OP_DUP <{{SWITCH_HEIGHT}}> OP_MIN
+    OP_TUCK OP_SUB <{{SWITCH_INTERVAL}}> OP_MUL
+    <599> OP_ADD <600> OP_DIV
+    OP_ADD
+> <21> OP_DEFINE
+
 // == main ==
 // Every spend returns the vault: the same locking bytecode, category and
 // mutable NFT at the input's own output index, with a 16-byte state.
@@ -336,7 +352,8 @@ OP_ELSE
     // split payout header h salt aux head tail branch
     OP_2 OP_PICK <2> OP_INVOKE
     OP_DUP <500000000> OP_LESSTHAN OP_VERIFY
-    OP_CHECKLOCKTIMEVERIFY
+    // ... H: the claim is locked to its coinbase block's ticks.
+    OP_DUP <21> OP_INVOKE OP_CHECKLOCKTIMEVERIFY OP_DROP
     OP_0 OP_UTXOTOKENCOMMITMENT <4> OP_SPLIT OP_NIP <4> OP_SPLIT OP_DROP <0x00> OP_CAT OP_BIN2NUM
     OP_OVER OP_SWAP OP_SUB
     OP_DUP OP_0 OP_GREATERTHAN OP_VERIFY

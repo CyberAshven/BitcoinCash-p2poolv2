@@ -70,9 +70,16 @@ cb_branch`, `h ≤ 16`, `d ≤ 25`, nothing trailing). The covenant:
 
 1. reads the BIP34 height `H` from the fixed-shape coinbase head (a minimal,
    positive push of 1 to 5 bytes), requires `H < 500,000,000` and runs
-   `<H> OP_CHECKLOCKTIMEVERIFY`, so the claim's lock time is a block height
-   at or above `H` and the coinbase cannot claim a height the chain has not
-   reached. It requires `state_height < H`, so a height is never reused;
+   `<L> OP_CHECKLOCKTIMEVERIFY` with `L` the lock height of block `H`, so
+   the coinbase cannot claim a height the chain has not reached. A Bitcoin
+   Cash lock height counts units of 600 ticks (CHIP-2025-03): a transaction
+   locked to `L` is final in the first block whose ticks pass `600 × L`.
+   `L` is block `H`'s ticks in those units, rounded up, by the pinned
+   switch: `H` itself up to the switch block, and one more unit for every
+   ten one-minute blocks after it. A claim is therefore never final in its
+   coinbase's own block or before it, and is final at most ten one-minute
+   blocks after it. It requires `state_height < H`, so a height is never
+   reused;
 2. eases the state's target by the blocks since the last claim, the SAFA
    draft's DAA with its age capped at 288 blocks:
    `target × (⌊min(H − state_height, 288) × 5000 / threads⌋ + 5000) / 10000`,
@@ -159,24 +166,25 @@ mined for that state still claims afterwards.
 ## Measured size and cost
 
 Measured by `tests/claims.rs` in the standard VM (chipnet, 4 threads), and
-the tests pin them. Counting ticks added 34 bytes to the redeem script and
-about 2,600 to a claim's operation cost; the Node tool had measured the
-values before that with JavaScript Libauth, and the Rust VM gave the same:
+the tests pin them. Counting ticks, in the band and in the lock height,
+added 63 bytes to the redeem script and about 4,800 to a claim's operation
+cost; the Node tool had measured the values before that with JavaScript
+Libauth, and the Rust VM gave the same:
 
 | Claim | Unlocking bytes | Op-cost / limit | Hash iterations / limit |
 |---|---|---|---|
-| `h` 0, `d` 0, no split | 1,629 | 124,341 / 1,336,000 | 40 / 835 |
-| `h` 1, `d` 1, split | 1,763 | 138,632 / 1,443,200 | 53 / 902 |
-| `h` 16, `d` 25, split | 3,011 | 260,234 / 2,441,600 | 153 / 1,526 |
-| `h` 16, `d` 25, split, fallback band | 3,011 | 269,844 / 2,441,600 | 153 / 1,526 |
-| `h` 16, `d` 25, split, 10,000-byte unlock | 10,000 | 372,022 / 8,032,800 | 262 / 5,020 |
+| `h` 0, `d` 0, no split | 1,658 | 126,521 / 1,359,200 | 41 / 849 |
+| `h` 1, `d` 1, split | 1,792 | 140,812 / 1,466,400 | 54 / 916 |
+| `h` 16, `d` 25, split | 3,040 | 262,415 / 2,464,800 | 154 / 1,540 |
+| `h` 16, `d` 25, split, fallback band | 3,040 | 272,024 / 2,464,800 | 154 / 1,540 |
+| `h` 16, `d` 25, split, 10,000-byte unlock | 10,000 | 373,824 / 8,032,800 | 263 / 5,020 |
 
-The redeem script is 1,398 bytes on chipnet and 1,399 on mainnet (with 4
+The redeem script is 1,427 bytes on chipnet and 1,429 on mainnet (with 4
 threads and 84,000,000,000 virtual satoshis; it varies by a few bytes with
-the constants), so K is 1,978 and 1,979. The worst case uses 11.1% of the
+the constants), so K is 2,007 and 2,009. The worst case uses 11.0% of the
 operation-cost limit and 10.0% of the hashing limit. The largest coinbase a
 claim can carry is the 10,000-byte unlocking limit less the redeem script,
-the other pushes and the proof's other parts: 7,139 bytes at the deepest
+the other pushes and the proof's other parts: 7,110 bytes at the deepest
 branches (`h` 16, `d` 25), measured. P2Pool's token shares keep the
 coinbase within 3,072 bytes.
 
@@ -209,7 +217,9 @@ coinbase within 3,072 bytes.
   verdict around both edges of both networks' bands, on those 22 chipnet
   blocks dated from two hours before to two hours after their own time, and
   on a mainnet with a switch pinned in both; and the covenant's parameters
-  are the gate's, pinned switch included.
+  are the gate's, pinned switch included. The covenant's lock heights, run
+  in the VM, are checked against the schedule's own rule for when a lock
+  height is final.
 - **Claims and attacks** (`tests/claims.rs`): whole claims with and without
   a split, a whole donation, a dropped donation, the deepest proof and a
   10,000-byte unlock, on chipnet and mainnet. Refused: redirected payouts
@@ -222,7 +232,16 @@ coinbase within 3,072 bytes.
   next state, an easier target in the leaf, and a fallback claim one block
   early or just harder than `ref >> 4`; and the VM cost above. Whole claims
   on chipnet's blocks 332,450, 332,452 and 332,460 pass; the covenant
-  deployed on 2026-10-29 takes the first and refuses the other two.
+  deployed on 2026-10-29 takes the first and refuses the other two. A
+  claim on block 332,460 locks to 332,451, passes with a later lock and is
+  refused one unit early; block 332,461 needs 332,452.
+- **Lock heights** (`tests/lock.rs`): Function 21 and the Rust model on
+  heights around chipnet's switch and far past it: the block's ticks in
+  600-tick units, rounded up; final after the coinbase's block and within
+  ten blocks of it, with every wait from one to ten occurring; the block
+  height itself on mainnet; what locking to the block height cost (the
+  table below); and the highest coinbase height the claimer may try at a
+  tip.
 - **Command line** (`tests/cli.rs`, `tests/fixture.rs`): every command,
   the recorded cases (`test_data/parity/cases.json`), thread-count refusals
   and byte-for-byte fixture reproduction. The cases were what the Node tool
@@ -266,7 +285,9 @@ leaf of the height it mines.
 
 `claim` takes `{"outpoint":{"txid","vout"},"vault":{"value_sats","token_amount","commitment"},"payout_script","split","proof","fee_rate","locktime"}`
 (`fee_rate` 1 to 3, default 1; `locktime` defaults to the coinbase
-height). It refuses a claim the covenant would refuse. The transaction needs
+block's lock height, which is the lowest the covenant takes: the block
+height while blocks are ten minutes, see
+[one-minute blocks](#one-minute-blocks-chip-2025-03)). It refuses a claim the covenant would refuse. The transaction needs
 no signature; whoever broadcasts it decides when.
 
 ## Claimer
@@ -340,8 +361,11 @@ outpoint without changing the commitment. An unseen spender is polled
 again. The mempool and block scan is practical for chipnet; scanning the
 larger mainnet mempool and blocks costs more.
 
-Only proof coinbase heights `H` above the current state height and at or
-below the chain tip are considered, oldest height first. The leaf binds
+Only proof coinbase heights `H` above the current state height whose
+claim is final in the next block are considered, oldest height first: at or
+below the chain tip while blocks are ten minutes, and up to nine blocks
+below it on one-minute blocks, where a claim's lock height opens one to ten
+blocks after its coinbase's block. The leaf binds
 `HASH256` of the exact 16-byte commitment. A proof for another state fails
 the builder or VM and is journaled as dropped, never retried. Wins made
 obsolete by a newer state are dropped too. A win's random delay is chosen
@@ -442,17 +466,37 @@ What follows from compiling the pin in:
   another covenant for the same parameters (another address), so it no
   longer serves those vaults; chipnet needs a new deployment.
 
-Two rules of the claim also count blocks and are **not changed here**; both
-are open before a new deployment ([Open](#open)):
+**The lock time** counts ticks too. CHIP-2025-03 makes a transaction with
+lock height `L` final in the first block whose ticks pass `600 × L`. The
+claim used to run `<H> OP_CHECKLOCKTIMEVERIFY` with the coinbase's block
+height. After a switch, block heights run ahead of ticks / 600, so such a
+claim on a coinbase at height `H` above the switch block `S` is not final
+before block `S + 10 × (H − S) + 1`: nine more blocks of waiting for every
+block past the switch, without bound. The claim now locks to block `H`'s
+ticks in 600-tick units, rounded up (Function 21), from the same pin:
 
-- **The lock time.** The claim runs `<H> OP_CHECKLOCKTIMEVERIFY` with the
-  coinbase's block height. CHIP-2025-03 makes a transaction with lock
-  height `L` final in the first block whose ticks pass `600 × L`. After a
-  switch, block heights run ahead of ticks / 600, so a claim for a
-  coinbase at height `H` above the switch block `S` is not final before
-  block `S + 10 × (H − S) + 1`: nine more blocks of waiting for every block
-  past the switch, without bound. On chipnet a win at height 333,800 could
-  not be claimed before block 345,951.
+| Coinbase at chipnet block | Locked to its height: lock, first block it is final in | | Locked to its ticks: lock, first block | |
+|---|---|---|---|---|
+| 332,450 | 332,450 | 332,451 | 332,450 | 332,451 |
+| 332,451 | 332,451 | 332,461 | 332,451 | 332,461 |
+| 332,452 | 332,452 | 332,471 | 332,451 | 332,461 |
+| 332,460 | 332,460 | 332,551 | 332,451 | 332,461 |
+| 332,461 | 332,461 | 332,561 | 332,452 | 332,471 |
+| 333,800 | 333,800 | 345,951 | 332,585 | 333,801 |
+| 340,000 | 340,000 | 407,951 | 333,205 | 340,001 |
+
+Rounding up keeps a claim out of its coinbase's own block and every block
+before it; the wait is one to ten one-minute blocks, depending on where the
+block falls in its 600-tick unit (rounding down would let a claim in up to
+nine blocks before its coinbase's block). The builder sets this lock
+height, and the claimer tries a win once that lock is final in the next
+block, by the same pin. P2Pool's tests check the covenant's lock heights
+against its own rule for when a lock height is final
+(`TickSchedule::first_block_after_lock_height`).
+
+One kind of rule still counts blocks and is **not changed here**
+([Open](#open)):
+
 - **Block-counted token rules.** The target eases over the blocks since
   the last claim (capped at 288), the fallback band opens after 4,032
   blocks, and a thread takes one claim per block. With one-minute blocks
@@ -530,9 +574,9 @@ redeem script, K, locking bytecode and `lock_hash` before any funding; the
 tests check it reproduces byte for byte. The covenant does not depend on
 the category, so the real funding txid changes only the leaves.
 
-Counting ticks changed the chipnet redeem script (1,398 bytes, K 1,978),
+Counting ticks changed the chipnet redeem script (1,427 bytes, K 2,007),
 locking bytecode, `lock_hash` and address
-(`bchtest:rwdfyg7hm06hfdcdu84vz3m324ssl58mh2e03g543ffa3scvumsvvqw0w2xwp`
+(`bchtest:rdnt47asyee76gyuwlnlunkd0z4yx5h5ghrnhvltd8lkeafu6d06c7ndrcnfq`
 for these parameters). Use the regenerated fixture before any genesis: a
 deployed covenant cannot be replaced. Proofs built for another `lock_hash`
 must be rebuilt and mined again, because the leaf, root, coinbase and
@@ -551,8 +595,8 @@ cargo safa claim deployment.json p2poolv2_safa/test_data/tsafa-chipnet-claim.jso
 ```
 
 The command verifies the complete transaction in the standard BCH 2026 VM:
-txid `d4483ae6ae5afe5a3e294aedd14e2a152cfd1a4855475ccc6e482788bcca3407`,
-2,139 bytes, a 2,234-satoshi fee within a 2,234-byte size bound, height
+txid `7a1044714d8a23b634247e441b60391de53c693e3724fc8d3bc0ce62c854c702`,
+2,168 bytes, a 2,263-satoshi fee within a 2,263-byte size bound, height
 329,001 and target `2001bffe`. Its 1,250,000,000-unit reward pays
 1,225,125,000 to the miner, 12,500,000 to the donation and 12,375,000 to
 the fee recipient. This is an offline VM check; it was not broadcast or
@@ -563,7 +607,7 @@ at least 8,001,155 satoshis: 4 × 2,000,000 for the vaults, a 609-satoshi
 genesis fee at 1 sat/byte (609 bytes, estimated with the largest P2PKH
 signature, a 73-byte ECDSA one, and its key) and 546 satoshis of change.
 0.081 tBCH (8,100,000 satoshis) leaves 99,391 in change. Its txid becomes
-the token category. Each claim then costs its vault `S` (1,978 plus the
+the token category. Each claim then costs its vault `S` (2,007 plus the
 proof, so about 5,300 satoshis for a 3,000-byte coinbase) plus 800
 satoshis per token output: about 250 claims per thread before the seed
 runs out, estimated, unless buyers add cash through the market.
@@ -621,15 +665,10 @@ binds the time, and the vault pays its own fee.
 ## Open
 
 - Before any deployment on a network with one-minute blocks
-  ([above](#one-minute-blocks-chip-2025-03)): the claim's lock time, which
-  after a switch makes a claim wait nine more blocks for every block past
-  it. One way is to lock to the coinbase block's ticks in 600-tick units,
-  rounded up, from the same pin: a claim is then never final before its
-  coinbase's block and at most ten one-minute blocks after it, where
-  rounding down would let a claim in up to nine blocks early. It changes
-  the covenant's bytes again. And whether the rules counted in blocks (the
-  easing over 288, the fallback after 4,032, one claim per thread per
-  block) should count ticks; P2Pool's leaf target mirrors the first.
+  ([above](#one-minute-blocks-chip-2025-03)): whether the rules counted in
+  blocks (the easing over 288, the fallback after 4,032, one claim per
+  thread per block) should count ticks; P2Pool's leaf target mirrors the
+  first.
 - A covenant cannot follow a switch it was not compiled with, so a token
   deployed on mainnet before its 2027-05-15 switch block is pinned stops at
   that block. Whether a covenant should carry a rule for a switch that has

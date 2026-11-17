@@ -827,6 +827,82 @@ fn a_pinned_mainnet_switch_gives_the_gate_and_the_safa_covenant_one_band() {
     );
 }
 
+/// The SAFA covenant locks a claim to its coinbase block's ticks in the
+/// 600-tick units of a lock height, rounded up (its Function 21, run in the
+/// BCH 2026 VM). By this schedule's own rule for a lock height, such a claim
+/// is final after its coinbase's block and within ten one-minute blocks of
+/// it, and in the very next block while blocks are ten minutes. Locked to
+/// the block height, as the covenant did before, it would wait nine more
+/// blocks for every block past the switch.
+#[test]
+fn the_safa_covenants_lock_height_opens_after_the_coinbases_block() {
+    let chipnet = TickSchedule::for_network(BitcoinCashNetwork::Chipnet);
+    let parameters = p2poolv2_safa::network_parameters("chipnet").unwrap();
+    let library = p2poolv2_safa::compile_library("chipnet", "").unwrap();
+    let lock_in_vm = |height: u32| {
+        let stack = p2poolv2_safa::evaluate_function(
+            &library,
+            21,
+            &[libauth::big_int_to_vm_number(
+                &p2poolv2_safa::BigInt::from_u64(u64::from(height)),
+            )],
+        )
+        .unwrap();
+        libauth::vm_number_to_big_int(stack.last().unwrap(), None, Some(true))
+            .unwrap()
+            .to_u64()
+            .unwrap() as u32
+    };
+    let mut waits_after_the_switch = std::collections::BTreeSet::new();
+    for height in (332_430..=332_490).chain([333_800, 340_000, 432_451]) {
+        let lock = lock_in_vm(height);
+        assert_eq!(lock, parameters.lock_height(height), "height {height}");
+        // The block's ticks in 600-tick units, rounded up.
+        let ticks = chipnet.ticks(height);
+        assert_eq!(ticks, parameters.ticks(height) as i64, "height {height}");
+        assert!(
+            i64::from(lock) * BCH_BLOCK_SPACING >= ticks,
+            "height {height}"
+        );
+        assert!(
+            (i64::from(lock) - 1) * BCH_BLOCK_SPACING < ticks,
+            "height {height}"
+        );
+        let first = chipnet.first_block_after_lock_height(lock);
+        assert!(first > height && first <= height + 10, "height {height}");
+        if height <= 332_450 {
+            assert_eq!(lock, height);
+            assert_eq!(first, height + 1);
+        } else {
+            waits_after_the_switch.insert(first - height);
+        }
+    }
+    assert_eq!(waits_after_the_switch, (1..=10).collect());
+    // A win at height 333,800: locked to its height it opens 12,151 blocks
+    // later, locked to its ticks in the next block.
+    assert_eq!(chipnet.first_block_after_lock_height(333_800), 345_951);
+    assert_eq!(lock_in_vm(333_800), 332_585);
+    assert_eq!(chipnet.first_block_after_lock_height(332_585), 333_801);
+    // The claimer's highest claimable coinbase height at a tip is the last
+    // whose lock is final in the next block.
+    for tip in 332_440..=332_520 {
+        let claimable = parameters.last_claimable_height(tip);
+        let opens =
+            |height: u32| chipnet.first_block_after_lock_height(parameters.lock_height(height));
+        assert!(claimable <= tip, "tip {tip}");
+        assert!(opens(claimable) <= tip + 1, "tip {tip}");
+        assert!(opens(claimable + 1) > tip + 1, "tip {tip}");
+    }
+    // Mainnet has no pinned switch: the lock height is the block height.
+    let mainnet = p2poolv2_safa::network_parameters("mainnet").unwrap();
+    assert_eq!(mainnet.lock_height(974_001), 974_001);
+    assert_eq!(
+        TickSchedule::for_network(BitcoinCashNetwork::Mainnet)
+            .first_block_after_lock_height(mainnet.lock_height(974_001)),
+        974_002
+    );
+}
+
 /// Mainnet's easy side covers two hours of backwards skew too: a header
 /// two hours before its parent computes a target 2^(7200 / 172800) times
 /// too hard, under 1.05.

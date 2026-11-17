@@ -434,12 +434,15 @@ fn chipnet_block_claim(covenant: safa::Covenant, height: u32) -> ScenarioOptions
     options
 }
 macro_rules! chipnet_claim {
-    ($name:ident,$covenant:expr,$height:expr,$accepted:expr) => {
+    ($name:ident,$covenant:expr,$height:expr,$locktime:expr,$accepted:expr) => {
         #[test]
         fn $name() {
-            let claim = scenario(chipnet_block_claim($covenant, $height))
-                .unwrap()
-                .claim;
+            let claim = scenario(ScenarioOptions {
+                locktime: $locktime,
+                ..chipnet_block_claim($covenant, $height)
+            })
+            .unwrap()
+            .claim;
             if $accepted {
                 accepts(&claim);
             } else {
@@ -449,54 +452,105 @@ macro_rules! chipnet_claim {
     };
 }
 // A whole claim on the last ten-minute chipnet block and on one-minute
-// blocks that carry ASERT's own nBits: the band counts the parent's ticks,
-// so they pass.
+// blocks that carry ASERT's own nBits, locked as the builder locks it: the
+// band counts the parent's ticks, so they pass.
 chipnet_claim!(
     claim_on_the_last_ten_minute_chipnet_block_passes,
     covenant(),
     332_450,
+    None,
     true
 );
 chipnet_claim!(
     claim_on_the_first_asert_one_minute_chipnet_block_passes,
     covenant(),
     332_452,
+    None,
     true
 );
 chipnet_claim!(
     claim_on_a_later_one_minute_chipnet_block_passes,
     covenant(),
     332_460,
+    None,
     true
 );
 // The covenant deployed on chipnet on 2026-10-29 counts every block as ten
-// minutes: it takes a claim on the last ten-minute block and on a
+// minutes and locks a claim to its coinbase's block height. Locked to that
+// height, it takes a claim on the last ten-minute block and on a
 // minimum-difficulty block after it, and refuses one on blocks 332,452 and
 // 332,460, whose nBits it finds more than eight times too easy.
 chipnet_claim!(
     deployed_covenant_takes_a_claim_on_the_last_ten_minute_block,
     deployed_covenant(),
     332_450,
+    Some(332_450),
     true
 );
 chipnet_claim!(
     deployed_covenant_takes_a_minimum_difficulty_claim_after_the_switch,
     deployed_covenant(),
     332_451,
+    Some(332_451),
     true
 );
 chipnet_claim!(
     deployed_covenant_refuses_a_claim_on_the_first_asert_one_minute_block,
     deployed_covenant(),
     332_452,
+    Some(332_452),
     false
 );
 chipnet_claim!(
     deployed_covenant_refuses_a_claim_on_a_later_one_minute_block,
     deployed_covenant(),
     332_460,
+    Some(332_460),
     false
 );
+/// A claim is locked to its coinbase block's ticks in the 600-tick units of
+/// a lock height, rounded up: block 332,460 is ten one-minute blocks past
+/// the switch, one unit, so its lock height is 332,451. A later lock, such
+/// as the block height, passes too; one unit early does not.
+#[test]
+fn claim_on_a_one_minute_block_locks_to_its_ticks() {
+    let claim = scenario(chipnet_block_claim(covenant(), 332_460))
+        .unwrap()
+        .claim;
+    assert_eq!(claim.transaction.locktime, 332_451);
+    accepts(&claim);
+    let mut later = claim.clone();
+    later.transaction.locktime = 332_460;
+    accepts(&later);
+    let mut early = claim;
+    early.transaction.locktime = 332_450;
+    refuses(&early);
+}
+/// The next block starts another unit: block 332,461 locks to 332,452, and
+/// block 332,460's lock is too early for it.
+#[test]
+fn claim_on_the_next_units_first_block_needs_the_next_lock_height() {
+    let options = ScenarioOptions {
+        height: 332_461,
+        ..chipnet_block_claim(covenant(), 332_460)
+    };
+    let claim = scenario(options).unwrap().claim;
+    assert_eq!(claim.transaction.locktime, 332_452);
+    accepts(&claim);
+    let mut early = claim;
+    early.transaction.locktime = 332_451;
+    refuses(&early);
+}
+#[test]
+fn builder_refuses_a_lock_below_the_coinbase_blocks() {
+    let error = scenario(ScenarioOptions {
+        locktime: Some(332_450),
+        ..chipnet_block_claim(covenant(), 332_460)
+    })
+    .err()
+    .unwrap();
+    assert!(error.contains("at or above 332451"), "{error}");
+}
 macro_rules! fallback_claim {
     ($name:ident,$delta:expr,$bits:expr,$reference:expr,$accepted:expr) => {
         #[test]
@@ -938,7 +992,7 @@ fn full_10000_byte_unlock_passes() {
     );
     // The largest coinbase a claim carries at the deepest branches.
     let proof = safa::decode_proof(&scenario.proof).unwrap();
-    assert_eq!(proof.head.len() + 53 + proof.tail.len(), 7139);
+    assert_eq!(proof.head.len() + 53 + proof.tail.len(), 7110);
     accepts(&scenario.claim);
 }
 #[test]
@@ -953,7 +1007,7 @@ fn metrics_empty_branches() {
         ..Default::default()
     })
     .unwrap();
-    metrics(&scenario.claim, (1629, 124_341, 1_336_000, 40, 835));
+    metrics(&scenario.claim, (1658, 126_521, 1_359_200, 41, 849));
     assert!(scenario.covenant.redeem_script.len() < 1500);
 }
 #[test]
@@ -966,7 +1020,7 @@ fn metrics_split() {
         })
         .unwrap()
         .claim,
-        (1763, 138_632, 1_443_200, 53, 902),
+        (1792, 140_812, 1_466_400, 54, 916),
     );
 }
 #[test]
@@ -980,7 +1034,7 @@ fn metrics_deepest() {
         })
         .unwrap()
         .claim,
-        (3011, 260_234, 2_441_600, 153, 1526),
+        (3040, 262_415, 2_464_800, 154, 1540),
     );
 }
 #[test]
@@ -996,13 +1050,13 @@ fn metrics_deepest_fallback() {
     options.state.ref_bits = 0x1b04_04cb;
     metrics(
         &scenario(options).unwrap().claim,
-        (3011, 269_844, 2_441_600, 153, 1526),
+        (3040, 272_024, 2_464_800, 154, 1540),
     );
 }
 #[test]
 fn metrics_full_unlock() {
     metrics(
         &full_unlock(10000).unwrap().claim,
-        (10000, 372_022, 8_032_800, 262, 5020),
+        (10000, 373_824, 8_032_800, 263, 5020),
     );
 }

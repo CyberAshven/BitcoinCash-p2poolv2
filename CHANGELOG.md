@@ -83,19 +83,26 @@ switch at median time past 1810382400 (2027-05-15 12:00 UTC), as in BCHN.
   still with every block. P2Pool's tests run the compiled covenant in the
   BCH 2026 VM against the gate: around both edges of both bands, on the
   real chipnet blocks 332,439 to 332,460 and on a mainnet with a switch
-  pinned in both; the CHIP's ASERT vectors pass in the covenant too. The
-  covenant's bytes changed (chipnet: a 1,398-byte redeem script, K 1,978,
-  another address). The tSAFA deployment made on chipnet on 2026-10-29
-  keeps the earlier covenant, which since block 332,451 accepts only
-  minimum-difficulty blocks; chipnet needs a new deployment, and the
-  fixtures recorded from the old one are replayed against its recorded
-  bytes until then (`p2poolv2_safa/README.md`).
-- Open before any token deployment: the covenant's claim still locks to
-  the coinbase's block height. A Bitcoin Cash lock height counts
-  ten-minute units, so after a switch a claim waits nine more blocks for
-  every block past it; and the token's rules counted in blocks (easing,
-  fallback, one claim per thread per block) run ten times faster. Neither
-  is changed here. Mainnet's activation block is not pinned yet, in the
+  pinned in both; the CHIP's ASERT vectors pass in the covenant too.
+- The covenant's claim locks to its coinbase block's ticks. A Bitcoin Cash
+  lock height counts units of 600 ticks, so a claim locked to its
+  coinbase's block height, as before, waits nine more blocks for every
+  block past a switch (a chipnet win at height 333,800 could not be
+  claimed before block 345,951). The lock is now the block's ticks in
+  those units, rounded up, from the same pin: never final in the
+  coinbase's own block or before it, and final at most ten one-minute
+  blocks after it. The claim builder sets it and the claimer tries a win
+  once it is final in the next block. P2Pool's tests check the covenant's
+  lock heights against `TickSchedule::first_block_after_lock_height`.
+- The covenant's bytes changed with both (chipnet: a 1,427-byte redeem
+  script, K 2,007, another address). The tSAFA deployment made on chipnet
+  on 2026-10-29 keeps the earlier covenant, which since block 332,451
+  accepts only minimum-difficulty blocks; chipnet needs a new deployment,
+  and the fixtures recorded from the old one are replayed against its
+  recorded bytes until then (`p2poolv2_safa/README.md`).
+- Open before any token deployment: the token's rules counted in blocks
+  (easing, fallback, one claim per thread per block) run ten times faster
+  on one-minute blocks and are not changed here. Mainnet's activation block is not pinned yet, in the
   gate or the covenant, so until a release pins it the header gate refuses
   mainnet token shares after the switch. Pinning it changes the gate's
   verdicts, so it is a share-chain rule change of its own, with a new

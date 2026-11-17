@@ -464,9 +464,11 @@ byte-for-byte parity on 2026-10-29). It rebuilds the leaf from
 introspection (the vault's category, locking bytecode and state, the
 claim's payout and target, and the split's `ext`), folds both branches,
 checks the header's work against the token's target and its nBits against
-ASERT at the coinbase's BIP34 height (the corrected band above, with a
-fallback after 4,032 blocks without a claim), binds that height with
-`OP_CHECKLOCKTIMEVERIFY`, and pays the split to scripts of at most 35
+ASERT at the coinbase's BIP34 height (the corrected band above, counted in
+CHIP-2025-03's ticks from the same pinned switch as the header gate, with
+a fallback after 4,032 blocks without a claim), binds that height with
+`OP_CHECKLOCKTIMEVERIFY` on the block's lock height (its ticks in 600-tick
+units, rounded up), and pays the split to scripts of at most 35
 bytes. The vault is the claim's only input: it pays the fee from its own
 cash, `S` to `3S` satoshis for `S` bytes of claim bound, and keeps at least
 800 satoshis. Its tests run Pickaxe's

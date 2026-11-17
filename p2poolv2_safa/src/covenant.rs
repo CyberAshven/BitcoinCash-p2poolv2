@@ -65,6 +65,52 @@ impl NetworkParameters {
             interval: BCH_BLOCK_SPACING,
         })
     }
+
+    /// The ticks of the block at `height` by the pinned switch: 600 for each
+    /// block up to the switch block, then the switch's interval for each
+    /// block after it.
+    pub fn ticks(&self, height: u32) -> u64 {
+        let switch = self.switch_constants();
+        let before_switch = height.min(switch.height);
+        u64::from(BCH_BLOCK_SPACING) * u64::from(before_switch)
+            + u64::from(switch.interval) * u64::from(height - before_switch)
+    }
+
+    /// The lock height of a claim on a coinbase at `height`, as the covenant
+    /// requires it (Function 21). CHIP-2025-03 counts a lock height in units
+    /// of 600 ticks: a transaction locked to `L` is final in the first block
+    /// whose ticks pass `600 * L`. This is the coinbase block's ticks in
+    /// those units, rounded up: the height itself up to the switch block,
+    /// and one unit for every `600 / interval` blocks after it. The claim is
+    /// never final in the coinbase's own block or before it, and is final at
+    /// most `600 / interval` blocks after it.
+    pub fn lock_height(&self, height: u32) -> u32 {
+        let switch = self.switch_constants();
+        let before_switch = height.min(switch.height);
+        let ticks_after = u64::from(switch.interval) * u64::from(height - before_switch);
+        before_switch.saturating_add(
+            u32::try_from(ticks_after.div_ceil(u64::from(BCH_BLOCK_SPACING))).unwrap_or(u32::MAX),
+        )
+    }
+
+    /// The highest coinbase height whose claim can be mined in the block
+    /// after `tip`: the last one whose [`Self::lock_height`] `L` has `600 *
+    /// L` below that block's ticks. It is `tip` while blocks are ten
+    /// minutes, and up to `600 / interval - 1` blocks below it after the
+    /// switch.
+    pub fn last_claimable_height(&self, tip: u32) -> u32 {
+        let switch = self.switch_constants();
+        let spacing = u64::from(BCH_BLOCK_SPACING);
+        // The highest lock height that is final in the block after the tip.
+        let final_lock = (self.ticks(tip.saturating_add(1)).saturating_sub(1)) / spacing;
+        let switch_height = u64::from(switch.height);
+        let height = if final_lock <= switch_height {
+            final_lock
+        } else {
+            switch_height + (final_lock - switch_height) * (spacing / u64::from(switch.interval))
+        };
+        u32::try_from(height).unwrap_or(u32::MAX)
+    }
 }
 
 /// Per-network parameters fixed in the covenant's source template.
