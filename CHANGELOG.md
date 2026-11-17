@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+A node keeps at least 16 outgoing peers (`[network] target_outgoing_peers`),
+at most one per IPv4 /16 or IPv6 /32, with a 60-second backoff that doubles;
+the sample configs raise `max_established_incoming` from 50 to 128 (#122).
+
 Share-chain rule change on Bitcoin Cash, a flag day: P2Pool follows Bitcoin
 Cash's one-minute blocks (CHIP-2025-03) the way BCHN does (protocol
 segments `bch-prev-1off-ticks` and `mm2-roots-asert8-ticks`, store format
@@ -202,8 +206,8 @@ month, so the band changes nothing in a pool at 10% of Bitcoin Cash or
 more; and a coinbase at the default payout level pays at most 1,788
 outputs, while no level reaches the payout tree from the reward alone. The
 documented tables are regenerated, and where a conclusion moved the text
-says so. The study of the weak ratio's path with the asks (#124) is still
-the ten-minute run. No node code changes.
+says so. The study of the weak ratio's path with the asks (#124) is rerun
+too, and its rule v4 still fixes the start. No node code changes.
 
 A share a peer sent is relayed once its header checks out, before its body
 is validated, as BIP152 high-bandwidth peers relay compact blocks (#128).

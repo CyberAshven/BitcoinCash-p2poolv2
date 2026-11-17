@@ -1101,6 +1101,26 @@ Still open:
   changes nothing home miners are paid: the cap only bounds how heavy a job
   a node may give.
 
+### Study #85: weak work in fork choice
+
+The idea: count each carried weak share's work in fork choice, as uncle work
+counts, so a node that drops other miners' weak shares loses races and the
+includer cut can shrink. The payout simulator's "Study #85" tables tested it
+against nodes refusing to carry others' weak shares.
+
+| Finding | Result |
+|---|---|
+| Weak work in races alone | Races are about 2% of shares: honest weak shares lost move from 4.92% to 4.65% with half the hashrate refusing, and a 90% coalition still gains 2.6 to 4.3% at every cut |
+| What stops a 90% coalition | `WEAK_DEPTH` 48: its gain falls from +2.7 to +4.2% at depth 6 to +0.03 to +0.04%, honest losses from 56% to 1.2%, and the Bitaxe keeps 0.99 of its fair pay |
+| Includer cut | 1% at depth 48: a 90% coalition gains at most 0.04%, a lone refuser loses 0.2 to 0.9% |
+
+Decided: `WEAK_DEPTH` 48, a 1% cut and `R_MAX` 256 became the rules on
+2026-11-12 (`weak2-64-100-48-256`), and weak work stays out of fork choice:
+through races alone it moves a coalition's gain by 0.12 points at most, not
+worth its header-sync work. The study's scaling ideas were built as #121
+(weak shares by hash), #128 (relay after the header check), #131 (shares
+relayed without payouts) and #122 (16 outgoing peers).
+
 ## References
 
 - [Issue #79](https://github.com/CyberAshven/BitcoinCash-p2poolv2/issues/79),

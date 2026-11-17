@@ -653,7 +653,7 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
-      "description": "Peers this node holds a connection to (p2p_connected_peers). Gaps mean the node actor did not answer the /metrics snapshot within 1 s; they are left visible on purpose.",
+      "description": "Peers this node holds a connection to (p2p_connected_peers), split into those it dialed (p2p_outgoing_peers, kept at target_outgoing_peers or more) and those that only dialed it (p2p_incoming_peers). Gaps mean the node actor did not answer the /metrics snapshot within 1 s; they are left visible on purpose.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -743,6 +743,30 @@
           "legendFormat": "Connected peers",
           "range": true,
           "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "p2p_outgoing_peers",
+          "instant": false,
+          "legendFormat": "Outgoing",
+          "range": true,
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "p2p_incoming_peers",
+          "instant": false,
+          "legendFormat": "Incoming",
+          "range": true,
+          "refId": "C"
         }
       ],
       "title": "Connected peers",
