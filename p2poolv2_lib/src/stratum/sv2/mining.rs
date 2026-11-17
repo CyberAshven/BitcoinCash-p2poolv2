@@ -417,10 +417,15 @@ impl MiningChannels {
             .and_then(|commitment| commitment.bch_coinbase.as_ref())
             .is_some_and(|coinbase| !coinbase.merge_mining.is_empty())
             && let Some(asert) = self.ctx.token_asert()
-            && let Err(reason) = asert.check_header_bits(
+            && let Err(reason) = asert.check_header_bits_for_peers(
                 CompactTarget::from_consensus(request.nbits),
                 request.min_ntime,
                 u64::from(job.blocktemplate.height),
+                job.blocktemplate
+                    .previousblockhash
+                    .parse::<BlockHash>()
+                    .ok()
+                    .and_then(|prev| self.ctx.bch_prev_tick_info(&prev)),
             )
         {
             debug!("Rejected SV2 token job outside the ASERT band: {reason}");
@@ -563,6 +568,7 @@ impl MiningChannels {
             coinbase,
             &job.template_merkle_branches,
             self.ctx.token_asert(),
+            self.ctx.bch_prev_tick_info(&header.prev_blockhash),
         );
         let mut frames = Vec::with_capacity(wins.len());
         for win in &wins {

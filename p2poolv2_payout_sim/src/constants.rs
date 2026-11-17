@@ -11,17 +11,23 @@
 //! are re-exported from there rather than copied a second time.
 
 pub use p2poolv2_netsim::constants::{
-    BCH_BLOCK_INTERVAL_SECONDS, BCH_PPLNS_WINDOW_BLOCKS, PPLNS_WINDOW_SHARES,
-    SHARE_INTERVAL_SECONDS, UNCLE_PAID_FRACTION,
+    BCH_BLOCK_INTERVAL_SECONDS, BCH_PPLNS_WINDOW_BLOCKS, BCH_TEN_MINUTE_BLOCK_SECONDS,
+    PPLNS_WINDOW_SHARES, SHARE_INTERVAL_SECONDS, UNCLE_PAID_FRACTION, scaled_to_block_interval,
 };
 
 /// Bitcoin Cash network hashrate, hashes a second: 3.7 EH/s, Blockchair's
 /// 24-hour average on 2026-10-23 (`docs/small-miners.md`, "Inputs").
 pub const BCH_NETWORK_HASHRATE: f64 = 3.7e18;
 
-/// Block subsidy in satoshis, 3.125 BCH since the 2024 halving. Fees are
-/// left out, as on `docs/small-miners.md`.
-pub const BLOCK_REWARD_SATOSHIS: f64 = 312_500_000.0;
+/// Block subsidy in satoshis of a ten-minute block, 3.125 BCH since the 2024
+/// halving.
+pub const TEN_MINUTE_BLOCK_REWARD_SATOSHIS: u64 = 312_500_000;
+
+/// Block subsidy in satoshis of a block of `BCH_BLOCK_INTERVAL_SECONDS`:
+/// CHIP-2025-03 scales the subsidy by the block's interval, 0.3125 BCH for a
+/// one-minute block. Fees are left out, as on `docs/small-miners.md`.
+pub const BLOCK_REWARD_SATOSHIS: f64 =
+    scaled_to_block_interval(TEN_MINUTE_BLOCK_REWARD_SATOSHIS) as f64;
 
 /// Donation each share pays by default, 1% (plan decision 9). Each share's
 /// own donation comes off its own weight (`cuts-per-share`), so a payee gets
@@ -35,7 +41,8 @@ pub const HASHES_PER_DIFFICULTY: f64 = 4_294_967_296.0;
 /// Length of the month every monthly figure uses: 30 days.
 pub const MONTH_SECONDS: f64 = 30.0 * 86_400.0;
 
-/// Bitcoin Cash blocks in a month of 600-second blocks: 4,320.
+/// Bitcoin Cash blocks in a month of `BCH_BLOCK_INTERVAL_SECONDS` blocks:
+/// 43,200 of one minute.
 pub const BCH_BLOCKS_PER_MONTH: f64 = MONTH_SECONDS / BCH_BLOCK_INTERVAL_SECONDS;
 
 /// Shares below the paying share that the window skips:
@@ -168,7 +175,9 @@ pub const LARGE_FARM_HASHRATE: f64 = 10.0e15;
 /// Stale shares (uncles and orphans) against the share interval for small
 /// coinbases, from the network simulation's share-interval sweep
 /// (`docs/simulation/network-sim.md`, "Latency, share interval and node
-/// count", `tokens-3072` rows): seconds, stale fraction.
+/// count", `tokens-3072` rows): seconds, stale fraction. Taken from the
+/// ten-minute block run; the one-minute run gives 16.0, 8.9, 3.5, 2.1 and
+/// 0.9%, within its seed-to-seed noise of these.
 pub const STALE_RATE_BY_PERIOD: [(f64, f64); 5] = [
     (1.0, 0.159),
     (2.0, 0.087),

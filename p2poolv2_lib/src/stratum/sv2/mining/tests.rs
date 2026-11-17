@@ -2825,6 +2825,7 @@ async fn a_winning_share_on_an_extended_channel_gets_its_win_proof() {
                     &coinbase,
                     &tracker_job.template_merkle_branches,
                     None,
+                    None,
                 )
                 .is_empty()
         })
@@ -2855,7 +2856,10 @@ async fn a_winning_share_on_an_extended_channel_gets_its_win_proof() {
     assert_eq!(win[8..40], [0x11; 32]);
     let length = usize::from(u16::from_le_bytes([win[40], win[41]]));
     let proof = AuxProof::from_bytes(&win[42..42 + length]).unwrap();
-    assert_eq!(proof.verify(&tokens.entries[0].leaf, 16, None), Ok(()));
+    assert_eq!(
+        proof.verify(&tokens.entries[0].leaf, 16, None, None),
+        Ok(())
+    );
     assert_eq!(win[42 + length], 69);
     assert_eq!(win[43 + length..], tokens.entries[0].split.preimage());
 }

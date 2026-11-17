@@ -863,6 +863,7 @@ mod tests {
             store: StoreConfig {
                 path: "test_chain.db".to_string(),
                 pplns_ttl_days: 3,
+                keep_whole_weak_shares: false,
             },
 
             stratum: StratumConfig::new_for_test_default(),
@@ -982,6 +983,7 @@ mod tests {
             store: StoreConfig {
                 path: "test_chain.db".to_string(),
                 pplns_ttl_days: 3,
+                keep_whole_weak_shares: false,
             },
             stratum: StratumConfig::new_for_test_default(),
             logging: LoggingConfig {

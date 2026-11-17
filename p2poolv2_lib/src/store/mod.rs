@@ -66,7 +66,26 @@ const STORE_FORMAT_KEY: &[u8] = b"store_format";
 /// - 9 (2026-11-12): a weak share a share carries is held to its carrier's
 ///   time (`BCH_WEAK_SHARE_RULE_TAG`, `weak3-64-100-48-256`). A stored chain
 ///   was validated against each node's clock; the chain starts again.
-pub const STORE_FORMAT_VERSION: u32 = 9;
+/// - 10 (2026-11-15): Bitcoin Cash share headers count the weak shares they
+///   carry that ask for an easier weak target, and the weak ratio follows
+///   those asks (`BCH_WEAK_SHARE_RULE_TAG`,
+///   `weak4-640-100-48-256-320-64-4096-64-32`). A stored header has no such count
+///   and would not decode, and the chain starts from a new genesis.
+/// - 11 (2026-11-16): a Bitcoin Cash share's weak root also commits the
+///   summary of the weak shares it carries (`BCH_WEAK_SHARE_RULE_TAG`,
+///   `-summary`), the `WeakSummaries` column family keeps their leaf root
+///   beside the summary (`PrunedWeakShares`), and whole weak shares are
+///   pruned one payout depth below the confirmed tip. A stored share
+///   carrying weak shares commits the old root, which every node now
+///   refuses, and a stored summary has no leaf root; the chain starts again.
+/// - 12 (2026-11-16): each known Bitcoin Cash header carries its
+///   CHIP-2025-03 ticks and next interval, worked out from its own branch's
+///   median time past (`BCH_CURRENT_CHAIN_RULE_TAG`, `bch-prev-1off-ticks`,
+///   and `BCH_MERGE_MINING_RULE_TAG`, `mm2-roots-asert8-ticks`). A stored
+///   header has neither and would not decode, and a stored chain was
+///   validated with intervals each node learned while running; the chain
+///   starts again.
+pub const STORE_FORMAT_VERSION: u32 = 12;
 
 pub mod bch_headers;
 pub mod block_tx_metadata;
@@ -113,6 +132,10 @@ pub struct Store {
     /// when it holds every height, `u32::MAX` while it writes none
     /// (`with_script_history`). Loaded from `Metadata` when the store opens.
     script_history_from: AtomicU32,
+    /// Whether whole weak shares are kept until their share's body is
+    /// pruned, as an explorer or archive wants, instead of one payout depth
+    /// (`with_whole_weak_shares_kept`, `store.keep_whole_weak_shares`).
+    keep_whole_weak_shares: bool,
 }
 
 /// Merge operator for appending BlockHashes to a Vec<BlockHash>.
@@ -356,6 +379,7 @@ impl Store {
             refused_reorgs: Mutex::new(HashMap::new()),
             script_history_gc_threshold,
             script_history_from: AtomicU32::new(0),
+            keep_whole_weak_shares: false,
         };
         store.load_script_history_from()?;
         Ok(store)
@@ -372,6 +396,17 @@ impl Store {
     /// The share-chain depths this store prunes and reorgs by.
     pub fn depths(&self) -> ChainDepths {
         self.depths
+    }
+
+    /// Keep whole weak shares until their share's body is pruned, two payout
+    /// depths below the tip, when `keep` is set (`store.keep_whole_weak_shares`,
+    /// for an explorer or an archive). By default they are pruned one payout
+    /// depth below the confirmed tip, and their leaf root and summary stay with
+    /// the body (`Store::weak_share_prune_target`). Either way the node serves
+    /// every body a syncing peer asks for.
+    pub fn with_whole_weak_shares_kept(mut self, keep: bool) -> Self {
+        self.keep_whole_weak_shares = keep;
+        self
     }
 
     /// The chain a stored share chain belongs to, read from its genesis
@@ -621,9 +656,11 @@ impl Store {
              the genesis share only as the last resort, and Bitcoin Cash has one share chain \
              (the main and mini chains merged) whose headers carry a difficulty band, a \
              payout level and weak shares, with payees below their level paid by a draw and \
-             every proof from a job at the minimum paid at the weak work, and whose weak root \
-             commits each carried weak share's whole encoding. Delete the store directory and \
-             restart to resync the share chain from peers.",
+             every proof from a job at the minimum paid at the weak work, whose weak root \
+             commits each carried weak share's whole encoding and their summary, whose weak \
+             ratio follows the weak shares that ask for an easier weak target, and where each \
+             known Bitcoin Cash header carries its ticks and next block interval (CHIP-2025-03). \
+             Delete the store directory and restart to resync the share chain from peers.",
             self.path
         )))
     }
@@ -1073,6 +1110,33 @@ mod tests {
             .unwrap_err();
         assert!(matches!(error, StoreError::OutdatedStore(_)), "{error:?}");
         assert!(error.to_string().contains("has format 7"), "{error}");
+    }
+
+    /// A store from before the weak ratio followed the asks, format 9, is
+    /// refused: its headers do not count their asking weak shares.
+    #[test]
+    fn test_store_from_before_the_weak_asks_is_refused() {
+        let temp_dir = tempdir().unwrap();
+        let store = Store::new(temp_dir.path().to_str().unwrap().to_string(), false).unwrap();
+        let genesis = TestShareBlockBuilder::new().build();
+        let mut batch = Store::get_write_batch();
+        store.setup_genesis(&genesis, &mut batch).unwrap();
+        store.commit_batch(batch).unwrap();
+        let metadata_cf = store.db.cf_handle(&ColumnFamily::Metadata).unwrap();
+        store
+            .db
+            .put_cf(&metadata_cf, STORE_FORMAT_KEY, 9u32.to_le_bytes())
+            .unwrap();
+
+        let error = store
+            .init_chain_state_from_store(genesis.block_hash())
+            .unwrap_err();
+        assert!(matches!(error, StoreError::OutdatedStore(_)), "{error:?}");
+        assert!(error.to_string().contains("has format 9"), "{error}");
+        assert!(
+            error.to_string().contains("weak shares that ask"),
+            "{error}"
+        );
     }
 
     #[test_log::test]

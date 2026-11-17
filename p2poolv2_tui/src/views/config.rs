@@ -7,6 +7,7 @@
 //! settings on the left, the selected one with its value or input on the
 //! right. Secrets are always masked, even while typed.
 
+use crate::theme;
 use crate::views::{alert, muted, titled};
 use ratatui::{
     prelude::*,
@@ -53,24 +54,14 @@ pub struct ConfigScreen<'a> {
 /// The value as listed: masked when sensitive, or what is used without it.
 pub fn shown_value(row: &ConfigRow) -> (String, Style) {
     match (&row.value, row.sensitive) {
-        (Some(_), true) => (
-            MASK.to_string(),
-            Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
-        ),
-        (Some(value), false) => (
-            value.clone(),
-            Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
-        ),
+        (Some(_), true) => (MASK.to_string(), theme::EMPHASIS),
+        (Some(value), false) => (value.clone(), theme::EMPHASIS),
         (None, _) => (
             match row.default {
                 Some(default) => format!("(default: {default})"),
                 None => "(not set)".to_string(),
             },
-            Style::default().fg(Color::DarkGray),
+            theme::MUTED,
         ),
     }
 }
@@ -81,7 +72,7 @@ pub fn render(frame: &mut Frame, area: Rect, screen: &ConfigScreen) {
             .warning
             .unwrap_or("Press Enter to pick the node's config.toml.");
         let style = if screen.warning.is_some() {
-            Style::default().fg(Color::Red)
+            theme::ERROR
         } else {
             Style::default()
         };
@@ -97,12 +88,9 @@ pub fn render(frame: &mut Frame, area: Rect, screen: &ConfigScreen) {
         .warning
         .map(|warning| alert(warning.to_string()))
         .or_else(|| {
-            screen.info.map(|info| {
-                Line::from(Span::styled(
-                    info.to_string(),
-                    Style::default().fg(Color::Green),
-                ))
-            })
+            screen
+                .info
+                .map(|info| Line::from(Span::styled(info.to_string(), theme::SUCCESS)))
         });
     let content_area = match message {
         Some(line) => {
@@ -136,14 +124,11 @@ fn render_list(frame: &mut Frame, area: Rect, screen: &ConfigScreen, path: &str)
             let (value, value_style) = shown_value(row);
             ListItem::new(vec![
                 Line::from(vec![
-                    Span::styled(
-                        format!("[{}] ", row.section),
-                        Style::default().fg(Color::Blue),
-                    ),
-                    Span::styled(row.description, Style::default().fg(Color::Gray)),
+                    Span::styled(format!("[{}] ", row.section), theme::SECTION),
+                    Span::styled(row.description, theme::MUTED),
                 ]),
                 Line::from(vec![
-                    Span::styled(format!("{} = ", row.key), Style::default().fg(Color::Cyan)),
+                    Span::styled(format!("{} = ", row.key), theme::ACCENT),
                     Span::styled(value, value_style),
                 ]),
             ])
@@ -153,7 +138,7 @@ fn render_list(frame: &mut Frame, area: Rect, screen: &ConfigScreen, path: &str)
     let border_style = if screen.focused {
         Style::default()
     } else {
-        Style::default().fg(Color::DarkGray)
+        theme::MUTED
     };
     let list = List::new(items)
         .block(
@@ -162,7 +147,7 @@ fn render_list(frame: &mut Frame, area: Rect, screen: &ConfigScreen, path: &str)
                 .title(format!(" {path}{unsaved} "))
                 .border_style(border_style),
         )
-        .highlight_style(Style::default().bg(Color::DarkGray));
+        .highlight_style(theme::HIGHLIGHT);
     let mut state = ListState::default();
     state.select(Some(screen.selected));
     frame.render_stateful_widget(list, area, &mut state);
@@ -188,9 +173,7 @@ fn render_detail(frame: &mut Frame, area: Rect, screen: &ConfigScreen) {
         ])
         .split(inner);
     frame.render_widget(
-        Paragraph::new(row.description)
-            .style(Style::default().fg(Color::White))
-            .wrap(Wrap { trim: true }),
+        Paragraph::new(row.description).wrap(Wrap { trim: true }),
         rows[0],
     );
     frame.render_widget(
@@ -198,17 +181,14 @@ fn render_detail(frame: &mut Frame, area: Rect, screen: &ConfigScreen) {
             "[{}] {}  type: {}",
             row.section, row.key, row.type_hint
         ))
-        .style(Style::default().fg(Color::Gray)),
+        .style(theme::MUTED),
         rows[1],
     );
-    frame.render_widget(
-        Paragraph::new("Value:").style(Style::default().fg(Color::Gray)),
-        rows[3],
-    );
+    frame.render_widget(Paragraph::new("Value:").style(theme::MUTED), rows[3]);
     let value = match screen.input {
         Some(input) => Paragraph::new(typed(input, row.sensitive))
             .block(Block::default().borders(Borders::ALL))
-            .style(Style::default().fg(Color::Yellow)),
+            .style(theme::EDITING),
         None => {
             let (value, style) = shown_value(row);
             Paragraph::new(value)
@@ -220,7 +200,7 @@ fn render_detail(frame: &mut Frame, area: Rect, screen: &ConfigScreen) {
     let note = if row.sensitive {
         Line::from(Span::styled(
             "! secret: never shown; leave it empty to keep it",
-            Style::default().fg(Color::Yellow),
+            theme::WARNING,
         ))
     } else if row.value.is_some() {
         muted("An empty value removes an optional setting.")

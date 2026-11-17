@@ -242,19 +242,29 @@ fn a_share_meeting_a_token_target_wins_a_proof_that_verifies() {
         .unwrap();
     assert!(!job.entries[1].is_won_by(&winning.block_hash()));
 
-    let wins = job.wins(&winning, &coinbase, &[], None);
+    let wins = job.wins(&winning, &coinbase, &[], None, None);
 
     assert_eq!(wins.len(), 1);
     assert_eq!(wins[0].category, [0x11; 32]);
     assert_eq!(wins[0].split, pickaxe_split());
     let proof = AuxProof::from_bytes(&wins[0].proof).unwrap();
     assert_eq!(
-        proof.verify(&job.entries[0].leaf, MAX_MERGE_MINING_TREE_HEIGHT, None),
+        proof.verify(
+            &job.entries[0].leaf,
+            MAX_MERGE_MINING_TREE_HEIGHT,
+            None,
+            None
+        ),
         Ok(())
     );
     assert!(
         proof
-            .verify(&job.entries[1].leaf, MAX_MERGE_MINING_TREE_HEIGHT, None)
+            .verify(
+                &job.entries[1].leaf,
+                MAX_MERGE_MINING_TREE_HEIGHT,
+                None,
+                None
+            )
             .is_err()
     );
 }
@@ -270,7 +280,7 @@ fn a_share_below_every_token_target_wins_nothing() {
     let job = set.miner_job(&p2pkh(0x12), pickaxe_split());
     let coinbase = job_coinbase(&job);
     assert!(
-        job.wins(&header_on(&coinbase, 0), &coinbase, &[], None)
+        job.wins(&header_on(&coinbase, 0), &coinbase, &[], None, None)
             .is_empty()
     );
 }

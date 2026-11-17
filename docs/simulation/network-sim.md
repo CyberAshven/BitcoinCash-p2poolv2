@@ -14,6 +14,13 @@ draw for the tail (decision 14, `payout-cap11`), appears below only as a
 historical comparison (`cap-11`), and so does the 200 KiB share body limit
 that came with it.
 
+The model runs on one-minute Bitcoin Cash blocks (CHIP-2025-03, on chipnet
+since 2026-11-15 and on mainnet from 2027-05-15): a block every minute, a
+tenth of the ten-minute reward and of the ABLA floors (3.2 MB on mainnet,
+200 kB on chipnet, 25.6 MB to start on scalenet). Every number below comes
+from that model. The ten-minute tables are in this file at commit 2972cfd2;
+where a conclusion changed, the text says so.
+
 ## The short answer
 
 - **The coinbase limits P2Pool first, as a bandwidth cost.** Every payee
@@ -24,50 +31,63 @@ that came with it.
   for its coinbase. But with whole shares on the wire, as nodes send them,
   stale shares climb with the direct payees on the assumed mix of
   home and data-centre links: 3% at 1,000 payees, 8% at 6,010, 11% at
-  10,000 and 25% at 29,402 (a 1 MB coinbase; 0.8% orphaned). With 1 MB shares
+  10,000 and 25% at 29,402 (a 1 MB coinbase; 0.6% orphaned). With 1 MB shares
   only data-centre links keep it near 4%.
 - **Sending shares without their payouts removes that cost.** Every node
   rebuilds the payouts to validate a share anyway, as the design points
-  out. Without them a share is about 1.4 KB whatever the payee count, and
-  stale shares at 29,402 payees fall from 25% to 2.7%.
+  out. Without them a share is about 1.3 KB whatever the payee count, and
+  stale shares at 29,402 payees fall from 25% to 2.6%.
 - **For miners the coinbase stays a per-job cost.** A Stratum V1 job carries
-  the coinbase in hex about every 5 seconds: 116 kbit/s per miner at 1,000
-  payees and 681 kbit/s at 6,010. A Stratum V2 extended job cannot carry a
+  the coinbase in hex about every 4.6 seconds: 124 kbit/s per miner at 1,000
+  payees and 731 kbit/s at 6,010. A Stratum V2 extended job cannot carry a
   coinbase of more than 1,922 payees at all (65,535-byte fields), and the
   device evidence from other pools puts stock firmware between 12 and 461
   payees. Only Stratum V2 standard channels carry no coinbase.
-- **The PPLNS window bounds the payees.** On BCH it holds three BCH blocks
-  of the pool's work, about `180 / f` shares for a pool with fraction `f`
-  of BCH's hashrate. A pool above 3% of BCH has fewer than about 6,000
-  payees whatever its miner count; only below about 0.6% can a crowd of
-  small miners reach the 1 MB limit and the tree.
+- **The PPLNS window bounds the payees, ten times more tightly than with
+  ten-minute blocks.** On BCH it holds three BCH blocks of the pool's work,
+  about `18 / f` shares for a pool with fraction `f` of BCH's hashrate: a
+  tenth of the ten-minute window. A pool above 0.3% of BCH has fewer than
+  about 6,000 payees whatever its miner count; only below about 0.06% can a
+  crowd of small miners reach the 1 MB limit and the tree. The default pool
+  (1% of BCH) has a 1,800-share window, so of a thousand equal miners 835
+  hold a share in it.
 - **With merge-mined tokens the 3,072-byte threshold keeps the coinbase at
   3,051 bytes** for any number of payees (79 direct, the rest in the tree),
   and stale shares at about 2%, like the old 11-payout cap.
 - **The share chain itself is not the limit at 10-second shares.** With
   small shares 2 to 3% of shares go stale, nearly all named as uncles (paid
   9/10), and a share reaches 90% of 100 nodes in 0.2 to 0.3 s. It grows
-  with latency (10% at 400 ms one way), node count (4.2% at 1,000 nodes),
+  with latency (10% at 400 ms one way), node count (3.8% at 1,000 nodes),
   slow job switching (7% if miners take 0.5 s to get new work) and faster
   shares (16% at 1-second shares).
-- **Raw bandwidth binds through BCHN and templates at multi-gigabyte
-  blocks, not through the share chain.** A node's BCHN needs about 24
-  Mbit/s each way at full 1 GB blocks and 48 Mbit/s at 2 GB just to relay
-  transactions; on the assumed link mix 14 of 100 nodes cannot carry that
-  at 1 GB and 52 at 2 GB. On data-centre links block size leaves the stale
-  rate at 1.6% from 2 MB to 2 GB. Fetching a full `getblocktemplate` every
-  10 seconds costs 76 Mbit/s between node and BCHN at full 32 MB blocks and
-  4.75 Gbit/s at 2 GB; BCHN's `getblocktemplatelight` avoids it.
-- **Upstream's limit of about 1,000 miners at 10-second shares (4.23% stale
+- **Raw bandwidth binds through BCHN and templates at large blocks, not
+  through the share chain, and a block size now means ten times the
+  traffic.** A block every minute carries ten times the transactions a
+  second that the same size every ten minutes did: a node's BCHN needs about
+  6.1 Mbit/s each way at full 25.6 MB blocks, 240 Mbit/s at 1 GB and 479
+  Mbit/s at BCHN's 2 GB guard just to relay transactions. On the assumed link
+  mix 99 of 100 nodes cannot carry that at 1 GB and none at 2 GB. On
+  data-centre links block size leaves the stale rate at 1.6% from 200 kB to
+  2 GB. Fetching a full `getblocktemplate` every 10 seconds costs 8.7 Mbit/s
+  between node and BCHN at full 3.2 MB blocks and 5.45 Gbit/s at 2 GB;
+  BCHN's `getblocktemplatelight` avoids it.
+- **A block's coinbase now costs ten times the BCH orphan risk per second
+  of delay.** With a block a minute, a 1 MB coinbase's 0.64 s over four hops
+  at 50 Mbit/s risks 1.06% of the pool's blocks, against 0.11% with
+  ten-minute blocks.
+- **Upstream's limit of about 1,000 miners at 10-second shares (3.83% stale
   on 1,000 nodes) moves only with smaller shares.** Sending shares without
   their payouts, forwarding them after the header check and giving each
-  node 8 to 64 peers keeps 1,000 nodes within 4.23% stale down to 5.0 to 3.5
-  second shares. Each alone does less: shares without payouts reach 5.6
-  seconds, header-check forwarding and larger uncle caps change nothing
-  measurable, and more peers with whole shares make it worse. Weak shares
-  gossiped beside the shares cost upload but no stale shares; carried whole
-  in every share they push the limit out to 11 to 16 seconds (section
-  "Scaling propagation instead of capping it").
+  node 8 to 64 peers keeps 1,000 nodes within 3.83% stale down to 5.3 to 4.0
+  second shares (5.0 to 3.5 with ten-minute blocks). Each alone does less:
+  shares without payouts reach 6.3 seconds, header-check forwarding and
+  larger uncle caps change nothing measurable, and more peers with whole
+  shares make it worse. With one-minute blocks today's design gains nothing
+  from shorter shares at all: the window then holds more shares and the
+  coinbase more payees. Weak shares gossiped beside the shares cost upload
+  but no stale shares; carried whole in every share they push the limit out
+  to 11 to 16 seconds (section "Scaling propagation instead of capping
+  it").
 
 The rest of this page says how the model works, what it assumes and what
 each sweep showed.
@@ -156,8 +176,8 @@ the model for Bitcoin Cash and for scale:
   share's bytes over the receiver's download and the latency. A fluid
   approximation: no TCP slow start and no loss.
 - **BCHN on the same link** (the default): BCHN's transaction relay is taken
-  from each link first, and every BCH block (one every 10 minutes on
-  average) takes the link for its compact block, once down and once up, so
+  from each link first, and every BCH block (one every minute on average)
+  takes the link for its compact block, once down and once up, so
   shares wait behind it. A node whose link cannot carry BCHN's relay at all
   cannot keep up with BCH: it still relays shares, but its miners are moved
   to the other nodes.
@@ -184,8 +204,9 @@ the model for Bitcoin Cash and for scale:
   the tree. With every payee on P2PKH that changes who is in the tree, not
   the sizes, so the model does not need the order.
 - **Payees** are the miners expected to hold a share in the window, for a
-  window of `min(120,960, 3 * 60 / f)` shares (`BCH_PPLNS_WINDOW_BLOCKS` = 3
-  at 10-second shares), plus the donation key that every share's default
+  window of `min(120,960, 3 * 6 / f)` shares (`BCH_PPLNS_WINDOW_BLOCKS` = 3
+  one-minute blocks of six 10-second shares each), plus the donation key
+  that every share's default
   donation pays (under `cap-11` the donation was an output of its own), or
   a count given directly with `--payees`. The model's nodes take no
   operator fee; each fee address would add one payee.
@@ -203,9 +224,9 @@ network itself beyond its traffic.
 | Hashrate over nodes | `--node-hashrate` | equal |
 | Miners and their hashrate | `--miners`, `--miner-hashrate` | 1,000, equal |
 | Payees, instead of the expected count | `--payees` | from miners and window |
-| Pool's fraction of BCH's hashrate | `--pool-fraction` | 0.01 (window of 18,000 shares) |
+| Pool's fraction of BCH's hashrate | `--pool-fraction` | 0.01 (window of 1,800 shares) |
 | Share interval | `--share-interval` | 10 s |
-| BCH block size, average transaction | `--block-bytes`, `--transaction-bytes` | 32 MB (mainnet's ABLA floor), 226 bytes |
+| BCH block size, average transaction | `--block-bytes`, `--transaction-bytes` | 3.2 MB (mainnet's ABLA floor for a one-minute block), 226 bytes |
 | Payout rule, tokens, threshold | `--payout`, `--tokens`, `--token-threshold` | hybrid, no tokens, 3,072 bytes |
 | How shares travel | `--relay` | `full` (as nodes send them) |
 | Upload, download (Mbit/s) | `--upload-mbps`, `--download-mbps` | `lognormal:50:0.8`, `lognormal:200:0.8` |
@@ -245,8 +266,11 @@ and, past that, 29,400 directly beside the tree output, a 999,967-byte
 coinbase. A share with tokens pays up to 80 directly and, past that, 79 beside
 the tree, a 3,051-byte coinbase, well inside one VM stack element. The old
 11-payout cap gives a 782-byte coinbase. ABLA sets the block size limit
-(32 MB floor on mainnet, 256 MB to start on scalenet, 2 GB guard in BCHN) and
-never raises the transaction limit.
+(for a one-minute block a 3.2 MB floor on mainnet, 200 kB on chipnet and
+25.6 MB to start on scalenet, a tenth of the ten-minute values; the model
+keeps BCHN's 2 GB guard per block, unscaled) and never raises the
+transaction limit.
+None of these coinbase limits depends on the block interval.
 
 ## Results
 
@@ -263,38 +287,40 @@ limits broken (device evidence is left out of that column). The
 listed for comparison; the hybrid rule's own share body limit is 1,204,800
 bytes.
 
-The tables were regenerated on 2026-11-12 from commit 5b67ca11. The earlier
-tables came from before commit 7e1c2707 ("Pick uncles from the mining branch
-only", 2026-10-30), which made the model pick uncles as upstream's
-`find_uncles` does: a node skips only shares already named as uncles by its
-own branch, not by any share it holds. A stale share named on a losing branch
-can now still be named on the winning one, so some shares that were orphans
-are now uncles. Orphan rates fell, most at short share intervals and on slow
-links (1-second shares with a 200 KiB coinbase: 11.07% to 9.79%); stale rates
-are the same except in three rows, which moved by at most 0.06 points.
+The tables were regenerated on 2026-11-15 for one-minute blocks. Against
+the ten-minute tables (2026-11-12, commit 5b67ca11): the default share pays
+836 payees, not 1,001, since the 1% pool's window is 1,800 shares; the
+default 3.2 MB block puts a 14-hash merkle branch in every share instead of
+18 (128 bytes less); BCH blocks interrupt the links every minute with a
+smaller compact block; and a miner gets a job about every 4.6 seconds
+instead of 5. Stale rates at the same coinbase moved by up to 0.4 points,
+about the seed-to-seed noise below. The earlier tables, before commit
+7e1c2707 ("Pick uncles from the mining branch only", 2026-10-30), had
+higher orphan rates: that commit made the model pick uncles as upstream's
+`find_uncles` does.
 
 ### Payees and the coinbase layout
 
 | Scenario | Payees | Coinbase bytes | Share bytes | Stale | Orphaned | To 90% (s) | To all (s) | P2Pool up, mean / max (Mbit/s) | BCHN relay (Mbit/s) | Templates (Mbit/s) | Stratum per miner (kbit/s) | Limits broken |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
-| no-tokens, 10 payees | 10 | 661 | 1,807 | 1.98% | 0.00% | 0.17 | 0.20 | 0.011 / 0.017 | 0.766 | 76.0 | 4.49 | none |
-| no-tokens, 100 payees | 100 | 3,721 | 4,947 | 2.08% | 0.00% | 0.19 | 0.22 | 0.028 / 0.044 | 0.766 | 76.0 | 14.7 | none |
-| no-tokens, 1,000 payees | 1,000 | 34,323 | 36,389 | 3.08% | 0.01% | 0.33 | 0.38 | 0.202 / 0.320 | 0.766 | 76.0 | 116 | none |
-| no-tokens, 6,010 payees | 6,010 | 204,663 | 211,369 | 7.81% | 0.01% | 0.98 | 1.12 | 1.18 / 1.86 | 0.766 | 76.0 | 681 | SV2 extended 64 KiB field |
-| no-tokens, 10,000 payees | 10,000 | 340,323 | 350,749 | 10.92% | 0.01% | 1.51 | 1.72 | 1.96 / 3.08 | 0.766 | 76.0 | 1,131 | pre-hybrid 200 KiB share body, SV2 extended 64 KiB field |
-| no-tokens, 29,402 payees | 29,402 | 999,991 | 1,028,497 | 24.51% | 0.84% | 4.47 | 5.03 | 5.76 / 9.02 | 0.766 | 76.0 | 3,317 | pre-hybrid 200 KiB share body, SV2 extended 64 KiB field |
-| no-tokens, 100,000 payees | 100,000 | 999,967 | 1,028,473 | 24.51% | 0.84% | 4.47 | 5.03 | 5.76 / 9.02 | 0.766 | 76.0 | 3,317 | pre-hybrid 200 KiB share body, SV2 extended 64 KiB field |
-| no-tokens, 1,000,000 payees | 1,000,000 | 999,967 | 1,028,473 | 24.51% | 0.84% | 4.47 | 5.03 | 5.76 / 9.02 | 0.766 | 76.0 | 3,317 | pre-hybrid 200 KiB share body, SV2 extended 64 KiB field |
-| tokens-3072, 100 payees | 100 | 3,051 | 4,237 | 2.07% | 0.00% | 0.19 | 0.22 | 0.024 / 0.038 | 0.766 | 76.0 | 12.5 | none |
-| tokens-3072, 10,000 payees | 10,000 | 3,051 | 4,237 | 2.07% | 0.00% | 0.19 | 0.22 | 0.024 / 0.038 | 0.766 | 76.0 | 12.5 | none |
-| tokens-3072, 1,000,000 payees | 1,000,000 | 3,051 | 4,237 | 2.07% | 0.00% | 0.19 | 0.22 | 0.024 / 0.038 | 0.766 | 76.0 | 12.5 | none |
-| cap-11, 1,000,000 payees | 1,000,000 | 782 | 1,928 | 2.00% | 0.00% | 0.17 | 0.20 | 0.011 / 0.018 | 0.766 | 76.0 | 4.95 | none |
-| uncapped, 100,000 payees | 100,000 | 3,400,325 | 3,494,591 | 51.69% | 15.58% | never | never | 19.5 / 30.7 | 0.766 | 76.0 | 11,275 | BCH 1 MB transaction, hybrid 1,204,800-byte share body, 1.25 MiB P2P message, pre-hybrid 200 KiB share body, SV2 extended 64 KiB field |
+| no-tokens, 10 payees | 10 | 661 | 1,679 | 1.95% | 0.00% | 0.17 | 0.20 | 9.9e-3 / 0.016 | 0.766 | 8.72 | 4.36 | none |
+| no-tokens, 100 payees | 100 | 3,721 | 4,819 | 2.08% | 0.00% | 0.19 | 0.22 | 0.027 / 0.043 | 0.766 | 8.72 | 15.2 | none |
+| no-tokens, 1,000 payees | 1,000 | 34,323 | 36,261 | 3.01% | 0.00% | 0.33 | 0.38 | 0.203 / 0.321 | 0.766 | 8.72 | 124 | none |
+| no-tokens, 6,010 payees | 6,010 | 204,663 | 211,241 | 7.64% | 0.01% | 0.99 | 1.13 | 1.19 / 1.87 | 0.766 | 8.72 | 731 | SV2 extended 64 KiB field |
+| no-tokens, 10,000 payees | 10,000 | 340,323 | 350,621 | 10.94% | 0.00% | 1.51 | 1.73 | 1.97 / 3.10 | 0.766 | 8.72 | 1,214 | pre-hybrid 200 KiB share body, SV2 extended 64 KiB field |
+| no-tokens, 29,402 payees | 29,402 | 999,991 | 1,028,369 | 24.70% | 0.62% | 4.48 | 5.05 | 5.79 / 9.08 | 0.766 | 8.72 | 3,564 | pre-hybrid 200 KiB share body, SV2 extended 64 KiB field |
+| no-tokens, 100,000 payees | 100,000 | 999,967 | 1,028,345 | 24.70% | 0.62% | 4.48 | 5.05 | 5.79 / 9.08 | 0.766 | 8.72 | 3,564 | pre-hybrid 200 KiB share body, SV2 extended 64 KiB field |
+| no-tokens, 1,000,000 payees | 1,000,000 | 999,967 | 1,028,345 | 24.70% | 0.62% | 4.48 | 5.05 | 5.79 / 9.08 | 0.766 | 8.72 | 3,564 | pre-hybrid 200 KiB share body, SV2 extended 64 KiB field |
+| tokens-3072, 100 payees | 100 | 3,051 | 4,109 | 2.05% | 0.00% | 0.19 | 0.22 | 0.023 / 0.037 | 0.766 | 8.72 | 12.9 | none |
+| tokens-3072, 10,000 payees | 10,000 | 3,051 | 4,109 | 2.05% | 0.00% | 0.19 | 0.22 | 0.023 / 0.037 | 0.766 | 8.72 | 12.9 | none |
+| tokens-3072, 1,000,000 payees | 1,000,000 | 3,051 | 4,109 | 2.05% | 0.00% | 0.19 | 0.22 | 0.023 / 0.037 | 0.766 | 8.72 | 12.9 | none |
+| cap-11, 1,000,000 payees | 1,000,000 | 782 | 1,800 | 1.97% | 0.00% | 0.17 | 0.20 | 0.011 / 0.017 | 0.766 | 8.72 | 4.78 | none |
+| uncapped, 100,000 payees | 100,000 | 3,400,325 | 3,494,463 | 51.70% | 15.77% | never | never | 19.6 / 30.8 | 0.766 | 8.72 | 12,113 | BCH 1 MB transaction, hybrid 1,204,800-byte share body, 1.25 MiB P2P message, pre-hybrid 200 KiB share body, SV2 extended 64 KiB field |
 
 Each payee paid directly adds 34 bytes to every share, and pushing whole
 shares to every peer multiplies that: at 6,010 payees the busiest node
-uploads 1.9 Mbit/s and 7.8% of shares go stale; at 29,402 (a 1 MB coinbase)
-a quarter do and 0.8% are orphaned. Past 29,402 the hybrid rule's tree keeps the
+uploads 1.9 Mbit/s and 7.6% of shares go stale; at 29,402 (a 1 MB coinbase)
+a quarter do and 0.6% are orphaned. Past 29,402 the hybrid rule's tree keeps the
 coinbase under 1 MB, so 100,000 and a million payees cost the same as
 29,402. Without that limit (`uncapped`) a 100,000-payee coinbase is 3.4 MB:
 BCH rejects the block, and on these links a share takes longer to cross the
@@ -308,15 +334,15 @@ peer rebuilds:
 
 | Scenario | Payees | Coinbase bytes | Share bytes | Stale | Orphaned | To 90% (s) | To all (s) | P2Pool up, mean / max (Mbit/s) | BCHN relay (Mbit/s) | Templates (Mbit/s) | Stratum per miner (kbit/s) | Limits broken |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
-| no-tokens, 1,000 payees, full relay | 1,000 | 34,323 | 36,389 | 3.08% | 0.01% | 0.33 | 0.38 | 0.202 / 0.320 | 0.766 | 76.0 | 116 | none |
-| no-tokens, 6,010 payees, full relay | 6,010 | 204,663 | 211,369 | 7.81% | 0.01% | 0.98 | 1.12 | 1.18 / 1.86 | 0.766 | 76.0 | 681 | SV2 extended 64 KiB field |
-| no-tokens, 29,402 payees, full relay | 29,402 | 999,991 | 1,028,497 | 24.51% | 0.84% | 4.47 | 5.03 | 5.76 / 9.02 | 0.766 | 76.0 | 3,317 | pre-hybrid 200 KiB share body, SV2 extended 64 KiB field |
-| no-tokens, 1,000 payees, without-payouts relay | 1,000 | 34,323 | 1,429 | 1.98% | 0.00% | 0.17 | 0.20 | 8.4e-3 / 0.013 | 0.766 | 76.0 | 116 | none |
-| no-tokens, 6,010 payees, without-payouts relay | 6,010 | 204,663 | 1,429 | 2.10% | 0.00% | 0.19 | 0.22 | 8.3e-3 / 0.013 | 0.766 | 76.0 | 681 | SV2 extended 64 KiB field |
-| no-tokens, 29,402 payees, without-payouts relay | 29,402 | 999,991 | 1,429 | 2.65% | 0.00% | 0.26 | 0.30 | 7.8e-3 / 0.013 | 0.766 | 76.0 | 3,317 | pre-hybrid 200 KiB share body, SV2 extended 64 KiB field |
+| no-tokens, 1,000 payees, full relay | 1,000 | 34,323 | 36,261 | 3.01% | 0.00% | 0.33 | 0.38 | 0.203 / 0.321 | 0.766 | 8.72 | 124 | none |
+| no-tokens, 6,010 payees, full relay | 6,010 | 204,663 | 211,241 | 7.64% | 0.01% | 0.99 | 1.13 | 1.19 / 1.87 | 0.766 | 8.72 | 731 | SV2 extended 64 KiB field |
+| no-tokens, 29,402 payees, full relay | 29,402 | 999,991 | 1,028,369 | 24.70% | 0.62% | 4.48 | 5.05 | 5.79 / 9.08 | 0.766 | 8.72 | 3,564 | pre-hybrid 200 KiB share body, SV2 extended 64 KiB field |
+| no-tokens, 1,000 payees, without-payouts relay | 1,000 | 34,323 | 1,301 | 1.95% | 0.00% | 0.17 | 0.20 | 7.8e-3 / 0.012 | 0.766 | 8.72 | 124 | none |
+| no-tokens, 6,010 payees, without-payouts relay | 6,010 | 204,663 | 1,301 | 2.09% | 0.00% | 0.19 | 0.22 | 7.6e-3 / 0.012 | 0.766 | 8.72 | 731 | SV2 extended 64 KiB field |
+| no-tokens, 29,402 payees, without-payouts relay | 29,402 | 999,991 | 1,301 | 2.55% | 0.00% | 0.26 | 0.30 | 7.2e-3 / 0.012 | 0.766 | 8.72 | 3,564 | pre-hybrid 200 KiB share body, SV2 extended 64 KiB field |
 
-Without the payouts a share is about 1.4 KB at any payee count, and stale
-shares stay between 2.0% and 2.7%: the share chain no longer cares how many
+Without the payouts a share is about 1.3 KB at any payee count, and stale
+shares stay between 2.0% and 2.6%: the share chain no longer cares how many
 miners are paid directly. The remaining growth is validation: rebuilding a
 1 MB coinbase is taken to cost 20 ms. The coinbase itself still reaches the
 miners in their Stratum jobs (below) and BCH in the found block.
@@ -327,64 +353,74 @@ A million equally sized miners, for pools from 0.1% to 30% of BCH:
 
 | Scenario | Payees | Coinbase bytes | Share bytes | Stale | Orphaned | To 90% (s) | To all (s) | P2Pool up, mean / max (Mbit/s) | BCHN relay (Mbit/s) | Templates (Mbit/s) | Stratum per miner (kbit/s) | Limits broken |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
-| no-tokens, pool 0.1% of BCH | 113,932 | 999,967 | 1,028,473 | 24.51% | 0.84% | 4.47 | 5.03 | 5.76 / 9.02 | 0.766 | 76.0 | 3,317 | pre-hybrid 200 KiB share body, SV2 extended 64 KiB field |
-| no-tokens, pool 0.3% of BCH | 58,236 | 999,967 | 1,028,473 | 24.51% | 0.84% | 4.47 | 5.03 | 5.76 / 9.02 | 0.766 | 76.0 | 3,317 | pre-hybrid 200 KiB share body, SV2 extended 64 KiB field |
-| no-tokens, pool 1% of BCH | 17,840 | 606,883 | 624,629 | 16.89% | 0.21% | 2.58 | 2.93 | 3.49 / 5.50 | 0.766 | 76.0 | 2,014 | pre-hybrid 200 KiB share body, SV2 extended 64 KiB field |
-| no-tokens, pool 3% of BCH | 5,983 | 203,745 | 210,451 | 7.77% | 0.01% | 0.98 | 1.12 | 1.18 / 1.85 | 0.766 | 76.0 | 678 | SV2 extended 64 KiB field |
-| no-tokens, pool 10% of BCH | 1,799 | 61,489 | 64,275 | 3.77% | 0.00% | 0.44 | 0.50 | 0.357 / 0.562 | 0.766 | 76.0 | 206 | none |
-| no-tokens, pool 30% of BCH | 601 | 20,757 | 22,423 | 2.65% | 0.01% | 0.27 | 0.31 | 0.125 / 0.197 | 0.766 | 76.0 | 71.1 | none |
-| tokens-3072, pool 0.1% of BCH | 113,932 | 3,051 | 4,237 | 2.07% | 0.00% | 0.19 | 0.22 | 0.024 / 0.038 | 0.766 | 76.0 | 12.5 | none |
-| tokens-3072, pool 0.3% of BCH | 58,236 | 3,051 | 4,237 | 2.07% | 0.00% | 0.19 | 0.22 | 0.024 / 0.038 | 0.766 | 76.0 | 12.5 | none |
-| tokens-3072, pool 1% of BCH | 17,840 | 3,051 | 4,237 | 2.07% | 0.00% | 0.19 | 0.22 | 0.024 / 0.038 | 0.766 | 76.0 | 12.5 | none |
-| tokens-3072, pool 3% of BCH | 5,983 | 3,051 | 4,237 | 2.07% | 0.00% | 0.19 | 0.22 | 0.024 / 0.038 | 0.766 | 76.0 | 12.5 | none |
-| tokens-3072, pool 10% of BCH | 1,799 | 3,051 | 4,237 | 2.07% | 0.00% | 0.19 | 0.22 | 0.024 / 0.038 | 0.766 | 76.0 | 12.5 | none |
-| tokens-3072, pool 30% of BCH | 601 | 3,051 | 4,237 | 2.07% | 0.00% | 0.19 | 0.22 | 0.024 / 0.038 | 0.766 | 76.0 | 12.5 | none |
+| no-tokens, pool 0.1% of BCH | 17,840 | 606,883 | 624,501 | 17.09% | 0.17% | 2.59 | 2.94 | 3.52 / 5.53 | 0.766 | 8.72 | 2,164 | pre-hybrid 200 KiB share body, SV2 extended 64 KiB field |
+| no-tokens, pool 0.3% of BCH | 5,983 | 203,745 | 210,323 | 7.61% | 0.01% | 0.99 | 1.13 | 1.18 / 1.86 | 0.766 | 8.72 | 728 | SV2 extended 64 KiB field |
+| no-tokens, pool 1% of BCH | 1,799 | 61,489 | 64,147 | 3.77% | 0.00% | 0.44 | 0.50 | 0.359 / 0.564 | 0.766 | 8.72 | 221 | none |
+| no-tokens, pool 3% of BCH | 601 | 20,757 | 22,295 | 2.57% | 0.00% | 0.27 | 0.31 | 0.125 / 0.197 | 0.766 | 8.72 | 76.0 | none |
+| no-tokens, pool 10% of BCH | 181 | 6,475 | 7,653 | 2.18% | 0.00% | 0.20 | 0.24 | 0.043 / 0.068 | 0.766 | 8.72 | 25.1 | none |
+| no-tokens, pool 30% of BCH | 61 | 2,395 | 3,453 | 2.02% | 0.00% | 0.18 | 0.21 | 0.020 / 0.031 | 0.766 | 8.72 | 10.6 | none |
+| tokens-3072, pool 0.1% of BCH | 17,840 | 3,051 | 4,109 | 2.05% | 0.00% | 0.19 | 0.22 | 0.023 / 0.037 | 0.766 | 8.72 | 12.9 | none |
+| tokens-3072, pool 0.3% of BCH | 5,983 | 3,051 | 4,109 | 2.05% | 0.00% | 0.19 | 0.22 | 0.023 / 0.037 | 0.766 | 8.72 | 12.9 | none |
+| tokens-3072, pool 1% of BCH | 1,799 | 3,051 | 4,109 | 2.05% | 0.00% | 0.19 | 0.22 | 0.023 / 0.037 | 0.766 | 8.72 | 12.9 | none |
+| tokens-3072, pool 3% of BCH | 601 | 3,051 | 4,109 | 2.05% | 0.00% | 0.19 | 0.22 | 0.023 / 0.037 | 0.766 | 8.72 | 12.9 | none |
+| tokens-3072, pool 10% of BCH | 181 | 3,051 | 4,109 | 2.05% | 0.00% | 0.19 | 0.22 | 0.023 / 0.037 | 0.766 | 8.72 | 12.9 | none |
+| tokens-3072, pool 30% of BCH | 61 | 2,395 | 3,453 | 2.02% | 0.00% | 0.18 | 0.21 | 0.020 / 0.031 | 0.766 | 8.72 | 10.6 | none |
 
 The window is three BCH blocks of the pool's work, so a growing pool pays
-fewer, larger miners per block: at 10% of BCH the window is 1,800 shares
-and a million miners fill at most 1,798 payee slots, 1,799 payees with the
-donation key (a 61 KB coinbase). At 3% the coinbase has 5,983 payees
-(204 KB), at 1% 17,840 (607 KB), and at 0.3% and below it reaches the 1 MB
-limit, with the rest in the tree. Uneven hashrate helps: with a Pareto
-spread (shape 1.16, 80% of the hashrate on 20% of the miners;
-`--miner-hashrate pareto:1.16`), a million miners make 12,624 payees at 1%
-of BCH (430 KB) and 66,700 at 0.1% (29,400 direct, 37,300 in the tree).
+fewer, larger miners per block. With one-minute blocks that is a tenth of
+the ten-minute window at every pool size: at 10% of BCH the window is 180
+shares and a million miners fill at most 180 payee slots, 181 payees with
+the donation key (a 6.5 KB coinbase). At 1% the coinbase has 1,799 payees
+(61 KB), at 0.3% 5,983 (204 KB) and at 0.1% 17,840 (607 KB). No pool in
+the sweep reaches the 1 MB limit any more; that takes a pool below about
+0.06% of BCH (with ten-minute blocks, 0.6%). Uneven hashrate helps: with a
+Pareto spread (shape 1.16, 80% of the hashrate on 20% of the miners;
+`--miner-hashrate pareto:1.16`), a million miners make 1,499 payees at 1%
+of BCH (51 KB) and 12,624 at 0.1% (430 KB).
 
 Whether a million miners is realistic depends on BCH's hashrate. As an
 illustration only: if BCH had 3 EH/s, a million 1 TH/s miners would be a
-third of it, where the window is 540 shares.
+third of it, where the window is 54 shares.
 
 ### Block size
 
-The default share (a thousand miners and the donation key, 1,001 payees, no
-tokens) on mixed and on data-centre (1 Gbit/s) links, from chipnet's 2 MB
-to BCHN's 2 GB guard:
+The default share (a thousand miners, 835 of them in the window, and the
+donation key: 836 payees, no tokens) on mixed and on data-centre (1 Gbit/s)
+links, one-minute blocks from chipnet's 200 kB floor to BCHN's 2 GB guard:
 
 | Scenario | Payees | Coinbase bytes | Share bytes | Stale | Orphaned | To 90% (s) | To all (s) | P2Pool up, mean / max (Mbit/s) | BCHN relay (Mbit/s) | Templates (Mbit/s) | Stratum per miner (kbit/s) | Limits broken |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
-| 2 MB blocks, mixed links | 1,001 | 34,357 | 36,295 | 3.03% | 0.01% | 0.32 | 0.37 | 0.202 / 0.319 | 0.048 | 4.75 | 116 | none |
-| 32 MB blocks, mixed links | 1,001 | 34,357 | 36,423 | 3.09% | 0.01% | 0.33 | 0.38 | 0.202 / 0.320 | 0.766 | 76.0 | 116 | none |
-| 256 MB blocks, mixed links | 1,001 | 34,357 | 36,519 | 3.40% | 0.01% | 0.38 | 0.43 | 0.203 / 0.322 | 6.13 | 608 | 117 | none |
-| 1 GB blocks, mixed links | 1,001 | 34,357 | 36,583 | 5.77% | 0.94% | 1.62 | 10.86 | 0.204 / 0.321 | 24.0 | 2,375 | 117 | BCHN relay over the link on 14 of 100 nodes |
-| 2 GB blocks, mixed links | 1,001 | 34,357 | 36,615 | 8.09% | 1.77% | 3.53 | 173.99 | 0.203 / 0.324 | 47.9 | 4,750 | 117 | BCHN relay over the link on 52 of 100 nodes |
-| 2 MB blocks, data-centre links | 1,001 | 34,357 | 36,295 | 1.62% | 0.00% | 0.12 | 0.14 | 0.197 / 0.317 | 0.048 | 4.75 | 116 | none |
-| 32 MB blocks, data-centre links | 1,001 | 34,357 | 36,423 | 1.62% | 0.00% | 0.12 | 0.14 | 0.198 / 0.319 | 0.766 | 76.0 | 116 | none |
-| 256 MB blocks, data-centre links | 1,001 | 34,357 | 36,519 | 1.62% | 0.00% | 0.12 | 0.14 | 0.198 / 0.319 | 6.13 | 608 | 117 | none |
-| 1 GB blocks, data-centre links | 1,001 | 34,357 | 36,583 | 1.62% | 0.00% | 0.12 | 0.14 | 0.199 / 0.320 | 24.0 | 2,375 | 117 | none |
-| 2 GB blocks, data-centre links | 1,001 | 34,357 | 36,615 | 1.62% | 0.00% | 0.12 | 0.14 | 0.199 / 0.320 | 47.9 | 4,750 | 117 | none |
+| 200 kB blocks, mixed links | 836 | 28,747 | 30,397 | 2.84% | 0.00% | 0.30 | 0.35 | 0.170 / 0.270 | 0.048 | 0.546 | 104 | none |
+| 3.2 MB blocks, mixed links | 836 | 28,747 | 30,525 | 2.85% | 0.00% | 0.30 | 0.35 | 0.171 / 0.271 | 0.766 | 8.72 | 104 | none |
+| 25.6 MB blocks, mixed links | 836 | 28,747 | 30,621 | 3.20% | 0.00% | 0.34 | 0.39 | 0.171 / 0.271 | 6.13 | 69.8 | 105 | none |
+| 1 GB blocks, mixed links | 836 | 28,747 | 30,813 | 0.74% | 0.00% | 7184.00 | never | 0.171 / 0.274 | 240 | 2,726 | 105 | BCHN relay over the link on 99 of 100 nodes |
+| 2 GB blocks, mixed links | 836 | 28,747 | 30,845 | 97.92% | 97.45% | never | never | 0.104 / 0.188 | 479 | 5,451 | 106 | BCHN relay over the link on 100 of 100 nodes |
+| 200 kB blocks, data-centre links | 836 | 28,747 | 30,397 | 1.55% | 0.00% | 0.12 | 0.13 | 0.166 / 0.267 | 0.048 | 0.546 | 104 | none |
+| 3.2 MB blocks, data-centre links | 836 | 28,747 | 30,525 | 1.56% | 0.00% | 0.12 | 0.13 | 0.167 / 0.269 | 0.766 | 8.72 | 104 | none |
+| 25.6 MB blocks, data-centre links | 836 | 28,747 | 30,621 | 1.56% | 0.00% | 0.12 | 0.13 | 0.167 / 0.269 | 6.13 | 69.8 | 105 | none |
+| 1 GB blocks, data-centre links | 836 | 28,747 | 30,813 | 1.57% | 0.00% | 0.12 | 0.14 | 0.169 / 0.271 | 240 | 2,726 | 105 | none |
+| 2 GB blocks, data-centre links | 836 | 28,747 | 30,845 | 1.61% | 0.00% | 0.13 | 0.15 | 0.169 / 0.271 | 479 | 5,451 | 106 | none |
 
 The share chain does not care about block size: its merkle branch grows by
 one 32-byte hash for each doubling, and on data-centre links the stale rate
-is 1.6% at every size. What grows is BCHN: to relay a full 1 GB block's
-transactions a node needs about 24 Mbit/s each way, 48 Mbit/s at 2 GB, and a
-2 GB compact block is 53 MB. On the mixed links 14 of 100 nodes (1 GB) and
-52 of 100 (2 GB) cannot carry that; their miners are moved to the others and
-the shares that cross them wait. That is a cost of running a BCH full node
-at that size, P2Pool or not. P2Pool adds the block templates it fetches from
+is 1.6% at every size. What grows is BCHN, and a block every minute carries
+ten times the transactions a second that the same size every ten minutes
+did: to relay full 25.6 MB blocks a node needs about 6.1 Mbit/s each way,
+240 Mbit/s at 1 GB and 479 Mbit/s at 2 GB, and a 2 GB compact block is 53
+MB every minute. The 24 and 48 Mbit/s that 1 GB and 2 GB ten-minute blocks
+needed now come with 100 MB and 200 MB one-minute blocks. On the mixed links
+99 of 100 nodes cannot carry the 1 GB relay and none the 2 GB. The model
+moves the miners of a node short of BCHN's relay to the other nodes, so at
+1 GB the one node left finds every share (0.74% stale, and shares take
+hours to reach the nodes behind their BCHN load), and at 2 GB, with no node
+left, every node keeps mining and 98% of shares go stale. Those rows show
+nodes that cannot follow BCH at all, P2Pool or not: a cost of running a BCH
+full node at that size. P2Pool adds the block templates it fetches from
 BCHN: a full `getblocktemplate` every 10 seconds and on each block is about
-three times the block in JSON, 76 Mbit/s at full 32 MB blocks and 4.75
-Gbit/s at 2 GB. It stays inside one machine when BCHN runs on the same host,
-but not when BCHN is reached over a network, and BCHN has to build that JSON
+three times the block in JSON, 8.7 Mbit/s at full 3.2 MB blocks, 70 Mbit/s
+at 25.6 MB and 5.45 Gbit/s at 2 GB. It stays inside one machine when BCHN
+runs on the same host, but not when BCHN is reached over a network, and
+BCHN has to build that JSON
 each time. BCHN's `getblocktemplatelight` and `submitblocklight` send only
 the merkle branch.
 
@@ -396,26 +432,26 @@ for a 3 KB coinbase (tokens), a 200 KiB one (6,010 payees) and a 1 MB one
 
 | Scenario | Payees | Coinbase bytes | Share bytes | Stale | Orphaned | To 90% (s) | To all (s) | P2Pool up, mean / max (Mbit/s) | BCHN relay (Mbit/s) | Templates (Mbit/s) | Stratum per miner (kbit/s) | Limits broken |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
-| tokens-3072, 1,000 payees, upload 5 Mbit/s | 1,000 | 3,051 | 4,237 | 3.97% | 0.02% | 0.44 | 0.50 | 0.024 / 0.038 | 0.766 | 76.0 | 12.5 | none |
-| tokens-3072, 1,000 payees, upload 20 Mbit/s | 1,000 | 3,051 | 4,237 | 2.34% | 0.00% | 0.22 | 0.26 | 0.024 / 0.038 | 0.766 | 76.0 | 12.5 | none |
-| tokens-3072, 1,000 payees, upload 50 Mbit/s | 1,000 | 3,051 | 4,237 | 2.07% | 0.00% | 0.19 | 0.22 | 0.024 / 0.038 | 0.766 | 76.0 | 12.5 | none |
-| tokens-3072, 1,000 payees, upload 200 Mbit/s | 1,000 | 3,051 | 4,237 | 1.93% | 0.00% | 0.17 | 0.20 | 0.024 / 0.038 | 0.766 | 76.0 | 12.5 | none |
-| tokens-3072, 1,000 payees, upload 1000 Mbit/s | 1,000 | 3,051 | 4,237 | 1.87% | 0.00% | 0.16 | 0.19 | 0.024 / 0.038 | 0.766 | 76.0 | 12.5 | none |
-| no-tokens, 6,010 payees, upload 5 Mbit/s | 6,010 | 204,663 | 211,369 | 43.51% | 12.19% | never | never | 1.16 / 1.83 | 0.766 | 76.0 | 681 | SV2 extended 64 KiB field |
-| no-tokens, 6,010 payees, upload 20 Mbit/s | 6,010 | 204,663 | 211,369 | 15.24% | 0.12% | 2.25 | 2.56 | 1.18 / 1.87 | 0.766 | 76.0 | 681 | SV2 extended 64 KiB field |
-| no-tokens, 6,010 payees, upload 50 Mbit/s | 6,010 | 204,663 | 211,369 | 7.81% | 0.01% | 0.98 | 1.12 | 1.18 / 1.86 | 0.766 | 76.0 | 681 | SV2 extended 64 KiB field |
-| no-tokens, 6,010 payees, upload 200 Mbit/s | 6,010 | 204,663 | 211,369 | 3.54% | 0.00% | 0.40 | 0.46 | 1.17 / 1.84 | 0.766 | 76.0 | 681 | SV2 extended 64 KiB field |
-| no-tokens, 6,010 payees, upload 1000 Mbit/s | 6,010 | 204,663 | 211,369 | 2.45% | 0.01% | 0.23 | 0.27 | 1.15 / 1.84 | 0.766 | 76.0 | 681 | SV2 extended 64 KiB field |
-| no-tokens, 29,402 payees, upload 5 Mbit/s | 29,402 | 999,991 | 1,028,497 | 78.38% | 56.95% | never | never | 5.21 / 8.23 | 0.766 | 76.0 | 3,317 | pre-hybrid 200 KiB share body, SV2 extended 64 KiB field |
-| no-tokens, 29,402 payees, upload 20 Mbit/s | 29,402 | 999,991 | 1,028,497 | 44.60% | 11.68% | never | never | 5.77 / 9.06 | 0.766 | 76.0 | 3,317 | pre-hybrid 200 KiB share body, SV2 extended 64 KiB field |
-| no-tokens, 29,402 payees, upload 50 Mbit/s | 29,402 | 999,991 | 1,028,497 | 24.51% | 0.84% | 4.47 | 5.03 | 5.76 / 9.02 | 0.766 | 76.0 | 3,317 | pre-hybrid 200 KiB share body, SV2 extended 64 KiB field |
-| no-tokens, 29,402 payees, upload 200 Mbit/s | 29,402 | 999,991 | 1,028,497 | 9.40% | 0.01% | 1.21 | 1.38 | 5.68 / 8.98 | 0.766 | 76.0 | 3,317 | pre-hybrid 200 KiB share body, SV2 extended 64 KiB field |
-| no-tokens, 29,402 payees, upload 1000 Mbit/s | 29,402 | 999,991 | 1,028,497 | 4.00% | 0.00% | 0.47 | 0.53 | 5.52 / 8.84 | 0.766 | 76.0 | 3,317 | pre-hybrid 200 KiB share body, SV2 extended 64 KiB field |
+| tokens-3072, 1,000 payees, upload 5 Mbit/s | 1,000 | 3,051 | 4,109 | 3.69% | 0.00% | 0.42 | 0.47 | 0.024 / 0.037 | 0.766 | 8.72 | 12.9 | none |
+| tokens-3072, 1,000 payees, upload 20 Mbit/s | 1,000 | 3,051 | 4,109 | 2.23% | 0.00% | 0.22 | 0.25 | 0.023 / 0.037 | 0.766 | 8.72 | 12.9 | none |
+| tokens-3072, 1,000 payees, upload 50 Mbit/s | 1,000 | 3,051 | 4,109 | 2.05% | 0.00% | 0.19 | 0.22 | 0.023 / 0.037 | 0.766 | 8.72 | 12.9 | none |
+| tokens-3072, 1,000 payees, upload 200 Mbit/s | 1,000 | 3,051 | 4,109 | 1.92% | 0.00% | 0.17 | 0.20 | 0.023 / 0.037 | 0.766 | 8.72 | 12.9 | none |
+| tokens-3072, 1,000 payees, upload 1000 Mbit/s | 1,000 | 3,051 | 4,109 | 1.88% | 0.00% | 0.16 | 0.19 | 0.023 / 0.037 | 0.766 | 8.72 | 12.9 | none |
+| no-tokens, 6,010 payees, upload 5 Mbit/s | 6,010 | 204,663 | 211,241 | 43.02% | 13.14% | never | never | 1.16 / 1.83 | 0.766 | 8.72 | 731 | SV2 extended 64 KiB field |
+| no-tokens, 6,010 payees, upload 20 Mbit/s | 6,010 | 204,663 | 211,241 | 15.17% | 0.13% | 2.27 | 2.57 | 1.19 / 1.88 | 0.766 | 8.72 | 731 | SV2 extended 64 KiB field |
+| no-tokens, 6,010 payees, upload 50 Mbit/s | 6,010 | 204,663 | 211,241 | 7.64% | 0.01% | 0.99 | 1.13 | 1.19 / 1.87 | 0.766 | 8.72 | 731 | SV2 extended 64 KiB field |
+| no-tokens, 6,010 payees, upload 200 Mbit/s | 6,010 | 204,663 | 211,241 | 3.53% | 0.00% | 0.40 | 0.46 | 1.17 / 1.85 | 0.766 | 8.72 | 731 | SV2 extended 64 KiB field |
+| no-tokens, 6,010 payees, upload 1000 Mbit/s | 6,010 | 204,663 | 211,241 | 2.38% | 0.00% | 0.23 | 0.27 | 1.16 / 1.85 | 0.766 | 8.72 | 731 | SV2 extended 64 KiB field |
+| no-tokens, 29,402 payees, upload 5 Mbit/s | 29,402 | 999,991 | 1,028,369 | 78.66% | 57.14% | never | never | 5.23 / 8.24 | 0.766 | 8.72 | 3,564 | pre-hybrid 200 KiB share body, SV2 extended 64 KiB field |
+| no-tokens, 29,402 payees, upload 20 Mbit/s | 29,402 | 999,991 | 1,028,369 | 44.78% | 12.47% | never | never | 5.80 / 9.11 | 0.766 | 8.72 | 3,564 | pre-hybrid 200 KiB share body, SV2 extended 64 KiB field |
+| no-tokens, 29,402 payees, upload 50 Mbit/s | 29,402 | 999,991 | 1,028,369 | 24.70% | 0.62% | 4.48 | 5.05 | 5.79 / 9.08 | 0.766 | 8.72 | 3,564 | pre-hybrid 200 KiB share body, SV2 extended 64 KiB field |
+| no-tokens, 29,402 payees, upload 200 Mbit/s | 29,402 | 999,991 | 1,028,369 | 8.99% | 0.00% | 1.21 | 1.38 | 5.72 / 9.03 | 0.766 | 8.72 | 3,564 | pre-hybrid 200 KiB share body, SV2 extended 64 KiB field |
+| no-tokens, 29,402 payees, upload 1000 Mbit/s | 29,402 | 999,991 | 1,028,369 | 3.92% | 0.00% | 0.47 | 0.53 | 5.55 / 8.88 | 0.766 | 8.72 | 3,564 | pre-hybrid 200 KiB share body, SV2 extended 64 KiB field |
 
-Small shares go stale 4% of the time even when the median node has 5 Mbit/s
-up. A 200 KiB coinbase needs about 50 Mbit/s for stale shares to stay under
-8%, and a 1 MB coinbase needs data-centre links (9.4% at 200 Mbit/s, 4.0% at
-1 Gbit/s) when shares travel whole.
+Small shares go stale 3.7% of the time even when the median node has 5
+Mbit/s up. A 200 KiB coinbase needs about 50 Mbit/s for stale shares to stay
+under 8%, and a 1 MB coinbase needs data-centre links (9.0% at 200 Mbit/s,
+3.9% at 1 Gbit/s) when shares travel whole.
 
 ### Latency, share interval and node count
 
@@ -423,34 +459,34 @@ One-way latency, median of each link:
 
 | Scenario | Payees | Coinbase bytes | Share bytes | Stale | Orphaned | To 90% (s) | To all (s) | P2Pool up, mean / max (Mbit/s) | BCHN relay (Mbit/s) | Templates (Mbit/s) | Stratum per miner (kbit/s) | Limits broken |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
-| latency 10 ms | 1,001 | 34,357 | 36,423 | 2.20% | 0.00% | 0.19 | 0.22 | 0.200 / 0.317 | 0.766 | 76.0 | 116 | none |
-| latency 50 ms | 1,001 | 34,357 | 36,423 | 3.09% | 0.01% | 0.33 | 0.38 | 0.202 / 0.320 | 0.766 | 76.0 | 116 | none |
-| latency 150 ms | 1,001 | 34,357 | 36,423 | 5.08% | 0.00% | 0.63 | 0.73 | 0.204 / 0.322 | 0.766 | 76.0 | 116 | none |
-| latency 400 ms | 1,001 | 34,357 | 36,423 | 9.85% | 0.02% | 1.34 | 1.57 | 0.205 / 0.322 | 0.766 | 76.0 | 116 | none |
+| latency 10 ms | 836 | 28,747 | 30,525 | 2.05% | 0.00% | 0.17 | 0.20 | 0.169 / 0.266 | 0.766 | 8.72 | 104 | none |
+| latency 50 ms | 836 | 28,747 | 30,525 | 2.85% | 0.00% | 0.30 | 0.35 | 0.171 / 0.271 | 0.766 | 8.72 | 104 | none |
+| latency 150 ms | 836 | 28,747 | 30,525 | 4.80% | 0.00% | 0.60 | 0.70 | 0.172 / 0.272 | 0.766 | 8.72 | 104 | none |
+| latency 400 ms | 836 | 28,747 | 30,525 | 9.56% | 0.03% | 1.31 | 1.54 | 0.173 / 0.272 | 0.766 | 8.72 | 104 | none |
 
 Share interval, for a 3 KB and a 200 KiB coinbase:
 
 | Scenario | Payees | Coinbase bytes | Share bytes | Stale | Orphaned | To 90% (s) | To all (s) | P2Pool up, mean / max (Mbit/s) | BCHN relay (Mbit/s) | Templates (Mbit/s) | Stratum per miner (kbit/s) | Limits broken |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
-| tokens-3072, 1,000 payees, 1 s shares | 1,000 | 3,051 | 4,237 | 15.89% | 0.10% | 0.19 | 0.22 | 0.239 / 0.379 | 0.766 | 76.0 | 68.1 | none |
-| tokens-3072, 1,000 payees, 2 s shares | 1,000 | 3,051 | 4,237 | 8.68% | 0.01% | 0.19 | 0.22 | 0.120 / 0.190 | 0.766 | 76.0 | 37.2 | none |
-| tokens-3072, 1,000 payees, 5 s shares | 1,000 | 3,051 | 4,237 | 3.84% | 0.00% | 0.19 | 0.22 | 0.048 / 0.076 | 0.766 | 76.0 | 18.6 | none |
-| tokens-3072, 1,000 payees, 10 s shares | 1,000 | 3,051 | 4,237 | 2.07% | 0.00% | 0.19 | 0.22 | 0.024 / 0.038 | 0.766 | 76.0 | 12.5 | none |
-| tokens-3072, 1,000 payees, 30 s shares | 1,000 | 3,051 | 4,237 | 0.52% | 0.00% | 0.19 | 0.22 | 8.0e-3 / 0.013 | 0.766 | 76.0 | 8.34 | none |
-| no-tokens, 6,010 payees, 1 s shares | 6,010 | 204,663 | 211,369 | 45.81% | 9.79% | 676.33 | 676.48 | 11.8 / 18.6 | 0.766 | 76.0 | 3,719 | SV2 extended 64 KiB field |
-| no-tokens, 6,010 payees, 2 s shares | 6,010 | 204,663 | 211,369 | 29.50% | 1.11% | 1.10 | 1.25 | 5.93 / 9.35 | 0.766 | 76.0 | 2,031 | SV2 extended 64 KiB field |
-| no-tokens, 6,010 payees, 5 s shares | 6,010 | 204,663 | 211,369 | 14.09% | 0.13% | 1.00 | 1.14 | 2.38 / 3.75 | 0.766 | 76.0 | 1,018 | SV2 extended 64 KiB field |
-| no-tokens, 6,010 payees, 10 s shares | 6,010 | 204,663 | 211,369 | 7.81% | 0.01% | 0.98 | 1.12 | 1.18 / 1.86 | 0.766 | 76.0 | 681 | SV2 extended 64 KiB field |
-| no-tokens, 6,010 payees, 30 s shares | 6,010 | 204,663 | 211,369 | 2.74% | 0.00% | 0.98 | 1.11 | 0.394 / 0.621 | 0.766 | 76.0 | 456 | SV2 extended 64 KiB field |
+| tokens-3072, 1,000 payees, 1 s shares | 1,000 | 3,051 | 4,109 | 16.02% | 0.07% | 0.19 | 0.22 | 0.233 / 0.369 | 0.766 | 8.72 | 66.2 | none |
+| tokens-3072, 1,000 payees, 2 s shares | 1,000 | 3,051 | 4,109 | 8.86% | 0.01% | 0.19 | 0.22 | 0.116 / 0.184 | 0.766 | 8.72 | 36.6 | none |
+| tokens-3072, 1,000 payees, 5 s shares | 1,000 | 3,051 | 4,109 | 3.52% | 0.00% | 0.19 | 0.22 | 0.046 / 0.073 | 0.766 | 8.72 | 18.8 | none |
+| tokens-3072, 1,000 payees, 10 s shares | 1,000 | 3,051 | 4,109 | 2.05% | 0.00% | 0.19 | 0.22 | 0.023 / 0.037 | 0.766 | 8.72 | 12.9 | none |
+| tokens-3072, 1,000 payees, 30 s shares | 1,000 | 3,051 | 4,109 | 0.91% | 0.00% | 0.19 | 0.22 | 7.9e-3 / 0.013 | 0.766 | 8.72 | 8.90 | none |
+| no-tokens, 6,010 payees, 1 s shares | 6,010 | 204,663 | 211,241 | 45.81% | 9.70% | 689.11 | 689.26 | 11.8 / 18.7 | 0.766 | 8.72 | 3,767 | SV2 extended 64 KiB field |
+| no-tokens, 6,010 payees, 2 s shares | 6,010 | 204,663 | 211,241 | 29.82% | 1.11% | 1.11 | 1.25 | 5.91 / 9.31 | 0.766 | 8.72 | 2,080 | SV2 extended 64 KiB field |
+| no-tokens, 6,010 payees, 5 s shares | 6,010 | 204,663 | 211,241 | 14.00% | 0.08% | 1.00 | 1.14 | 2.36 / 3.72 | 0.766 | 8.72 | 1,068 | SV2 extended 64 KiB field |
+| no-tokens, 6,010 payees, 10 s shares | 6,010 | 204,663 | 211,241 | 7.64% | 0.01% | 0.99 | 1.13 | 1.19 / 1.87 | 0.766 | 8.72 | 731 | SV2 extended 64 KiB field |
+| no-tokens, 6,010 payees, 30 s shares | 6,010 | 204,663 | 211,241 | 2.87% | 0.00% | 0.98 | 1.12 | 0.405 / 0.638 | 0.766 | 8.72 | 506 | SV2 extended 64 KiB field |
 
 Number of nodes:
 
 | Scenario | Payees | Coinbase bytes | Share bytes | Stale | Orphaned | To 90% (s) | To all (s) | P2Pool up, mean / max (Mbit/s) | BCHN relay (Mbit/s) | Templates (Mbit/s) | Stratum per miner (kbit/s) | Limits broken |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
-| 10 nodes | 1,001 | 34,357 | 36,423 | 2.09% | 0.00% | 0.18 | 0.19 | 0.207 / 0.237 | 0.766 | 76.0 | 116 | none |
-| 50 nodes | 1,001 | 34,357 | 36,423 | 2.76% | 0.00% | 0.29 | 0.34 | 0.203 / 0.293 | 0.766 | 76.0 | 116 | none |
-| 200 nodes | 1,001 | 34,357 | 36,423 | 3.47% | 0.00% | 0.38 | 0.44 | 0.202 / 0.375 | 0.766 | 76.0 | 116 | none |
-| 1000 nodes | 1,001 | 34,357 | 36,423 | 4.23% | 0.00% | 0.47 | 0.56 | 0.202 / 0.378 | 0.766 | 76.0 | 116 | none |
+| 10 nodes | 836 | 28,747 | 30,525 | 1.84% | 0.00% | 0.16 | 0.18 | 0.175 / 0.200 | 0.766 | 8.72 | 104 | none |
+| 50 nodes | 836 | 28,747 | 30,525 | 2.48% | 0.00% | 0.27 | 0.31 | 0.171 / 0.246 | 0.766 | 8.72 | 104 | none |
+| 200 nodes | 836 | 28,747 | 30,525 | 3.08% | 0.00% | 0.35 | 0.41 | 0.171 / 0.318 | 0.766 | 8.72 | 104 | none |
+| 1000 nodes | 836 | 28,747 | 30,525 | 3.83% | 0.00% | 0.43 | 0.52 | 0.171 / 0.319 | 0.766 | 8.72 | 104 | none |
 
 Stale shares grow about linearly with how long a share takes to reach the
 other miners compared with the share interval: latency, hops (more nodes)
@@ -462,26 +498,27 @@ Other delays matter as much as the network. Single runs from the default:
 
 | Change from the default | Stale | Orphaned |
 |---|---:|---:|
-| none | 3.09% | 0.01% |
-| miners take 0.5 s to get new work (`--work-switch-seconds 0.5`) | 7.19% | 0.01% |
-| validation takes 100 ms (`--validation-seconds 0.1`) | 6.09% | 0.01% |
-| hashrate on nodes Pareto 1.16 (`--node-hashrate pareto:1.16`) | 2.74% | 0.00% |
+| none | 2.85% | 0.00% |
+| miners take 0.5 s to get new work (`--work-switch-seconds 0.5`) | 6.82% | 0.01% |
+| validation takes 100 ms (`--validation-seconds 0.1`) | 5.73% | 0.01% |
+| hashrate on nodes Pareto 1.16 (`--node-hashrate pareto:1.16`) | 2.48% | 0.00% |
 
 ### Stratum jobs
 
 Every miner gets a new job for each new share-chain tip (the payouts
-change), each template poll and each BCH block: about one job every 5
-seconds. A Stratum V1 job carries the coinbase twice over (hex), a V2
-extended job once (binary), a V2 standard job only a merkle root:
+change), each template poll and each BCH block: with a block every minute,
+about one job every 4.6 seconds (every 5 with ten-minute blocks). A Stratum
+V1 job carries the coinbase twice over (hex), a V2 extended job once
+(binary), a V2 standard job only a merkle root:
 
 | Coinbase | V1 job | V1 per miner | V2 extended per miner | V2 standard per miner |
 |---|---:|---:|---:|---:|
-| 3,051 bytes (tokens) | 7,724 bytes | 12.5 kbit/s | 6.1 kbit/s | 0.18 kbit/s |
-| 34,357 bytes (1,001 payees) | 72,056 bytes | 116 kbit/s | 58 kbit/s | 0.18 kbit/s |
-| 204,663 bytes (6,010 payees) | 421,988 bytes | 681 kbit/s | 340 kbit/s (does not fit its fields) | 0.18 kbit/s |
+| 3,051 bytes (tokens) | 7,416 bytes | 12.9 kbit/s | 6.4 kbit/s | 0.19 kbit/s |
+| 28,747 bytes (836 payees) | 60,248 bytes | 104 kbit/s | 52 kbit/s | 0.19 kbit/s |
+| 204,663 bytes (6,010 payees) | 421,720 bytes | 731 kbit/s | 365 kbit/s (does not fit its fields) | 0.19 kbit/s |
 
-A node serving 10,000 V1 miners needs 125 Mbit/s for their jobs with the
-3 KB coinbase, and 6.8 Gbit/s at 6,010 payees. For a pool of many small
+A node serving 10,000 V1 miners needs 129 Mbit/s for their jobs with the
+3 KB coinbase, and 7.3 Gbit/s at 6,010 payees. For a pool of many small
 miners this, not the share chain, is the largest load a node carries, and
 no change to how shares travel reduces it.
 
@@ -492,24 +529,29 @@ different links):
 
 | Scenario | Payees | Coinbase bytes | Share bytes | Stale | Orphaned | To 90% (s) | To all (s) | P2Pool up, mean / max (Mbit/s) | BCHN relay (Mbit/s) | Templates (Mbit/s) | Stratum per miner (kbit/s) | Limits broken |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
-| seed 1 | 1,001 | 34,357 | 36,423 | 3.09% | 0.01% | 0.33 | 0.38 | 0.202 / 0.320 | 0.766 | 76.0 | 116 | none |
-| seed 2 | 1,001 | 34,357 | 36,423 | 2.97% | 0.00% | 0.35 | 0.40 | 0.202 / 0.465 | 0.766 | 76.0 | 116 | none |
-| seed 3 | 1,001 | 34,357 | 36,423 | 3.19% | 0.00% | 0.33 | 0.39 | 0.206 / 0.355 | 0.766 | 76.0 | 116 | none |
-| seed 4 | 1,001 | 34,357 | 36,423 | 2.87% | 0.00% | 0.33 | 0.38 | 0.200 / 0.346 | 0.766 | 76.0 | 116 | none |
-| seed 5 | 1,001 | 34,357 | 36,423 | 3.47% | 0.00% | 0.37 | 0.43 | 0.203 / 0.378 | 0.766 | 76.0 | 116 | none |
-| seed 6 | 1,001 | 34,357 | 36,423 | 2.90% | 0.00% | 0.31 | 0.36 | 0.202 / 0.349 | 0.766 | 76.0 | 116 | none |
-| seed 7 | 1,001 | 34,357 | 36,423 | 3.26% | 0.00% | 0.34 | 0.40 | 0.202 / 0.349 | 0.766 | 76.0 | 116 | none |
-| seed 8 | 1,001 | 34,357 | 36,423 | 2.89% | 0.00% | 0.33 | 0.38 | 0.202 / 0.320 | 0.766 | 76.0 | 116 | none |
+| seed 1 | 836 | 28,747 | 30,525 | 2.85% | 0.00% | 0.30 | 0.35 | 0.171 / 0.271 | 0.766 | 8.72 | 104 | none |
+| seed 2 | 836 | 28,747 | 30,525 | 2.88% | 0.00% | 0.32 | 0.37 | 0.170 / 0.392 | 0.766 | 8.72 | 104 | none |
+| seed 3 | 836 | 28,747 | 30,525 | 2.91% | 0.00% | 0.31 | 0.36 | 0.172 / 0.297 | 0.766 | 8.72 | 104 | none |
+| seed 4 | 836 | 28,747 | 30,525 | 2.82% | 0.00% | 0.31 | 0.35 | 0.168 / 0.292 | 0.766 | 8.72 | 104 | none |
+| seed 5 | 836 | 28,747 | 30,525 | 3.35% | 0.00% | 0.34 | 0.39 | 0.171 / 0.317 | 0.766 | 8.72 | 104 | none |
+| seed 6 | 836 | 28,747 | 30,525 | 2.68% | 0.00% | 0.29 | 0.33 | 0.168 / 0.290 | 0.766 | 8.72 | 104 | none |
+| seed 7 | 836 | 28,747 | 30,525 | 2.69% | 0.00% | 0.31 | 0.36 | 0.168 / 0.291 | 0.766 | 8.72 | 104 | none |
+| seed 8 | 836 | 28,747 | 30,525 | 2.88% | 0.00% | 0.30 | 0.35 | 0.171 / 0.271 | 0.766 | 8.72 | 104 | none |
 
-The stale rate moves between 2.9% and 3.5% from seed to seed: differences
+The stale rate moves between 2.7% and 3.4% from seed to seed: differences
 smaller than about half a point between two rows of a table are noise.
 
 ### A found block's coinbase
 
 The coinbase is the one transaction in a found block no other BCH node has,
 so a compact block carries it whole. Over four BCH hops at the median 50
-Mbit/s, a 1 MB coinbase adds about 0.64 s and 0.11% extra risk of the block
-being orphaned on BCH. Small next to the costs above.
+Mbit/s, a 1 MB coinbase adds about 0.64 s. With a block every minute that
+is 1.06% extra risk of the block being orphaned on BCH, ten times the 0.11%
+of ten-minute blocks: no longer small next to the costs above. The default
+29 KB coinbase adds 0.018 s and 0.03%. A pool with a large coinbase loses
+about 1.7% of its blocks for every second the coinbase adds; sending found
+blocks to BCH nodes over faster links than the median, or keeping the
+coinbase small, matters ten times more than before.
 
 ## What this means
 
@@ -520,25 +562,31 @@ being orphaned on BCH. Small next to the costs above.
    carry such shares. Sent whole, they make 8% of shares stale at 6,000
    payees and 25% at 29,402 on the assumed links.
 2. **Sending shares without their payouts is what makes direct payouts
-   cheap for the share chain**: 2.0 to 2.7% stale from 1,000 to 29,402
+   cheap for the share chain**: 2.0 to 2.6% stale from 1,000 to 29,402
    payees. It is a change to how shares travel, with its own protocol tag
    as the design says, not a payout rule change, and nothing here builds
    it.
 3. **For miners, a large coinbase stays expensive.** Stratum V1 sends it to
-   every miner about every 5 seconds; Stratum V2 extended and declared jobs
-   cannot carry more than 1,922 payees; and stock firmware is reported to
-   take between 12 and 461. The chipnet test with real devices (design,
+   every miner about every 4.6 seconds; Stratum V2 extended and declared
+   jobs cannot carry more than 1,922 payees; and stock firmware is reported
+   to take between 12 and 461. The chipnet test with real devices (design,
    section 8.2; audit M2) has to settle what pool-built jobs can carry, and
    Stratum V2 standard channels avoid the question.
-4. **The window keeps most pools far from the limits.** Above 3% of BCH a
-   coinbase has fewer than about 6,000 payees; only a small pool with very
-   many small miners reaches the 1 MB limit and the tree.
+4. **The window keeps most pools far from the limits, more so with
+   one-minute blocks.** Above 0.3% of BCH a coinbase has fewer than about
+   6,000 payees; only a pool under about 0.06% of BCH with very many small
+   miners reaches the 1 MB limit and the tree (0.6% with ten-minute blocks).
 5. **The share chain at 10-second shares is not the bottleneck.** Stale
    shares stay at 2 to 4% for small shares, almost all paid as uncles; fast
    job switching and quick validation keep it there.
-6. **At multi-gigabyte blocks, plan for the BCH node.** Run BCHN on links of
-   at least 50 to 100 Mbit/s each way, and fetch templates with
-   `getblocktemplatelight` rather than full `getblocktemplate`.
+6. **At large blocks, plan for the BCH node, ten times sooner than with
+   ten-minute blocks.** A one-minute block of 100 MB needs the 24 Mbit/s of
+   relay a 1 GB ten-minute block did, and 1 GB one-minute blocks need 240
+   Mbit/s. Run BCHN on links that carry its relay with room to spare, and
+   fetch templates with `getblocktemplatelight` rather than full
+   `getblocktemplate`.
+7. **A large coinbase costs BCH blocks.** At 1 MB it adds 1.06% orphan risk
+   to every block the pool finds, against 0.11% with ten-minute blocks.
 
 This page only measures. The payout rule, the share limit and the relay
 format are the owner's decisions.
@@ -556,13 +604,17 @@ version of it.
 ### What was measured
 
 Upstream's limit is read here as 1,000 nodes at 10-second shares with
-today's design: 4.23% stale and 0.00% orphaned (the "Number of nodes" table
-above). Each idea was run on 100 and 1,000 nodes at 10, 5, 2 and 1-second
-shares, with everything else at the defaults (1,000 miners, a 34 KB coinbase
-of 1,001 payees, the mixed links). Then, for each idea, a search found the
-shortest share interval at which 1,000 nodes stay at or below 4.23% stale:
-how many shares a second the idea lets 1,000 nodes carry for the stale rate
-they have today at 10-second shares.
+today's design: 3.83% stale and 0.00% orphaned (the "Number of nodes" table
+above; 4.23% with ten-minute blocks). Each idea was run on 100 and 1,000
+nodes at 10, 5, 2 and 1-second shares, with everything else at the defaults
+(1,000 miners, the mixed links). The window holds three one-minute blocks
+of the 1% pool's shares, 1,800 at 10-second shares and more at shorter
+ones, so the default coinbase grows as the interval shrinks: 836 payees (a
+29 KB coinbase) at 10 seconds, 974 (33 KB) at 5 and 1,001 (34 KB) at 2 and
+1. With ten-minute blocks it was 1,001 payees at every interval. Then, for
+each idea, a search found the shortest share interval at which 1,000 nodes
+stay at or below today's stale rate at 10-second shares: how many shares a
+second the idea lets 1,000 nodes carry for the stale rate they have today.
 
 - **Today:** whole shares, forwarded after validation, 8 peers, at most 3
   uncles, no weak shares.
@@ -581,11 +633,11 @@ they have today at 10-second shares.
   beside them, and a fetch for any other weak share a peer lacks; `whole` is
   the node before it.
 - **2. Compact coinbase:** shares sent without the payout outputs, as in
-  "Sending shares without their payouts" above: 1,429 bytes on the wire at
-  32 MB blocks, the design's "about 1 KB" plus an 18-hash merkle branch.
+  "Sending shares without their payouts" above: 1,301 bytes on the wire at
+  3.2 MB blocks, the design's "about 1 KB" plus a 14-hash merkle branch.
   Validation still costs the whole share, since the receiver rebuilds the
   payouts. Compared with whole shares carrying a 3 KB coinbase (tokens,
-  1,000 payees), today's 34 KB one and a 200 KiB one (6,010 payees).
+  1,000 payees), today's 29 KB one and a 200 KiB one (6,010 payees).
   Since 2026-11-16 the node relays a new share this way when its outputs
   take 50,000 bytes or more (`ShareWithoutPayouts`; the model's rebuild cost
   has no part fixed per rebuild, the swarm's had 22 to 32 ms of window walk
@@ -632,9 +684,9 @@ share intervals, the share count of a day at 10-second shares, because a day
 of 1-second shares on 1,000 nodes would hold about 2.8 GB per run; at
 10-second shares that is still a day, so today's 1,000-node row is the
 "Number of nodes" table's. `--threads` only limits how many runs are held in
-memory at once; it does not change any number. On a 32-thread machine also
-running a CPU miner, the sweeps took 69 minutes with 10 threads and the
-search 181 minutes.
+memory at once; it does not change any number. On a 32-thread machine, with
+the limits study running beside them, the sweeps took 57 minutes with 12
+threads and the search 145 minutes with 14.
 
 `interval-limit` first runs today's design on the given node count at
 10-second shares: its stale rate is the ceiling. For each scenario it then
@@ -646,69 +698,72 @@ seconds and 2% above).
 ### Where each idea reaches the limit
 
 From `cargo netsim interval-limit scaling --nodes 1000` (seed 1): the
-shortest share interval at which 1,000 nodes stay within 4.23% stale, and
+shortest share interval at which 1,000 nodes stay within 3.83% stale, and
 the stale and orphan rates there.
 
 | Scenario | Shortest share interval (s) | Shares per second against 10-second shares | Stale there | Orphaned there |
 |---|---:|---:|---:|---:|
-| today | 8.91 | 1.12 | 4.21% | 0.00% |
-| 16 weak shares a share, gossip only | 8.91 | 1.12 | 4.21% | 0.00% |
-| 16 weak shares a share, carried whole | 11.14 | 0.90 | 3.86% | 0.00% |
-| 32 weak shares a share, gossip only | 8.91 | 1.12 | 4.21% | 0.00% |
-| 32 weak shares a share, carried whole | 11.89 | 0.84 | 4.19% | 0.00% |
-| 64 weak shares a share, gossip only | 8.91 | 1.12 | 4.21% | 0.00% |
-| 64 weak shares a share, carried whole | 15.76 | 0.63 | 3.87% | 0.00% |
-| 3 KB coinbase, whole shares | 5.95 | 1.68 | 4.18% | 0.00% |
-| 200 KiB coinbase, whole shares | 26.50 | 0.38 | 4.07% | 0.00% |
-| 34 KB coinbase, without payouts | 5.62 | 1.78 | 4.04% | 0.00% |
-| 200 KiB coinbase, without payouts | 5.95 | 1.68 | 4.20% | 0.00% |
-| forwarded after the header check | 8.41 | 1.19 | 4.17% | 0.00% |
-| 16 peers | 11.14 | 0.90 | 3.63% | 0.00% |
-| 32 peers | 12.97 | 0.77 | 4.20% | 0.00% |
-| 64 peers | 18.74 | 0.53 | 3.93% | 0.01% |
-| uncle cap 6 | 8.91 | 1.12 | 4.21% | 0.00% |
-| uncle cap 12 | 8.91 | 1.12 | 4.21% | 0.00% |
-| without payouts, header check, 8 peers | 5.01 | 2.00 | 4.20% | 0.00% |
-| without payouts, header check, 16 peers | 4.21 | 2.37 | 4.01% | 0.00% |
-| without payouts, header check, 32 peers | 3.75 | 2.66 | 3.94% | 0.00% |
-| without payouts, header check, 64 peers | 3.54 | 2.82 | 4.10% | 0.00% |
+| today | 10.00 | 1.00 | 3.83% | 0.00% |
+| 16 weak shares a share, gossip only | 10.00 | 1.00 | 3.83% | 0.00% |
+| 16 weak shares a share, carried whole | 11.14 | 0.90 | 3.58% | 0.00% |
+| 32 weak shares a share, gossip only | 10.00 | 1.00 | 3.83% | 0.00% |
+| 32 weak shares a share, carried whole | 12.69 | 0.79 | 3.71% | 0.00% |
+| 64 weak shares a share, gossip only | 10.00 | 1.00 | 3.83% | 0.00% |
+| 64 weak shares a share, carried whole | 15.76 | 0.63 | 3.56% | 0.00% |
+| 3 KB coinbase, whole shares | 6.68 | 1.50 | 3.66% | 0.00% |
+| 200 KiB coinbase, whole shares | 29.54 | 0.34 | 3.67% | 0.00% |
+| 29 KB coinbase, without payouts | 6.31 | 1.59 | 3.82% | 0.00% |
+| 200 KiB coinbase, without payouts | 6.68 | 1.50 | 3.67% | 0.00% |
+| forwarded after the header check | 9.44 | 1.06 | 3.77% | 0.00% |
+| 16 peers | 10.44 | 0.96 | 3.82% | 0.00% |
+| 32 peers | 12.97 | 0.77 | 3.65% | 0.00% |
+| 64 peers | 15.76 | 0.63 | 3.67% | 0.00% |
+| uncle cap 6 | 10.00 | 1.00 | 3.83% | 0.00% |
+| uncle cap 12 | 10.00 | 1.00 | 3.83% | 0.00% |
+| without payouts, header check, 8 peers | 5.30 | 1.89 | 3.82% | 0.00% |
+| without payouts, header check, 16 peers | 4.46 | 2.24 | 3.36% | 0.00% |
+| without payouts, header check, 32 peers | 4.21 | 2.37 | 3.43% | 0.00% |
+| without payouts, header check, 64 peers | 3.98 | 2.51 | 3.64% | 0.00% |
 
-Today's own search ends at 8.91 seconds, not 10: between those intervals its
-stale rate stays within 0.02 points of the ceiling. The search is as precise
-as the stale rate is, and the stale rate moves by about half a point from
-seed to seed ("Noise" above). Under seeds 2 and 3 (`--seed`, each with its
-own ceiling from today's design under that seed: 4.18% and 4.41%) the
-combination's limits move by up to 12%:
+Today's own search ends at 10 seconds: with one-minute blocks today's
+whole share grows at shorter intervals (the window holds more shares, so the
+coinbase pays more of the thousand miners), and no shorter interval stays
+within the ceiling. With ten-minute blocks the coinbase was the same at every
+interval and the search ended at 8.91 seconds. The search is as precise as
+the stale rate is, and the stale rate moves by about half a point from seed
+to seed ("Noise" above). Under seeds 2 and 3 (`--seed`, each with its own
+ceiling from today's design under that seed: 3.93% and 3.84%) the
+combination's limits move by up to 19%:
 
 | Scenario | Seed 1 (s) | Seed 2 (s) | Seed 3 (s) |
 |---|---:|---:|---:|
-| without payouts, header check, 8 peers | 5.01 | 5.62 | 5.30 |
-| without payouts, header check, 16 peers | 4.21 | 4.46 | 4.46 |
-| without payouts, header check, 32 peers | 3.75 | 3.98 | 3.98 |
-| without payouts, header check, 64 peers | 3.54 | 3.98 | 3.54 |
+| without payouts, header check, 8 peers | 5.30 | 5.62 | 6.31 |
+| without payouts, header check, 16 peers | 4.46 | 4.46 | 5.01 |
+| without payouts, header check, 32 peers | 4.21 | 4.21 | 3.98 |
+| without payouts, header check, 64 peers | 3.98 | 3.98 | 3.98 |
 
-So a limit within about 12% of today's 8.9 to 10 seconds is not a measured
-change. Read that way:
+So a limit within about 20% of today's 10 seconds is not a measured change.
+Read that way:
 
 - **Weak shares, gossip only, do not move the limit** at 16, 32 or 64 per
   share. **Carried whole in every share, they move it to longer shares:**
-  11.1, 11.9 and 15.8 seconds, because each share grows by their bytes.
-- **The compact coinbase moves it from about 9 to 10 seconds to 5.6
-  seconds**, and makes the coinbase size irrelevant: with a 200 KiB coinbase
-  the limit moves from 26.5 seconds (whole shares) to 6.0 seconds, the same
-  as whole shares with a 3 KB coinbase.
-- **Relay before full validation alone barely moves it** (8.4 seconds):
-  validation is 5.7 ms of a hop that a 36 KB push and 50 ms of latency
+  11.1, 12.7 and 15.8 seconds, because each share grows by their bytes.
+- **The compact coinbase moves it from 10 seconds to 6.3 seconds**, and
+  makes the coinbase size irrelevant: with a 200 KiB coinbase the limit
+  moves from 29.5 seconds (whole shares) to 6.7 seconds, the same as whole
+  shares with a 3 KB coinbase. (5.6 seconds with ten-minute blocks.)
+- **Relay before full validation alone barely moves it** (9.4 seconds):
+  validation is 5.6 ms of a hop that a 31 KB push and 50 ms of latency
   dominate.
-- **More peers alone move it the wrong way** (11.1, 13.0 and 18.7 seconds
+- **More peers alone move it the wrong way** (10.4, 13.0 and 15.8 seconds
   at 16, 32 and 64 peers): with whole shares a push to more peers takes
   longer than the hops it saves.
 - **A larger uncle cap does not move it**: in these runs no share ever had a
   fourth uncle to name, so caps of 6 and 12 give the same runs as 3.
-- **The combination moves it to 5.0, 4.2, 3.8 and 3.5 seconds** at 8, 16,
-  32 and 64 peers: 2.0 to 2.8 times the share rate of 10-second shares, 1.8
-  to 2.5 times what today's own search reaches. Once shares are small, more
-  peers help, with little gain past 32.
+- **The combination moves it to 5.3, 4.5, 4.2 and 4.0 seconds** at 8, 16,
+  32 and 64 peers: 1.9 to 2.5 times the share rate of 10-second shares
+  (5.0 to 3.5 seconds, 2.0 to 2.8 times, with ten-minute blocks). Once
+  shares are small, more peers help, with little gain past 32.
 
 ### Today
 
@@ -721,14 +776,14 @@ header bytes a node syncing the chain fetches per chain share.
 
 | Scenario | Share bytes | Stale | Orphaned | To 90% (s) | To all (s) | P2Pool up, mean / max (Mbit/s) | Uncles per chain share | Header-sync bytes per chain share |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
-| today, 100 nodes, 10 s shares | 36,423 | 3.09% | 0.01% | 0.33 | 0.38 | 0.202 / 0.320 | 0.032 | 316 |
-| today, 100 nodes, 5 s shares | 36,423 | 5.88% | 0.00% | 0.33 | 0.38 | 0.408 / 0.645 | 0.062 | 326 |
-| today, 100 nodes, 2 s shares | 36,423 | 13.11% | 0.08% | 0.33 | 0.38 | 1.02 / 1.61 | 0.150 | 356 |
-| today, 100 nodes, 1 s shares | 36,423 | 23.00% | 0.33% | 0.33 | 0.38 | 2.02 / 3.20 | 0.294 | 407 |
-| today, 1,000 nodes, 10 s shares | 36,423 | 4.23% | 0.00% | 0.47 | 0.56 | 0.202 / 0.378 | 0.044 | 320 |
-| today, 1,000 nodes, 5 s shares | 36,423 | 7.84% | 0.01% | 0.47 | 0.56 | 0.402 / 0.752 | 0.085 | 334 |
-| today, 1,000 nodes, 2 s shares | 36,423 | 17.77% | 0.14% | 0.47 | 0.56 | 1.02 / 1.91 | 0.214 | 379 |
-| today, 1,000 nodes, 1 s shares | 36,423 | 30.66% | 0.79% | 0.48 | 0.57 | 2.02 / 3.77 | 0.431 | 456 |
+| today, 100 nodes, 10 s shares | 30,525 | 2.85% | 0.00% | 0.30 | 0.35 | 0.171 / 0.271 | 0.029 | 315 |
+| today, 100 nodes, 5 s shares | 35,337 | 5.43% | 0.00% | 0.32 | 0.37 | 0.393 / 0.622 | 0.057 | 324 |
+| today, 100 nodes, 2 s shares | 36,295 | 13.34% | 0.07% | 0.33 | 0.38 | 1.01 / 1.60 | 0.153 | 357 |
+| today, 100 nodes, 1 s shares | 36,295 | 23.14% | 0.34% | 0.33 | 0.38 | 2.03 / 3.20 | 0.297 | 408 |
+| today, 1,000 nodes, 10 s shares | 30,525 | 3.83% | 0.00% | 0.43 | 0.52 | 0.171 / 0.319 | 0.040 | 318 |
+| today, 1,000 nodes, 5 s shares | 35,337 | 8.01% | 0.01% | 0.46 | 0.55 | 0.392 / 0.733 | 0.087 | 335 |
+| today, 1,000 nodes, 2 s shares | 36,295 | 17.88% | 0.09% | 0.47 | 0.56 | 1.00 / 1.88 | 0.216 | 379 |
+| today, 1,000 nodes, 1 s shares | 36,295 | 30.42% | 0.62% | 0.47 | 0.56 | 2.02 / 3.77 | 0.428 | 455 |
 
 ### 1. Weak shares
 
@@ -736,109 +791,111 @@ header bytes a node syncing the chain fetches per chain share.
 
 | Scenario | Share bytes | Stale | Orphaned | To 90% (s) | To all (s) | P2Pool up, mean / max (Mbit/s) | Uncles per chain share | Header-sync bytes per chain share |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
-| 16 weak shares a share, gossip only, 100 nodes, 10 s shares | 36,423 | 3.09% | 0.01% | 0.33 | 0.38 | 0.291 / 0.458 | 0.032 | 316 |
-| 16 weak shares a share, gossip only, 100 nodes, 5 s shares | 36,423 | 5.88% | 0.00% | 0.33 | 0.38 | 0.585 / 0.922 | 0.062 | 326 |
-| 16 weak shares a share, gossip only, 100 nodes, 2 s shares | 36,423 | 13.11% | 0.08% | 0.33 | 0.38 | 1.46 / 2.30 | 0.150 | 356 |
-| 16 weak shares a share, gossip only, 100 nodes, 1 s shares | 36,423 | 23.02% | 0.33% | 0.33 | 0.38 | 2.91 / 4.58 | 0.295 | 407 |
-| 16 weak shares a share, gossip only, 1,000 nodes, 10 s shares | 36,423 | 4.23% | 0.00% | 0.47 | 0.56 | 0.291 / 0.542 | 0.044 | 320 |
-| 16 weak shares a share, gossip only, 1,000 nodes, 5 s shares | 36,423 | 7.84% | 0.01% | 0.47 | 0.56 | 0.579 / 1.08 | 0.085 | 334 |
-| 16 weak shares a share, gossip only, 1,000 nodes, 2 s shares | 36,423 | 17.77% | 0.14% | 0.47 | 0.56 | 1.46 / 2.73 | 0.214 | 379 |
-| 16 weak shares a share, gossip only, 1,000 nodes, 1 s shares | 36,423 | 30.66% | 0.79% | 0.48 | 0.57 | 2.90 / 5.40 | 0.431 | 456 |
-| 16 weak shares a share, carried whole, 100 nodes, 10 s shares | 49,583 | 3.43% | 0.00% | 0.38 | 0.44 | 0.364 / 0.574 | 0.036 | 317 |
-| 16 weak shares a share, carried whole, 100 nodes, 5 s shares | 49,583 | 6.55% | 0.00% | 0.38 | 0.44 | 0.733 / 1.15 | 0.070 | 329 |
-| 16 weak shares a share, carried whole, 100 nodes, 2 s shares | 49,583 | 14.62% | 0.09% | 0.38 | 0.44 | 1.83 / 2.88 | 0.170 | 363 |
-| 16 weak shares a share, carried whole, 100 nodes, 1 s shares | 49,583 | 25.34% | 0.49% | 0.39 | 0.45 | 3.64 / 5.74 | 0.333 | 421 |
-| 16 weak shares a share, carried whole, 1,000 nodes, 10 s shares | 49,583 | 4.82% | 0.00% | 0.54 | 0.65 | 0.364 / 0.678 | 0.051 | 322 |
-| 16 weak shares a share, carried whole, 1,000 nodes, 5 s shares | 49,583 | 8.84% | 0.00% | 0.55 | 0.65 | 0.725 / 1.35 | 0.097 | 338 |
-| 16 weak shares a share, carried whole, 1,000 nodes, 2 s shares | 49,583 | 19.95% | 0.26% | 0.55 | 0.65 | 1.84 / 3.42 | 0.246 | 390 |
-| 16 weak shares a share, carried whole, 1,000 nodes, 1 s shares | 49,583 | 33.49% | 1.11% | 0.79 | 0.90 | 3.63 / 6.77 | 0.487 | 477 |
-| 32 weak shares a share, gossip only, 100 nodes, 10 s shares | 36,423 | 3.09% | 0.01% | 0.33 | 0.38 | 0.379 / 0.596 | 0.032 | 316 |
-| 32 weak shares a share, gossip only, 100 nodes, 5 s shares | 36,423 | 5.88% | 0.00% | 0.33 | 0.38 | 0.761 / 1.20 | 0.062 | 326 |
-| 32 weak shares a share, gossip only, 100 nodes, 2 s shares | 36,423 | 13.11% | 0.08% | 0.33 | 0.38 | 1.90 / 2.99 | 0.150 | 356 |
-| 32 weak shares a share, gossip only, 100 nodes, 1 s shares | 36,423 | 23.05% | 0.33% | 0.33 | 0.38 | 3.79 / 5.96 | 0.295 | 407 |
-| 32 weak shares a share, gossip only, 1,000 nodes, 10 s shares | 36,423 | 4.23% | 0.00% | 0.47 | 0.56 | 0.379 / 0.705 | 0.044 | 320 |
-| 32 weak shares a share, gossip only, 1,000 nodes, 5 s shares | 36,423 | 7.84% | 0.01% | 0.47 | 0.56 | 0.755 / 1.40 | 0.085 | 334 |
-| 32 weak shares a share, gossip only, 1,000 nodes, 2 s shares | 36,423 | 17.77% | 0.14% | 0.47 | 0.56 | 1.91 / 3.55 | 0.214 | 379 |
-| 32 weak shares a share, gossip only, 1,000 nodes, 1 s shares | 36,423 | 30.69% | 0.87% | 0.79 | 0.88 | 3.78 / 7.04 | 0.430 | 456 |
-| 32 weak shares a share, carried whole, 100 nodes, 10 s shares | 62,703 | 3.68% | 0.00% | 0.43 | 0.49 | 0.526 / 0.825 | 0.038 | 318 |
-| 32 weak shares a share, carried whole, 100 nodes, 5 s shares | 62,703 | 7.19% | 0.01% | 0.43 | 0.49 | 1.06 / 1.66 | 0.077 | 331 |
-| 32 weak shares a share, carried whole, 100 nodes, 2 s shares | 62,703 | 16.05% | 0.12% | 0.44 | 0.50 | 2.63 / 4.14 | 0.190 | 370 |
-| 32 weak shares a share, carried whole, 100 nodes, 1 s shares | 62,703 | 27.57% | 0.73% | 0.45 | 0.51 | 5.26 / 8.26 | 0.371 | 435 |
-| 32 weak shares a share, carried whole, 1,000 nodes, 10 s shares | 62,703 | 5.35% | 0.00% | 0.62 | 0.74 | 0.525 / 0.977 | 0.057 | 324 |
-| 32 weak shares a share, carried whole, 1,000 nodes, 5 s shares | 62,703 | 9.92% | 0.01% | 0.62 | 0.74 | 1.05 / 1.95 | 0.110 | 343 |
-| 32 weak shares a share, carried whole, 1,000 nodes, 2 s shares | 62,703 | 21.88% | 0.33% | 0.62 | 0.75 | 2.65 / 4.92 | 0.276 | 401 |
-| 32 weak shares a share, carried whole, 1,000 nodes, 1 s shares | 62,703 | 36.31% | 1.55% | 3.24 | 3.37 | 5.25 / 9.76 | 0.545 | 499 |
-| 64 weak shares a share, gossip only, 100 nodes, 10 s shares | 36,423 | 3.09% | 0.01% | 0.33 | 0.38 | 0.556 / 0.873 | 0.032 | 316 |
-| 64 weak shares a share, gossip only, 100 nodes, 5 s shares | 36,423 | 5.88% | 0.00% | 0.33 | 0.38 | 1.11 / 1.75 | 0.062 | 326 |
-| 64 weak shares a share, gossip only, 100 nodes, 2 s shares | 36,423 | 13.11% | 0.08% | 0.33 | 0.38 | 2.78 / 4.37 | 0.150 | 356 |
-| 64 weak shares a share, gossip only, 100 nodes, 1 s shares | 36,423 | 23.11% | 0.35% | 0.34 | 0.38 | 5.56 / 8.73 | 0.296 | 408 |
-| 64 weak shares a share, gossip only, 1,000 nodes, 10 s shares | 36,423 | 4.23% | 0.00% | 0.47 | 0.56 | 0.555 / 1.03 | 0.044 | 320 |
-| 64 weak shares a share, gossip only, 1,000 nodes, 5 s shares | 36,423 | 7.85% | 0.01% | 0.47 | 0.56 | 1.11 / 2.06 | 0.085 | 334 |
-| 64 weak shares a share, gossip only, 1,000 nodes, 2 s shares | 36,423 | 17.78% | 0.15% | 0.47 | 0.56 | 2.79 / 5.18 | 0.214 | 379 |
-| 64 weak shares a share, gossip only, 1,000 nodes, 1 s shares | 36,423 | 30.81% | 0.95% | 3.39 | 3.48 | 5.55 / 10.3 | 0.431 | 456 |
-| 64 weak shares a share, carried whole, 100 nodes, 10 s shares | 89,023 | 4.48% | 0.00% | 0.53 | 0.60 | 0.851 / 1.34 | 0.047 | 321 |
-| 64 weak shares a share, carried whole, 100 nodes, 5 s shares | 89,023 | 8.61% | 0.01% | 0.53 | 0.60 | 1.71 / 2.68 | 0.094 | 337 |
-| 64 weak shares a share, carried whole, 100 nodes, 2 s shares | 89,023 | 18.77% | 0.20% | 0.54 | 0.62 | 4.26 / 6.70 | 0.229 | 384 |
-| 64 weak shares a share, carried whole, 100 nodes, 1 s shares | 89,023 | 32.20% | 2.34% | 57.45 | 57.53 | 8.51 / 13.4 | 0.440 | 460 |
-| 64 weak shares a share, carried whole, 1,000 nodes, 10 s shares | 89,023 | 6.46% | 0.00% | 0.76 | 0.91 | 0.849 / 1.58 | 0.069 | 328 |
-| 64 weak shares a share, carried whole, 1,000 nodes, 5 s shares | 89,023 | 11.98% | 0.03% | 0.76 | 0.91 | 1.69 / 3.15 | 0.136 | 351 |
-| 64 weak shares a share, carried whole, 1,000 nodes, 2 s shares | 89,023 | 25.55% | 0.59% | 2.19 | 2.34 | 4.28 / 7.95 | 0.335 | 422 |
-| 64 weak shares a share, carried whole, 1,000 nodes, 1 s shares | 89,023 | 40.76% | 3.99% | 19.82 | 19.98 | 8.49 / 15.8 | 0.620 | 528 |
+| 16 weak shares a share, gossip only, 100 nodes, 10 s shares | 30,525 | 2.85% | 0.00% | 0.30 | 0.35 | 0.259 / 0.409 | 0.029 | 315 |
+| 16 weak shares a share, gossip only, 100 nodes, 5 s shares | 35,337 | 5.43% | 0.00% | 0.32 | 0.37 | 0.569 / 0.898 | 0.057 | 324 |
+| 16 weak shares a share, gossip only, 100 nodes, 2 s shares | 36,295 | 13.35% | 0.07% | 0.33 | 0.38 | 1.45 / 2.29 | 0.153 | 357 |
+| 16 weak shares a share, gossip only, 100 nodes, 1 s shares | 36,295 | 23.16% | 0.34% | 0.33 | 0.38 | 2.91 / 4.58 | 0.297 | 408 |
+| 16 weak shares a share, gossip only, 1,000 nodes, 10 s shares | 30,525 | 3.83% | 0.00% | 0.43 | 0.52 | 0.259 / 0.482 | 0.040 | 318 |
+| 16 weak shares a share, gossip only, 1,000 nodes, 5 s shares | 35,337 | 8.01% | 0.01% | 0.46 | 0.55 | 0.568 / 1.06 | 0.087 | 335 |
+| 16 weak shares a share, gossip only, 1,000 nodes, 2 s shares | 36,295 | 17.89% | 0.09% | 0.47 | 0.56 | 1.44 / 2.69 | 0.217 | 379 |
+| 16 weak shares a share, gossip only, 1,000 nodes, 1 s shares | 36,295 | 30.42% | 0.64% | 0.47 | 0.56 | 2.90 / 5.41 | 0.428 | 455 |
+| 16 weak shares a share, carried whole, 100 nodes, 10 s shares | 43,685 | 3.18% | 0.00% | 0.36 | 0.41 | 0.333 / 0.525 | 0.033 | 316 |
+| 16 weak shares a share, carried whole, 100 nodes, 5 s shares | 48,497 | 6.06% | 0.00% | 0.38 | 0.43 | 0.716 / 1.13 | 0.064 | 327 |
+| 16 weak shares a share, carried whole, 100 nodes, 2 s shares | 49,415 | 14.94% | 0.07% | 0.38 | 0.44 | 1.82 / 2.87 | 0.175 | 365 |
+| 16 weak shares a share, carried whole, 100 nodes, 1 s shares | 49,415 | 25.50% | 0.50% | 0.39 | 0.45 | 3.64 / 5.74 | 0.336 | 422 |
+| 16 weak shares a share, carried whole, 1,000 nodes, 10 s shares | 43,685 | 4.41% | 0.00% | 0.51 | 0.61 | 0.333 / 0.620 | 0.046 | 321 |
+| 16 weak shares a share, carried whole, 1,000 nodes, 5 s shares | 48,497 | 9.06% | 0.01% | 0.54 | 0.64 | 0.715 / 1.33 | 0.100 | 339 |
+| 16 weak shares a share, carried whole, 1,000 nodes, 2 s shares | 49,415 | 20.00% | 0.19% | 0.55 | 0.65 | 1.81 / 3.37 | 0.248 | 390 |
+| 16 weak shares a share, carried whole, 1,000 nodes, 1 s shares | 49,415 | 33.31% | 1.10% | 0.71 | 0.81 | 3.63 / 6.77 | 0.483 | 475 |
+| 32 weak shares a share, gossip only, 100 nodes, 10 s shares | 30,525 | 2.85% | 0.00% | 0.30 | 0.35 | 0.348 / 0.547 | 0.029 | 315 |
+| 32 weak shares a share, gossip only, 100 nodes, 5 s shares | 35,337 | 5.43% | 0.00% | 0.32 | 0.37 | 0.746 / 1.17 | 0.057 | 324 |
+| 32 weak shares a share, gossip only, 100 nodes, 2 s shares | 36,295 | 13.36% | 0.07% | 0.33 | 0.38 | 1.89 / 2.98 | 0.153 | 358 |
+| 32 weak shares a share, gossip only, 100 nodes, 1 s shares | 36,295 | 23.18% | 0.35% | 0.33 | 0.38 | 3.79 / 5.97 | 0.297 | 408 |
+| 32 weak shares a share, gossip only, 1,000 nodes, 10 s shares | 30,525 | 3.83% | 0.00% | 0.43 | 0.52 | 0.347 / 0.645 | 0.040 | 318 |
+| 32 weak shares a share, gossip only, 1,000 nodes, 5 s shares | 35,337 | 8.01% | 0.01% | 0.46 | 0.55 | 0.745 / 1.39 | 0.087 | 335 |
+| 32 weak shares a share, gossip only, 1,000 nodes, 2 s shares | 36,295 | 17.89% | 0.09% | 0.47 | 0.56 | 1.88 / 3.51 | 0.217 | 379 |
+| 32 weak shares a share, gossip only, 1,000 nodes, 1 s shares | 36,295 | 30.43% | 0.69% | 0.66 | 0.75 | 3.78 / 7.04 | 0.427 | 455 |
+| 32 weak shares a share, carried whole, 100 nodes, 10 s shares | 56,805 | 3.57% | 0.00% | 0.41 | 0.47 | 0.495 / 0.777 | 0.037 | 318 |
+| 32 weak shares a share, carried whole, 100 nodes, 5 s shares | 61,657 | 6.70% | 0.00% | 0.43 | 0.49 | 1.04 / 1.63 | 0.072 | 329 |
+| 32 weak shares a share, carried whole, 100 nodes, 2 s shares | 62,575 | 16.33% | 0.12% | 0.44 | 0.50 | 2.62 / 4.12 | 0.194 | 372 |
+| 32 weak shares a share, carried whole, 100 nodes, 1 s shares | 62,575 | 27.77% | 0.75% | 0.45 | 0.51 | 5.26 / 8.28 | 0.374 | 436 |
+| 32 weak shares a share, carried whole, 1,000 nodes, 10 s shares | 56,805 | 4.80% | 0.00% | 0.58 | 0.70 | 0.495 / 0.920 | 0.051 | 322 |
+| 32 weak shares a share, carried whole, 1,000 nodes, 5 s shares | 61,657 | 10.10% | 0.06% | 0.61 | 0.73 | 1.04 / 1.93 | 0.112 | 343 |
+| 32 weak shares a share, carried whole, 1,000 nodes, 2 s shares | 62,575 | 21.78% | 0.37% | 0.62 | 0.74 | 2.61 / 4.86 | 0.274 | 400 |
+| 32 weak shares a share, carried whole, 1,000 nodes, 1 s shares | 62,575 | 36.07% | 1.45% | 2.10 | 2.23 | 5.25 / 9.77 | 0.541 | 497 |
+| 64 weak shares a share, gossip only, 100 nodes, 10 s shares | 30,525 | 2.85% | 0.00% | 0.30 | 0.35 | 0.524 / 0.824 | 0.029 | 315 |
+| 64 weak shares a share, gossip only, 100 nodes, 5 s shares | 35,337 | 5.43% | 0.00% | 0.32 | 0.37 | 1.10 / 1.72 | 0.057 | 324 |
+| 64 weak shares a share, gossip only, 100 nodes, 2 s shares | 36,295 | 13.36% | 0.07% | 0.33 | 0.38 | 2.77 / 4.36 | 0.153 | 357 |
+| 64 weak shares a share, gossip only, 100 nodes, 1 s shares | 36,295 | 23.25% | 0.35% | 0.33 | 0.38 | 5.56 / 8.74 | 0.298 | 408 |
+| 64 weak shares a share, gossip only, 1,000 nodes, 10 s shares | 30,525 | 3.83% | 0.00% | 0.43 | 0.52 | 0.524 / 0.972 | 0.040 | 318 |
+| 64 weak shares a share, gossip only, 1,000 nodes, 5 s shares | 35,337 | 8.01% | 0.01% | 0.46 | 0.55 | 1.10 / 2.04 | 0.087 | 335 |
+| 64 weak shares a share, gossip only, 1,000 nodes, 2 s shares | 36,295 | 17.89% | 0.09% | 0.47 | 0.56 | 2.77 / 5.14 | 0.217 | 379 |
+| 64 weak shares a share, gossip only, 1,000 nodes, 1 s shares | 36,295 | 30.52% | 0.81% | 2.10 | 2.19 | 5.55 / 10.3 | 0.427 | 455 |
+| 64 weak shares a share, carried whole, 100 nodes, 10 s shares | 83,125 | 4.29% | 0.00% | 0.51 | 0.58 | 0.820 / 1.29 | 0.045 | 320 |
+| 64 weak shares a share, carried whole, 100 nodes, 5 s shares | 87,937 | 8.03% | 0.01% | 0.53 | 0.60 | 1.69 / 2.65 | 0.087 | 335 |
+| 64 weak shares a share, carried whole, 100 nodes, 2 s shares | 88,895 | 19.01% | 0.19% | 0.54 | 0.62 | 4.25 / 6.68 | 0.232 | 385 |
+| 64 weak shares a share, carried whole, 100 nodes, 1 s shares | 88,895 | 32.27% | 2.29% | 61.66 | 61.74 | 8.52 / 13.4 | 0.443 | 461 |
+| 64 weak shares a share, carried whole, 1,000 nodes, 10 s shares | 83,125 | 5.94% | 0.00% | 0.73 | 0.87 | 0.819 / 1.52 | 0.063 | 326 |
+| 64 weak shares a share, carried whole, 1,000 nodes, 5 s shares | 87,937 | 11.97% | 0.02% | 0.75 | 0.90 | 1.68 / 3.13 | 0.136 | 351 |
+| 64 weak shares a share, carried whole, 1,000 nodes, 2 s shares | 88,895 | 25.40% | 0.62% | 1.69 | 1.84 | 4.23 / 7.86 | 0.332 | 420 |
+| 64 weak shares a share, carried whole, 1,000 nodes, 1 s shares | 88,895 | 40.75% | 3.89% | 16.59 | 16.75 | 8.50 / 15.8 | 0.622 | 528 |
 
 Gossip only, weak shares cost upload, not stale shares: at 64 per share they
-raise the mean upload per node from 0.20 to 0.56 Mbit/s at 10-second shares
-and to 2.8 Mbit/s at 2-second shares, and every stale rate stays within 0.01
+raise the mean upload per node from 0.17 to 0.52 Mbit/s at 10-second shares
+and to 2.8 Mbit/s at 2-second shares, and every stale rate stays within 0.02
 points of today's down to 2-second shares. At 1-second shares (64 weak
 shares a second) the slowest links fall behind at times: on 1,000 nodes the
-mean time to 90% rises from 0.48 to 3.39 seconds while the stale rate moves
-from 30.66% to 30.81%, so the delays fall on few shares. Carried whole,
-their bytes count like a larger coinbase: 64 per share make an 89 KB share,
-and 1,000 nodes go 6.46% stale at 10-second shares.
+mean time to 90% rises from 0.47 to 2.10 seconds while the stale rate moves
+from 30.42% to 30.52%, so the delays fall on few shares. Carried whole,
+their bytes count like a larger coinbase: 64 per share make an 83 KB share,
+and 1,000 nodes go 5.94% stale at 10-second shares.
 
 ### 2. Compact coinbase
 
-`cargo netsim sweep scaling-compact-coinbase` (today's 34 KB coinbase with
-whole shares is the "Today" table):
+`cargo netsim sweep scaling-compact-coinbase` (today's coinbase with whole
+shares is the "Today" table; the "29 KB coinbase" rows name it at
+10-second shares, and at shorter intervals it grows to 33 and 34 KB, which
+without payouts only changes the validation time):
 
 | Scenario | Share bytes | Stale | Orphaned | To 90% (s) | To all (s) | P2Pool up, mean / max (Mbit/s) | Uncles per chain share | Header-sync bytes per chain share |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
-| 3 KB coinbase, whole shares, 100 nodes, 10 s shares | 4,237 | 2.07% | 0.00% | 0.19 | 0.22 | 0.024 / 0.038 | 0.021 | 312 |
-| 3 KB coinbase, whole shares, 100 nodes, 5 s shares | 4,237 | 3.84% | 0.00% | 0.19 | 0.22 | 0.048 / 0.076 | 0.040 | 319 |
-| 3 KB coinbase, whole shares, 100 nodes, 2 s shares | 4,237 | 8.68% | 0.01% | 0.19 | 0.22 | 0.120 / 0.190 | 0.095 | 337 |
-| 3 KB coinbase, whole shares, 100 nodes, 1 s shares | 4,237 | 15.89% | 0.10% | 0.19 | 0.22 | 0.239 / 0.379 | 0.188 | 369 |
-| 3 KB coinbase, whole shares, 1,000 nodes, 10 s shares | 4,237 | 2.64% | 0.00% | 0.26 | 0.31 | 0.024 / 0.045 | 0.027 | 314 |
-| 3 KB coinbase, whole shares, 1,000 nodes, 5 s shares | 4,237 | 4.92% | 0.00% | 0.26 | 0.31 | 0.047 / 0.089 | 0.052 | 323 |
-| 3 KB coinbase, whole shares, 1,000 nodes, 2 s shares | 4,237 | 11.79% | 0.02% | 0.26 | 0.31 | 0.121 / 0.226 | 0.133 | 351 |
-| 3 KB coinbase, whole shares, 1,000 nodes, 1 s shares | 4,237 | 20.98% | 0.15% | 0.26 | 0.31 | 0.238 / 0.446 | 0.263 | 396 |
-| 200 KiB coinbase, whole shares, 100 nodes, 10 s shares | 211,369 | 7.81% | 0.01% | 0.98 | 1.12 | 1.18 / 1.86 | 0.084 | 334 |
-| 200 KiB coinbase, whole shares, 100 nodes, 5 s shares | 211,369 | 14.09% | 0.13% | 1.00 | 1.14 | 2.38 / 3.75 | 0.162 | 361 |
-| 200 KiB coinbase, whole shares, 100 nodes, 2 s shares | 211,369 | 29.50% | 1.11% | 1.10 | 1.25 | 5.93 / 9.35 | 0.403 | 446 |
-| 200 KiB coinbase, whole shares, 100 nodes, 1 s shares | 211,369 | 45.81% | 9.79% | 676.33 | 676.48 | 11.8 / 18.6 | 0.665 | 545 |
-| 200 KiB coinbase, whole shares, 1,000 nodes, 10 s shares | 211,369 | 11.02% | 0.06% | 1.42 | 1.71 | 1.18 / 2.20 | 0.123 | 347 |
-| 200 KiB coinbase, whole shares, 1,000 nodes, 5 s shares | 211,369 | 19.56% | 0.10% | 1.44 | 1.73 | 2.34 / 4.37 | 0.242 | 389 |
-| 200 KiB coinbase, whole shares, 1,000 nodes, 2 s shares | 211,369 | 38.31% | 2.34% | 9.91 | 10.22 | 5.96 / 11.1 | 0.583 | 513 |
-| 200 KiB coinbase, whole shares, 1,000 nodes, 1 s shares | 211,369 | 55.61% | 11.63% | 80.31 | 80.68 | 11.8 / 21.9 | 0.990 | 674 |
-| 34 KB coinbase, without payouts, 100 nodes, 10 s shares | 1,429 | 1.98% | 0.00% | 0.17 | 0.20 | 8.4e-3 / 0.013 | 0.020 | 312 |
-| 34 KB coinbase, without payouts, 100 nodes, 5 s shares | 1,429 | 3.66% | 0.00% | 0.17 | 0.20 | 0.017 / 0.027 | 0.038 | 318 |
-| 34 KB coinbase, without payouts, 100 nodes, 2 s shares | 1,429 | 8.26% | 0.00% | 0.17 | 0.20 | 0.042 / 0.066 | 0.090 | 336 |
-| 34 KB coinbase, without payouts, 100 nodes, 1 s shares | 1,429 | 15.21% | 0.09% | 0.17 | 0.20 | 0.084 / 0.133 | 0.178 | 366 |
-| 34 KB coinbase, without payouts, 1,000 nodes, 10 s shares | 1,429 | 2.52% | 0.00% | 0.24 | 0.29 | 8.4e-3 / 0.016 | 0.026 | 314 |
-| 34 KB coinbase, without payouts, 1,000 nodes, 5 s shares | 1,429 | 4.66% | 0.00% | 0.24 | 0.29 | 0.017 / 0.031 | 0.049 | 322 |
-| 34 KB coinbase, without payouts, 1,000 nodes, 2 s shares | 1,429 | 11.15% | 0.01% | 0.24 | 0.29 | 0.043 / 0.079 | 0.125 | 348 |
-| 34 KB coinbase, without payouts, 1,000 nodes, 1 s shares | 1,429 | 20.06% | 0.13% | 0.24 | 0.29 | 0.084 / 0.156 | 0.249 | 391 |
-| 200 KiB coinbase, without payouts, 100 nodes, 10 s shares | 1,429 | 2.10% | 0.00% | 0.19 | 0.22 | 8.3e-3 / 0.013 | 0.021 | 312 |
-| 200 KiB coinbase, without payouts, 100 nodes, 5 s shares | 1,429 | 3.89% | 0.00% | 0.19 | 0.22 | 0.017 / 0.027 | 0.040 | 319 |
-| 200 KiB coinbase, without payouts, 100 nodes, 2 s shares | 1,429 | 8.78% | 0.01% | 0.19 | 0.22 | 0.042 / 0.066 | 0.096 | 338 |
-| 200 KiB coinbase, without payouts, 100 nodes, 1 s shares | 1,429 | 16.11% | 0.10% | 0.19 | 0.22 | 0.083 / 0.132 | 0.191 | 371 |
-| 200 KiB coinbase, without payouts, 1,000 nodes, 10 s shares | 1,429 | 2.66% | 0.00% | 0.26 | 0.31 | 8.3e-3 / 0.015 | 0.027 | 314 |
-| 200 KiB coinbase, without payouts, 1,000 nodes, 5 s shares | 1,429 | 5.00% | 0.00% | 0.26 | 0.31 | 0.016 / 0.031 | 0.053 | 323 |
-| 200 KiB coinbase, without payouts, 1,000 nodes, 2 s shares | 1,429 | 11.99% | 0.03% | 0.26 | 0.31 | 0.042 / 0.079 | 0.136 | 351 |
-| 200 KiB coinbase, without payouts, 1,000 nodes, 1 s shares | 1,429 | 21.16% | 0.16% | 0.26 | 0.31 | 0.083 / 0.155 | 0.266 | 397 |
+| 3 KB coinbase, whole shares, 100 nodes, 10 s shares | 4,109 | 2.05% | 0.00% | 0.19 | 0.22 | 0.023 / 0.037 | 0.021 | 312 |
+| 3 KB coinbase, whole shares, 100 nodes, 5 s shares | 4,109 | 3.52% | 0.00% | 0.19 | 0.22 | 0.046 / 0.073 | 0.036 | 317 |
+| 3 KB coinbase, whole shares, 100 nodes, 2 s shares | 4,109 | 8.86% | 0.01% | 0.19 | 0.22 | 0.116 / 0.184 | 0.097 | 338 |
+| 3 KB coinbase, whole shares, 100 nodes, 1 s shares | 4,109 | 16.02% | 0.07% | 0.19 | 0.22 | 0.233 / 0.369 | 0.190 | 370 |
+| 3 KB coinbase, whole shares, 1,000 nodes, 10 s shares | 4,109 | 2.59% | 0.00% | 0.26 | 0.31 | 0.023 / 0.044 | 0.027 | 314 |
+| 3 KB coinbase, whole shares, 1,000 nodes, 5 s shares | 4,109 | 4.84% | 0.00% | 0.26 | 0.31 | 0.046 / 0.086 | 0.051 | 322 |
+| 3 KB coinbase, whole shares, 1,000 nodes, 2 s shares | 4,109 | 12.04% | 0.02% | 0.26 | 0.31 | 0.115 / 0.215 | 0.137 | 352 |
+| 3 KB coinbase, whole shares, 1,000 nodes, 1 s shares | 4,109 | 20.86% | 0.23% | 0.26 | 0.31 | 0.232 / 0.434 | 0.261 | 395 |
+| 200 KiB coinbase, whole shares, 100 nodes, 10 s shares | 211,241 | 7.64% | 0.01% | 0.99 | 1.13 | 1.19 / 1.87 | 0.083 | 333 |
+| 200 KiB coinbase, whole shares, 100 nodes, 5 s shares | 211,241 | 14.00% | 0.08% | 1.00 | 1.14 | 2.36 / 3.72 | 0.162 | 360 |
+| 200 KiB coinbase, whole shares, 100 nodes, 2 s shares | 211,241 | 29.82% | 1.11% | 1.11 | 1.25 | 5.91 / 9.31 | 0.409 | 449 |
+| 200 KiB coinbase, whole shares, 100 nodes, 1 s shares | 211,241 | 45.81% | 9.70% | 689.11 | 689.26 | 11.8 / 18.7 | 0.666 | 545 |
+| 200 KiB coinbase, whole shares, 1,000 nodes, 10 s shares | 211,241 | 11.09% | 0.00% | 1.42 | 1.71 | 1.19 / 2.21 | 0.125 | 348 |
+| 200 KiB coinbase, whole shares, 1,000 nodes, 5 s shares | 211,241 | 19.49% | 0.19% | 1.44 | 1.73 | 2.35 / 4.38 | 0.240 | 388 |
+| 200 KiB coinbase, whole shares, 1,000 nodes, 2 s shares | 211,241 | 37.90% | 2.22% | 7.31 | 7.62 | 5.86 / 10.9 | 0.574 | 510 |
+| 200 KiB coinbase, whole shares, 1,000 nodes, 1 s shares | 211,241 | 55.67% | 11.57% | 77.57 | 77.94 | 11.8 / 21.9 | 0.994 | 676 |
+| 29 KB coinbase, without payouts, 100 nodes, 10 s shares | 1,301 | 1.95% | 0.00% | 0.17 | 0.20 | 7.8e-3 / 0.012 | 0.020 | 312 |
+| 29 KB coinbase, without payouts, 100 nodes, 5 s shares | 1,301 | 3.37% | 0.00% | 0.17 | 0.20 | 0.015 / 0.024 | 0.035 | 317 |
+| 29 KB coinbase, without payouts, 100 nodes, 2 s shares | 1,301 | 8.48% | 0.01% | 0.17 | 0.20 | 0.039 / 0.061 | 0.093 | 337 |
+| 29 KB coinbase, without payouts, 100 nodes, 1 s shares | 1,301 | 15.34% | 0.06% | 0.17 | 0.20 | 0.078 / 0.122 | 0.181 | 367 |
+| 29 KB coinbase, without payouts, 1,000 nodes, 10 s shares | 1,301 | 2.48% | 0.00% | 0.24 | 0.29 | 7.8e-3 / 0.014 | 0.025 | 314 |
+| 29 KB coinbase, without payouts, 1,000 nodes, 5 s shares | 1,301 | 4.56% | 0.00% | 0.24 | 0.29 | 0.015 / 0.029 | 0.048 | 321 |
+| 29 KB coinbase, without payouts, 1,000 nodes, 2 s shares | 1,301 | 11.36% | 0.01% | 0.24 | 0.29 | 0.038 / 0.071 | 0.128 | 349 |
+| 29 KB coinbase, without payouts, 1,000 nodes, 1 s shares | 1,301 | 19.97% | 0.19% | 0.24 | 0.29 | 0.077 / 0.144 | 0.247 | 390 |
+| 200 KiB coinbase, without payouts, 100 nodes, 10 s shares | 1,301 | 2.09% | 0.00% | 0.19 | 0.22 | 7.6e-3 / 0.012 | 0.021 | 312 |
+| 200 KiB coinbase, without payouts, 100 nodes, 5 s shares | 1,301 | 3.56% | 0.00% | 0.19 | 0.22 | 0.015 / 0.024 | 0.037 | 317 |
+| 200 KiB coinbase, without payouts, 100 nodes, 2 s shares | 1,301 | 8.97% | 0.01% | 0.19 | 0.22 | 0.038 / 0.060 | 0.098 | 339 |
+| 200 KiB coinbase, without payouts, 100 nodes, 1 s shares | 1,301 | 16.25% | 0.07% | 0.19 | 0.22 | 0.077 / 0.121 | 0.193 | 371 |
+| 200 KiB coinbase, without payouts, 1,000 nodes, 10 s shares | 1,301 | 2.61% | 0.00% | 0.26 | 0.31 | 7.6e-3 / 0.014 | 0.027 | 314 |
+| 200 KiB coinbase, without payouts, 1,000 nodes, 5 s shares | 1,301 | 4.91% | 0.00% | 0.26 | 0.31 | 0.015 / 0.028 | 0.052 | 323 |
+| 200 KiB coinbase, without payouts, 1,000 nodes, 2 s shares | 1,301 | 12.12% | 0.03% | 0.26 | 0.31 | 0.038 / 0.071 | 0.137 | 352 |
+| 200 KiB coinbase, without payouts, 1,000 nodes, 1 s shares | 1,301 | 21.13% | 0.24% | 0.26 | 0.31 | 0.076 / 0.143 | 0.265 | 396 |
 
-Without payouts a share is 1,429 bytes whatever the payees, and the stale
+Without payouts a share is 1,301 bytes whatever the payees, and the stale
 rate no longer depends on the coinbase: on 1,000 nodes at 2-second shares,
-11.15% (34 KB coinbase) and 11.99% (200 KiB) against 17.77% and 38.31% sent
-whole. What is left is about what a 3 KB coinbase sent whole costs.
+11.36% (today's coinbase) and 12.12% (200 KiB) against 17.88% and 37.90%
+sent whole. What is left is about what a 3 KB coinbase sent whole costs.
 
 ### 3. Relay before full validation
 
@@ -846,17 +903,17 @@ whole. What is left is about what a 3 KB coinbase sent whole costs.
 
 | Scenario | Share bytes | Stale | Orphaned | To 90% (s) | To all (s) | P2Pool up, mean / max (Mbit/s) | Uncles per chain share | Header-sync bytes per chain share |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
-| forwarded after the header check, 100 nodes, 10 s shares | 36,423 | 2.98% | 0.01% | 0.31 | 0.36 | 0.205 / 0.322 | 0.031 | 315 |
-| forwarded after the header check, 100 nodes, 5 s shares | 36,423 | 5.72% | 0.00% | 0.31 | 0.36 | 0.413 / 0.649 | 0.061 | 326 |
-| forwarded after the header check, 100 nodes, 2 s shares | 36,423 | 12.68% | 0.07% | 0.31 | 0.36 | 1.03 / 1.62 | 0.144 | 354 |
-| forwarded after the header check, 100 nodes, 1 s shares | 36,423 | 22.31% | 0.30% | 0.32 | 0.36 | 2.05 / 3.22 | 0.283 | 403 |
-| forwarded after the header check, 1,000 nodes, 10 s shares | 36,423 | 3.99% | 0.00% | 0.45 | 0.53 | 0.205 / 0.380 | 0.042 | 319 |
-| forwarded after the header check, 1,000 nodes, 5 s shares | 36,423 | 7.55% | 0.01% | 0.45 | 0.53 | 0.407 / 0.756 | 0.082 | 333 |
-| forwarded after the header check, 1,000 nodes, 2 s shares | 36,423 | 17.13% | 0.11% | 0.45 | 0.54 | 1.03 / 1.92 | 0.205 | 376 |
-| forwarded after the header check, 1,000 nodes, 1 s shares | 36,423 | 29.79% | 0.72% | 0.45 | 0.54 | 2.04 / 3.79 | 0.414 | 450 |
+| forwarded after the header check, 100 nodes, 10 s shares | 30,525 | 2.74% | 0.00% | 0.29 | 0.33 | 0.173 / 0.272 | 0.028 | 314 |
+| forwarded after the header check, 100 nodes, 5 s shares | 35,337 | 5.27% | 0.00% | 0.31 | 0.36 | 0.397 / 0.625 | 0.056 | 324 |
+| forwarded after the header check, 100 nodes, 2 s shares | 36,295 | 12.94% | 0.06% | 0.31 | 0.36 | 1.02 / 1.61 | 0.148 | 356 |
+| forwarded after the header check, 100 nodes, 1 s shares | 36,295 | 22.47% | 0.31% | 0.32 | 0.36 | 2.05 / 3.22 | 0.286 | 404 |
+| forwarded after the header check, 1,000 nodes, 10 s shares | 30,525 | 3.68% | 0.00% | 0.41 | 0.49 | 0.173 / 0.321 | 0.038 | 318 |
+| forwarded after the header check, 1,000 nodes, 5 s shares | 35,337 | 7.67% | 0.00% | 0.44 | 0.53 | 0.396 / 0.737 | 0.083 | 333 |
+| forwarded after the header check, 1,000 nodes, 2 s shares | 36,295 | 17.36% | 0.07% | 0.45 | 0.53 | 1.01 / 1.89 | 0.209 | 377 |
+| forwarded after the header check, 1,000 nodes, 1 s shares | 36,295 | 29.50% | 0.58% | 0.45 | 0.54 | 2.04 / 3.79 | 0.410 | 449 |
 
-On its own, a small gain: 3.99% against 4.23% on 1,000 nodes at 10-second
-shares, and 0.45 against 0.47 seconds to 90% of the nodes.
+On its own, a small gain: 3.68% against 3.83% on 1,000 nodes at 10-second
+shares, and 0.41 against 0.43 seconds to 90% of the nodes.
 
 ### 4. Fewer hops
 
@@ -864,36 +921,36 @@ shares, and 0.45 against 0.47 seconds to 90% of the nodes.
 
 | Scenario | Share bytes | Stale | Orphaned | To 90% (s) | To all (s) | P2Pool up, mean / max (Mbit/s) | Uncles per chain share | Header-sync bytes per chain share |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
-| 16 peers, 100 nodes, 10 s shares | 36,423 | 3.41% | 0.00% | 0.37 | 0.42 | 0.437 / 0.585 | 0.035 | 317 |
-| 16 peers, 100 nodes, 5 s shares | 36,423 | 6.60% | 0.00% | 0.37 | 0.42 | 0.881 / 1.18 | 0.071 | 329 |
-| 16 peers, 100 nodes, 2 s shares | 36,423 | 14.72% | 0.07% | 0.38 | 0.42 | 2.20 / 2.94 | 0.172 | 364 |
-| 16 peers, 100 nodes, 1 s shares | 36,423 | 25.44% | 0.54% | 0.39 | 0.44 | 4.37 / 5.85 | 0.334 | 421 |
-| 16 peers, 1,000 nodes, 10 s shares | 36,423 | 4.54% | 0.00% | 0.49 | 0.57 | 0.436 / 0.788 | 0.048 | 321 |
-| 16 peers, 1,000 nodes, 5 s shares | 36,423 | 7.98% | 0.02% | 0.49 | 0.57 | 0.867 / 1.57 | 0.087 | 334 |
-| 16 peers, 1,000 nodes, 2 s shares | 36,423 | 18.55% | 0.14% | 0.50 | 0.58 | 2.21 / 3.98 | 0.226 | 383 |
-| 16 peers, 1,000 nodes, 1 s shares | 36,423 | 32.01% | 1.30% | 0.81 | 0.89 | 4.35 / 7.85 | 0.451 | 464 |
-| 32 peers, 100 nodes, 10 s shares | 36,423 | 4.79% | 0.00% | 0.51 | 0.55 | 0.905 / 1.17 | 0.050 | 322 |
-| 32 peers, 100 nodes, 5 s shares | 36,423 | 9.09% | 0.03% | 0.52 | 0.57 | 1.82 / 2.36 | 0.100 | 339 |
-| 32 peers, 100 nodes, 2 s shares | 36,423 | 19.86% | 0.47% | 0.59 | 0.64 | 4.55 / 5.88 | 0.242 | 389 |
-| 32 peers, 100 nodes, 1 s shares | 36,423 | 33.82% | 8.19% | 513.09 | 513.14 | 9.05 / 11.7 | 0.387 | 441 |
-| 32 peers, 1,000 nodes, 10 s shares | 36,423 | 6.02% | 0.00% | 0.65 | 0.74 | 0.905 / 1.29 | 0.064 | 327 |
-| 32 peers, 1,000 nodes, 5 s shares | 36,423 | 10.85% | 0.05% | 0.68 | 0.76 | 1.80 / 2.56 | 0.121 | 346 |
-| 32 peers, 1,000 nodes, 2 s shares | 36,423 | 24.01% | 0.83% | 14.30 | 14.39 | 4.58 / 6.50 | 0.305 | 411 |
-| 32 peers, 1,000 nodes, 1 s shares | 36,423 | 39.28% | 5.08% | 41.31 | 41.40 | 9.03 / 12.8 | 0.563 | 506 |
-| 64 peers, 100 nodes, 10 s shares | 36,423 | 6.51% | 0.01% | 0.77 | 0.83 | 1.84 / 2.17 | 0.070 | 329 |
-| 64 peers, 100 nodes, 5 s shares | 36,423 | 12.54% | 0.06% | 0.80 | 0.86 | 3.72 / 4.37 | 0.143 | 354 |
-| 64 peers, 100 nodes, 2 s shares | 36,423 | 28.23% | 2.74% | 4.43 | 4.50 | 9.26 / 10.9 | 0.355 | 429 |
-| 64 peers, 100 nodes, 1 s shares | 36,423 | 45.30% | 14.86% | 2095.45 | 2095.52 | 18.4 / 21.7 | 0.556 | 504 |
-| 64 peers, 1,000 nodes, 10 s shares | 36,423 | 7.97% | 0.01% | 0.93 | 1.03 | 1.84 / 2.31 | 0.086 | 334 |
-| 64 peers, 1,000 nodes, 5 s shares | 36,423 | 14.85% | 0.36% | 4.95 | 5.04 | 3.66 / 4.60 | 0.170 | 363 |
-| 64 peers, 1,000 nodes, 2 s shares | 36,423 | 31.32% | 3.99% | 100.46 | 100.56 | 9.32 / 11.7 | 0.398 | 445 |
-| 64 peers, 1,000 nodes, 1 s shares | 36,423 | 48.79% | 14.80% | 269.49 | 269.59 | 18.4 / 23.1 | 0.663 | 544 |
+| 16 peers, 100 nodes, 10 s shares | 30,525 | 3.10% | 0.00% | 0.33 | 0.38 | 0.369 / 0.493 | 0.032 | 316 |
+| 16 peers, 100 nodes, 5 s shares | 35,337 | 6.12% | 0.00% | 0.36 | 0.41 | 0.847 / 1.13 | 0.065 | 327 |
+| 16 peers, 100 nodes, 2 s shares | 36,295 | 14.81% | 0.07% | 0.38 | 0.42 | 2.18 / 2.92 | 0.173 | 364 |
+| 16 peers, 100 nodes, 1 s shares | 36,295 | 25.77% | 0.59% | 0.39 | 0.44 | 4.37 / 5.85 | 0.339 | 423 |
+| 16 peers, 1,000 nodes, 10 s shares | 30,525 | 4.08% | 0.00% | 0.44 | 0.51 | 0.368 / 0.664 | 0.042 | 319 |
+| 16 peers, 1,000 nodes, 5 s shares | 35,337 | 8.27% | 0.02% | 0.48 | 0.55 | 0.845 / 1.53 | 0.090 | 336 |
+| 16 peers, 1,000 nodes, 2 s shares | 36,295 | 18.66% | 0.13% | 0.49 | 0.57 | 2.16 / 3.90 | 0.228 | 383 |
+| 16 peers, 1,000 nodes, 1 s shares | 36,295 | 31.58% | 1.20% | 0.93 | 1.01 | 4.35 / 7.85 | 0.444 | 461 |
+| 32 peers, 100 nodes, 10 s shares | 30,525 | 4.30% | 0.00% | 0.44 | 0.48 | 0.763 / 0.986 | 0.045 | 320 |
+| 32 peers, 100 nodes, 5 s shares | 35,337 | 8.58% | 0.03% | 0.51 | 0.55 | 1.75 / 2.27 | 0.094 | 337 |
+| 32 peers, 100 nodes, 2 s shares | 36,295 | 19.95% | 0.49% | 0.59 | 0.63 | 4.52 / 5.84 | 0.243 | 389 |
+| 32 peers, 100 nodes, 1 s shares | 36,295 | 33.84% | 8.21% | 536.81 | 536.86 | 9.06 / 11.7 | 0.387 | 441 |
+| 32 peers, 1,000 nodes, 10 s shares | 30,525 | 5.08% | 0.00% | 0.57 | 0.65 | 0.764 / 1.08 | 0.054 | 323 |
+| 32 peers, 1,000 nodes, 5 s shares | 35,337 | 10.72% | 0.05% | 0.66 | 0.74 | 1.75 / 2.49 | 0.120 | 346 |
+| 32 peers, 1,000 nodes, 2 s shares | 36,295 | 23.70% | 0.76% | 18.38 | 18.47 | 4.49 / 6.37 | 0.301 | 409 |
+| 32 peers, 1,000 nodes, 1 s shares | 36,295 | 39.15% | 5.08% | 47.52 | 47.61 | 9.03 / 12.8 | 0.560 | 504 |
+| 64 peers, 100 nodes, 10 s shares | 30,525 | 5.73% | 0.00% | 0.66 | 0.71 | 1.56 / 1.83 | 0.061 | 326 |
+| 64 peers, 100 nodes, 5 s shares | 35,337 | 12.01% | 0.05% | 0.77 | 0.83 | 3.57 / 4.20 | 0.136 | 352 |
+| 64 peers, 100 nodes, 2 s shares | 36,295 | 28.29% | 2.72% | 3.38 | 3.44 | 9.20 / 10.8 | 0.357 | 430 |
+| 64 peers, 100 nodes, 1 s shares | 36,295 | 45.16% | 14.68% | 2105.04 | 2105.11 | 18.5 / 21.7 | 0.556 | 504 |
+| 64 peers, 1,000 nodes, 10 s shares | 30,525 | 6.70% | 0.00% | 0.80 | 0.88 | 1.55 / 1.95 | 0.072 | 329 |
+| 64 peers, 1,000 nodes, 5 s shares | 35,337 | 14.66% | 0.32% | 2.67 | 2.76 | 3.57 / 4.48 | 0.168 | 363 |
+| 64 peers, 1,000 nodes, 2 s shares | 36,295 | 31.27% | 3.81% | 88.79 | 88.89 | 9.13 / 11.5 | 0.400 | 445 |
+| 64 peers, 1,000 nodes, 1 s shares | 36,295 | 48.65% | 15.32% | 287.90 | 288.00 | 18.4 / 23.1 | 0.649 | 538 |
 
 With whole shares more peers are worse at every size and interval. A node
 pushes a whole share to every peer not known to have it, so each node uploads
-about as many copies as it has peers: 1.84 Mbit/s mean at 64 peers against
-0.20 at 8 (10-second shares). At 2-second shares 64 peers saturate the slower
-links, and the mean time to 90% of 1,000 nodes reaches 100 seconds.
+about as many copies as it has peers: 1.55 Mbit/s mean at 64 peers against
+0.17 at 8 (10-second shares). At 2-second shares 64 peers saturate the slower
+links, and the mean time to 90% of 1,000 nodes reaches 89 seconds.
 
 ### 5. Uncle cap
 
@@ -901,33 +958,33 @@ links, and the mean time to 90% of 1,000 nodes reaches 100 seconds.
 
 | Scenario | Share bytes | Stale | Orphaned | To 90% (s) | To all (s) | P2Pool up, mean / max (Mbit/s) | Uncles per chain share | Header-sync bytes per chain share |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
-| uncle cap 6, 100 nodes, 10 s shares | 36,423 | 3.09% | 0.01% | 0.33 | 0.38 | 0.202 / 0.320 | 0.032 | 316 |
-| uncle cap 6, 100 nodes, 5 s shares | 36,423 | 5.88% | 0.00% | 0.33 | 0.38 | 0.408 / 0.645 | 0.062 | 326 |
-| uncle cap 6, 100 nodes, 2 s shares | 36,423 | 13.11% | 0.08% | 0.33 | 0.38 | 1.02 / 1.61 | 0.150 | 356 |
-| uncle cap 6, 100 nodes, 1 s shares | 36,423 | 23.00% | 0.33% | 0.33 | 0.38 | 2.02 / 3.20 | 0.294 | 407 |
-| uncle cap 6, 1,000 nodes, 10 s shares | 36,423 | 4.23% | 0.00% | 0.47 | 0.56 | 0.202 / 0.378 | 0.044 | 320 |
-| uncle cap 6, 1,000 nodes, 5 s shares | 36,423 | 7.84% | 0.01% | 0.47 | 0.56 | 0.402 / 0.752 | 0.085 | 334 |
-| uncle cap 6, 1,000 nodes, 2 s shares | 36,423 | 17.77% | 0.14% | 0.47 | 0.56 | 1.02 / 1.91 | 0.214 | 379 |
-| uncle cap 6, 1,000 nodes, 1 s shares | 36,423 | 30.66% | 0.79% | 0.48 | 0.57 | 2.02 / 3.77 | 0.431 | 456 |
-| uncle cap 12, 100 nodes, 10 s shares | 36,423 | 3.09% | 0.01% | 0.33 | 0.38 | 0.202 / 0.320 | 0.032 | 316 |
-| uncle cap 12, 100 nodes, 5 s shares | 36,423 | 5.88% | 0.00% | 0.33 | 0.38 | 0.408 / 0.645 | 0.062 | 326 |
-| uncle cap 12, 100 nodes, 2 s shares | 36,423 | 13.11% | 0.08% | 0.33 | 0.38 | 1.02 / 1.61 | 0.150 | 356 |
-| uncle cap 12, 100 nodes, 1 s shares | 36,423 | 23.00% | 0.33% | 0.33 | 0.38 | 2.02 / 3.20 | 0.294 | 407 |
-| uncle cap 12, 1,000 nodes, 10 s shares | 36,423 | 4.23% | 0.00% | 0.47 | 0.56 | 0.202 / 0.378 | 0.044 | 320 |
-| uncle cap 12, 1,000 nodes, 5 s shares | 36,423 | 7.84% | 0.01% | 0.47 | 0.56 | 0.402 / 0.752 | 0.085 | 334 |
-| uncle cap 12, 1,000 nodes, 2 s shares | 36,423 | 17.77% | 0.14% | 0.47 | 0.56 | 1.02 / 1.91 | 0.214 | 379 |
-| uncle cap 12, 1,000 nodes, 1 s shares | 36,423 | 30.66% | 0.79% | 0.48 | 0.57 | 2.02 / 3.77 | 0.431 | 456 |
+| uncle cap 6, 100 nodes, 10 s shares | 30,525 | 2.85% | 0.00% | 0.30 | 0.35 | 0.171 / 0.271 | 0.029 | 315 |
+| uncle cap 6, 100 nodes, 5 s shares | 35,337 | 5.43% | 0.00% | 0.32 | 0.37 | 0.393 / 0.622 | 0.057 | 324 |
+| uncle cap 6, 100 nodes, 2 s shares | 36,295 | 13.34% | 0.07% | 0.33 | 0.38 | 1.01 / 1.60 | 0.153 | 357 |
+| uncle cap 6, 100 nodes, 1 s shares | 36,295 | 23.14% | 0.34% | 0.33 | 0.38 | 2.03 / 3.20 | 0.297 | 408 |
+| uncle cap 6, 1,000 nodes, 10 s shares | 30,525 | 3.83% | 0.00% | 0.43 | 0.52 | 0.171 / 0.319 | 0.040 | 318 |
+| uncle cap 6, 1,000 nodes, 5 s shares | 35,337 | 8.01% | 0.01% | 0.46 | 0.55 | 0.392 / 0.733 | 0.087 | 335 |
+| uncle cap 6, 1,000 nodes, 2 s shares | 36,295 | 17.88% | 0.09% | 0.47 | 0.56 | 1.00 / 1.88 | 0.216 | 379 |
+| uncle cap 6, 1,000 nodes, 1 s shares | 36,295 | 30.42% | 0.62% | 0.47 | 0.56 | 2.02 / 3.77 | 0.428 | 455 |
+| uncle cap 12, 100 nodes, 10 s shares | 30,525 | 2.85% | 0.00% | 0.30 | 0.35 | 0.171 / 0.271 | 0.029 | 315 |
+| uncle cap 12, 100 nodes, 5 s shares | 35,337 | 5.43% | 0.00% | 0.32 | 0.37 | 0.393 / 0.622 | 0.057 | 324 |
+| uncle cap 12, 100 nodes, 2 s shares | 36,295 | 13.34% | 0.07% | 0.33 | 0.38 | 1.01 / 1.60 | 0.153 | 357 |
+| uncle cap 12, 100 nodes, 1 s shares | 36,295 | 23.14% | 0.34% | 0.33 | 0.38 | 2.03 / 3.20 | 0.297 | 408 |
+| uncle cap 12, 1,000 nodes, 10 s shares | 30,525 | 3.83% | 0.00% | 0.43 | 0.52 | 0.171 / 0.319 | 0.040 | 318 |
+| uncle cap 12, 1,000 nodes, 5 s shares | 35,337 | 8.01% | 0.01% | 0.46 | 0.55 | 0.392 / 0.733 | 0.087 | 335 |
+| uncle cap 12, 1,000 nodes, 2 s shares | 36,295 | 17.88% | 0.09% | 0.47 | 0.56 | 1.00 / 1.88 | 0.216 | 379 |
+| uncle cap 12, 1,000 nodes, 1 s shares | 36,295 | 30.42% | 0.62% | 0.47 | 0.56 | 2.02 / 3.77 | 0.428 | 455 |
 
 Every row is the same as today's: no share in these runs had a fourth uncle
 to name, so a larger cap changes nothing and costs no extra header sync.
-Smaller caps do change the runs: 1,000 nodes at 1-second shares are 0.79%
-orphaned with a cap of 3, 0.81% with 2 and 2.05% with 1 (`--max-uncles`,
-one run each; the stale rate is 30.66% in all three, since uncles do not
+Smaller caps do change the runs: 1,000 nodes at 1-second shares are 0.62%
+orphaned with a cap of 3, 0.66% with 2 and 1.93% with 1 (`--max-uncles`,
+one run each; the stale rate is 30.42% in all three, since uncles do not
 change which chain wins in this model). The orphans left at a cap of 3 are
 shares no share on the final chain could name within 3 shares of depth. The
 header-sync work grows with the share rate whatever the cap: on 1,000 nodes
-320 bytes per chain share at 10-second shares, 379 at 2 seconds and 456 at
-1 second (0.044, 0.214 and 0.431 uncles per chain share).
+318 bytes per chain share at 10-second shares, 379 at 2 seconds and 455 at
+1 second (0.040, 0.216 and 0.428 uncles per chain share).
 
 ### 6. The combination
 
@@ -935,42 +992,42 @@ header-sync work grows with the share rate whatever the cap: on 1,000 nodes
 
 | Scenario | Share bytes | Stale | Orphaned | To 90% (s) | To all (s) | P2Pool up, mean / max (Mbit/s) | Uncles per chain share | Header-sync bytes per chain share |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
-| without payouts, header check, 8 peers, 100 nodes, 10 s shares | 1,429 | 1.84% | 0.00% | 0.16 | 0.18 | 8.6e-3 / 0.013 | 0.019 | 311 |
-| without payouts, header check, 8 peers, 100 nodes, 5 s shares | 1,429 | 3.44% | 0.00% | 0.16 | 0.19 | 0.017 / 0.027 | 0.036 | 317 |
-| without payouts, header check, 8 peers, 100 nodes, 2 s shares | 1,429 | 7.79% | 0.00% | 0.16 | 0.19 | 0.043 / 0.067 | 0.084 | 334 |
-| without payouts, header check, 8 peers, 100 nodes, 1 s shares | 1,429 | 14.33% | 0.08% | 0.16 | 0.19 | 0.086 / 0.134 | 0.166 | 362 |
-| without payouts, header check, 8 peers, 1,000 nodes, 10 s shares | 1,429 | 2.32% | 0.00% | 0.22 | 0.26 | 8.6e-3 / 0.016 | 0.024 | 313 |
-| without payouts, header check, 8 peers, 1,000 nodes, 5 s shares | 1,429 | 4.37% | 0.00% | 0.22 | 0.26 | 0.017 / 0.032 | 0.046 | 320 |
-| without payouts, header check, 8 peers, 1,000 nodes, 2 s shares | 1,429 | 10.30% | 0.00% | 0.22 | 0.26 | 0.043 / 0.080 | 0.115 | 344 |
-| without payouts, header check, 8 peers, 1,000 nodes, 1 s shares | 1,429 | 18.93% | 0.06% | 0.22 | 0.26 | 0.086 / 0.159 | 0.232 | 385 |
-| without payouts, header check, 16 peers, 100 nodes, 10 s shares | 1,429 | 1.63% | 0.00% | 0.12 | 0.13 | 0.018 / 0.025 | 0.017 | 311 |
-| without payouts, header check, 16 peers, 100 nodes, 5 s shares | 1,429 | 2.87% | 0.00% | 0.12 | 0.13 | 0.037 / 0.050 | 0.030 | 315 |
-| without payouts, header check, 16 peers, 100 nodes, 2 s shares | 1,429 | 6.55% | 0.00% | 0.12 | 0.13 | 0.093 / 0.124 | 0.070 | 329 |
-| without payouts, header check, 16 peers, 100 nodes, 1 s shares | 1,429 | 12.34% | 0.03% | 0.12 | 0.13 | 0.184 / 0.247 | 0.140 | 353 |
-| without payouts, header check, 16 peers, 1,000 nodes, 10 s shares | 1,429 | 1.99% | 0.00% | 0.16 | 0.19 | 0.018 / 0.033 | 0.020 | 312 |
-| without payouts, header check, 16 peers, 1,000 nodes, 5 s shares | 1,429 | 3.51% | 0.00% | 0.16 | 0.19 | 0.037 / 0.066 | 0.036 | 317 |
-| without payouts, header check, 16 peers, 1,000 nodes, 2 s shares | 1,429 | 8.39% | 0.00% | 0.16 | 0.19 | 0.093 / 0.167 | 0.092 | 336 |
-| without payouts, header check, 16 peers, 1,000 nodes, 1 s shares | 1,429 | 15.75% | 0.09% | 0.16 | 0.19 | 0.184 / 0.330 | 0.186 | 369 |
-| without payouts, header check, 32 peers, 100 nodes, 10 s shares | 1,429 | 1.50% | 0.00% | 0.10 | 0.12 | 0.038 / 0.049 | 0.015 | 310 |
-| without payouts, header check, 32 peers, 100 nodes, 5 s shares | 1,429 | 2.64% | 0.00% | 0.10 | 0.12 | 0.077 / 0.099 | 0.027 | 314 |
-| without payouts, header check, 32 peers, 100 nodes, 2 s shares | 1,429 | 6.13% | 0.00% | 0.10 | 0.12 | 0.191 / 0.246 | 0.065 | 327 |
-| without payouts, header check, 32 peers, 100 nodes, 1 s shares | 1,429 | 11.54% | 0.04% | 0.10 | 0.12 | 0.381 / 0.490 | 0.130 | 349 |
-| without payouts, header check, 32 peers, 1,000 nodes, 10 s shares | 1,429 | 1.83% | 0.00% | 0.14 | 0.16 | 0.038 / 0.054 | 0.019 | 311 |
-| without payouts, header check, 32 peers, 1,000 nodes, 5 s shares | 1,429 | 3.26% | 0.00% | 0.14 | 0.16 | 0.076 / 0.108 | 0.034 | 316 |
-| without payouts, header check, 32 peers, 1,000 nodes, 2 s shares | 1,429 | 7.73% | 0.00% | 0.14 | 0.16 | 0.193 / 0.274 | 0.084 | 333 |
-| without payouts, header check, 32 peers, 1,000 nodes, 1 s shares | 1,429 | 14.68% | 0.10% | 0.14 | 0.16 | 0.381 / 0.541 | 0.171 | 363 |
-| without payouts, header check, 64 peers, 100 nodes, 10 s shares | 1,429 | 1.53% | 0.00% | 0.10 | 0.11 | 0.077 / 0.091 | 0.015 | 310 |
-| without payouts, header check, 64 peers, 100 nodes, 5 s shares | 1,429 | 2.66% | 0.00% | 0.10 | 0.11 | 0.156 / 0.183 | 0.027 | 314 |
-| without payouts, header check, 64 peers, 100 nodes, 2 s shares | 1,429 | 6.04% | 0.01% | 0.10 | 0.11 | 0.389 / 0.458 | 0.064 | 327 |
-| without payouts, header check, 64 peers, 100 nodes, 1 s shares | 1,429 | 11.41% | 0.05% | 0.10 | 0.11 | 0.776 / 0.912 | 0.128 | 349 |
-| without payouts, header check, 64 peers, 1,000 nodes, 10 s shares | 1,429 | 1.76% | 0.00% | 0.13 | 0.15 | 0.077 / 0.097 | 0.018 | 311 |
-| without payouts, header check, 64 peers, 1,000 nodes, 5 s shares | 1,429 | 3.21% | 0.00% | 0.13 | 0.15 | 0.154 / 0.193 | 0.033 | 316 |
-| without payouts, header check, 64 peers, 1,000 nodes, 2 s shares | 1,429 | 7.70% | 0.00% | 0.13 | 0.15 | 0.392 / 0.492 | 0.083 | 333 |
-| without payouts, header check, 64 peers, 1,000 nodes, 1 s shares | 1,429 | 14.32% | 0.05% | 0.13 | 0.15 | 0.774 / 0.971 | 0.166 | 362 |
+| without payouts, header check, 8 peers, 100 nodes, 10 s shares | 1,301 | 1.84% | 0.00% | 0.16 | 0.18 | 7.9e-3 / 0.012 | 0.019 | 311 |
+| without payouts, header check, 8 peers, 100 nodes, 5 s shares | 1,301 | 3.17% | 0.00% | 0.16 | 0.18 | 0.016 / 0.024 | 0.033 | 316 |
+| without payouts, header check, 8 peers, 100 nodes, 2 s shares | 1,301 | 7.94% | 0.01% | 0.16 | 0.18 | 0.039 / 0.061 | 0.086 | 334 |
+| without payouts, header check, 8 peers, 100 nodes, 1 s shares | 1,301 | 14.50% | 0.06% | 0.16 | 0.18 | 0.079 / 0.123 | 0.169 | 363 |
+| without payouts, header check, 8 peers, 1,000 nodes, 10 s shares | 1,301 | 2.30% | 0.00% | 0.22 | 0.26 | 7.9e-3 / 0.015 | 0.023 | 313 |
+| without payouts, header check, 8 peers, 1,000 nodes, 5 s shares | 1,301 | 4.30% | 0.00% | 0.22 | 0.26 | 0.016 / 0.029 | 0.045 | 320 |
+| without payouts, header check, 8 peers, 1,000 nodes, 2 s shares | 1,301 | 10.65% | 0.02% | 0.22 | 0.26 | 0.039 / 0.072 | 0.119 | 346 |
+| without payouts, header check, 8 peers, 1,000 nodes, 1 s shares | 1,301 | 18.80% | 0.14% | 0.22 | 0.26 | 0.079 / 0.146 | 0.230 | 384 |
+| without payouts, header check, 16 peers, 100 nodes, 10 s shares | 1,301 | 1.57% | 0.00% | 0.12 | 0.13 | 0.017 / 0.023 | 0.016 | 310 |
+| without payouts, header check, 16 peers, 100 nodes, 5 s shares | 1,301 | 2.64% | 0.00% | 0.12 | 0.13 | 0.034 / 0.045 | 0.027 | 314 |
+| without payouts, header check, 16 peers, 100 nodes, 2 s shares | 1,301 | 6.65% | 0.00% | 0.12 | 0.13 | 0.085 / 0.113 | 0.071 | 329 |
+| without payouts, header check, 16 peers, 100 nodes, 1 s shares | 1,301 | 12.42% | 0.02% | 0.12 | 0.13 | 0.170 / 0.227 | 0.142 | 353 |
+| without payouts, header check, 16 peers, 1,000 nodes, 10 s shares | 1,301 | 2.00% | 0.00% | 0.16 | 0.19 | 0.017 / 0.030 | 0.020 | 312 |
+| without payouts, header check, 16 peers, 1,000 nodes, 5 s shares | 1,301 | 3.37% | 0.00% | 0.16 | 0.19 | 0.034 / 0.060 | 0.035 | 317 |
+| without payouts, header check, 16 peers, 1,000 nodes, 2 s shares | 1,301 | 8.70% | 0.00% | 0.16 | 0.19 | 0.084 / 0.150 | 0.095 | 337 |
+| without payouts, header check, 16 peers, 1,000 nodes, 1 s shares | 1,301 | 15.31% | 0.07% | 0.16 | 0.19 | 0.169 / 0.303 | 0.180 | 367 |
+| without payouts, header check, 32 peers, 100 nodes, 10 s shares | 1,301 | 1.48% | 0.00% | 0.10 | 0.11 | 0.035 / 0.045 | 0.015 | 310 |
+| without payouts, header check, 32 peers, 100 nodes, 5 s shares | 1,301 | 2.48% | 0.00% | 0.10 | 0.11 | 0.070 / 0.090 | 0.025 | 314 |
+| without payouts, header check, 32 peers, 100 nodes, 2 s shares | 1,301 | 6.32% | 0.00% | 0.10 | 0.11 | 0.175 / 0.225 | 0.067 | 328 |
+| without payouts, header check, 32 peers, 100 nodes, 1 s shares | 1,301 | 11.55% | 0.02% | 0.10 | 0.11 | 0.351 / 0.451 | 0.130 | 349 |
+| without payouts, header check, 32 peers, 1,000 nodes, 10 s shares | 1,301 | 1.72% | 0.00% | 0.14 | 0.16 | 0.035 / 0.050 | 0.018 | 311 |
+| without payouts, header check, 32 peers, 1,000 nodes, 5 s shares | 1,301 | 3.19% | 0.00% | 0.14 | 0.16 | 0.070 / 0.099 | 0.033 | 316 |
+| without payouts, header check, 32 peers, 1,000 nodes, 2 s shares | 1,301 | 7.98% | 0.00% | 0.14 | 0.16 | 0.174 / 0.247 | 0.087 | 334 |
+| without payouts, header check, 32 peers, 1,000 nodes, 1 s shares | 1,301 | 14.30% | 0.08% | 0.14 | 0.16 | 0.350 / 0.497 | 0.166 | 362 |
+| without payouts, header check, 64 peers, 100 nodes, 10 s shares | 1,301 | 1.51% | 0.00% | 0.10 | 0.11 | 0.071 / 0.084 | 0.015 | 310 |
+| without payouts, header check, 64 peers, 100 nodes, 5 s shares | 1,301 | 2.44% | 0.00% | 0.10 | 0.11 | 0.142 / 0.167 | 0.025 | 313 |
+| without payouts, header check, 64 peers, 100 nodes, 2 s shares | 1,301 | 6.18% | 0.00% | 0.10 | 0.11 | 0.356 / 0.418 | 0.066 | 327 |
+| without payouts, header check, 64 peers, 100 nodes, 1 s shares | 1,301 | 11.34% | 0.03% | 0.10 | 0.11 | 0.714 / 0.840 | 0.127 | 348 |
+| without payouts, header check, 64 peers, 1,000 nodes, 10 s shares | 1,301 | 1.79% | 0.00% | 0.13 | 0.15 | 0.071 / 0.090 | 0.018 | 311 |
+| without payouts, header check, 64 peers, 1,000 nodes, 5 s shares | 1,301 | 3.01% | 0.00% | 0.13 | 0.15 | 0.142 / 0.178 | 0.031 | 316 |
+| without payouts, header check, 64 peers, 1,000 nodes, 2 s shares | 1,301 | 7.77% | 0.00% | 0.13 | 0.15 | 0.353 / 0.443 | 0.084 | 334 |
+| without payouts, header check, 64 peers, 1,000 nodes, 1 s shares | 1,301 | 13.96% | 0.06% | 0.13 | 0.15 | 0.712 / 0.893 | 0.161 | 360 |
 
-On 1,000 nodes at 2-second shares the combination is 10.30% stale at 8 peers
-and 7.70% at 64, against today's 17.77%; at 1-second shares 18.93% to 14.32%
-against 30.66%, with almost no orphans. The busiest node uploads under 1
+On 1,000 nodes at 2-second shares the combination is 10.65% stale at 8 peers
+and 7.77% at 64, against today's 17.88%; at 1-second shares 18.80% to 13.96%
+against 30.42%, with almost no orphans. The busiest node uploads under 1
 Mbit/s even at 64 peers and 1-second shares.
 
 ### What was approximated
@@ -980,7 +1037,7 @@ mix, estimated validation and job-switch times):
 
 - **Weak shares:** the 800-byte payload is an estimate inside the design's
   0.5 to 1.2 KB. A weak share is validated in a share's validation time
-  (5.7 ms), and validation is not a queue: like share validation in this
+  (5.6 to 5.7 ms), and validation is not a queue: like share validation in this
   model it never waits for the CPU. Weak shares and shares share one FIFO
   upload queue with no priority. A share carried whole holds the average
   count, not the weak shares actually pending. Weak shares are forwarded
@@ -1002,8 +1059,8 @@ mix, estimated validation and job-switch times):
   100-node runs a day. The limits come from one seed; only the combination
   was searched under two more.
 - **The limit:** upstream gives "about 1,000 miners at 10-second shares",
-  not a stale rate; reading it as 1,000 nodes at today's 4.23% is this
-  study's choice.
+  not a stale rate; reading it as 1,000 nodes at today's 3.83% (4.23% with
+  ten-minute blocks) is this study's choice.
 
 Not measured here: weak shares carried as 32-byte hashes instead of whole,
 counting weak work in fork choice and the validation it would add, the
@@ -1052,7 +1109,14 @@ These were measured on one core of a 2026 desktop. The scaling study's guess
 matched at 1,000 miners, was 3 times too low at 10,000 and 15 times too low
 at 100,000. The default payout level matters: at level 5 a 3.125 BCH block
 pays at most 17,886 outputs, so 100,000 miners cost a third of what they
-cost at level 0. The walk in the table above has no weak-share credits in
+cost at level 0. These costs were measured before one-minute blocks, with a
+ten-minute block's 3.125 BCH and a 120,960 share window, and the limits
+study below still uses them. With one-minute blocks a 0.3125 BCH block pays
+at most about 1,790 outputs at level 5, so the 100,000-miner rows overstate
+the coinbase build, and the window of any pool above 0.015% of BCH holds
+fewer shares than the measured 120,960, so the walk is shorter too; the
+timing tests have to be run again for one-minute numbers. The walk in the
+table above has no weak-share credits in
 it. A window whose shares carry 32 weak shares each was measured
 (`validation_cost_with_weak_share_credits`): the walk takes 14 ms for 1,800
 shares and 5,100 payees, 174 ms with 50,100 payees, 211 ms for 18,000
@@ -1101,52 +1165,55 @@ built it.
 
 A token share is already small: its coinbase stops at 3,072 bytes and pays
 everyone else through the payout tree, which a peer rebuilds from the same
-window. It is 4,237 bytes on the wire whatever it pays.
+window. It is 4,109 bytes on the wire whatever it pays.
 
 | Scenario | Share bytes | Validation (ms) | Stale | To all (s) | P2Pool up, mean / max (Mbit/s) | Uncles per chain share | Validation busy, mean / max | Validation wait (ms) |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
-| whole, 1,000 miners, 10 s | 36,389 | 6.4 | 4.26% | 0.56 | 0.202 / 0.378 | 0.045 | 0.06% / 0.06% | 0.0 |
-| without payouts, 1,000 miners, 10 s | 1,429 | 6.4 | 2.58% | 0.29 | 8.4e-3 / 0.016 | 0.026 | 0.06% / 0.06% | 0.0 |
-| token share, 1,000 miners, 10 s | 4,237 | 7.3 | 2.76% | 0.33 | 0.024 / 0.044 | 0.028 | 0.07% / 0.07% | 0.0 |
-| whole, 10,000 miners, 10 s | 350,749 | 37.9 | 16.62% | 2.79 | 1.93 / 3.62 | 0.198 | 0.38% / 0.38% | 0.1 |
-| without payouts, 10,000 miners, 10 s | 1,429 | 37.9 | 3.94% | 0.50 | 7.5e-3 / 0.015 | 0.041 | 0.38% / 0.38% | 0.1 |
-| token share, 10,000 miners, 10 s | 4,237 | 44.6 | 4.41% | 0.57 | 0.021 / 0.041 | 0.046 | 0.45% / 0.45% | 0.1 |
-| whole, 100,000 miners, 10 s | 626,131 | 361.5 | 32.62% | 6.77 | 3.21 / 6.17 | 0.469 | 3.62% / 3.62% | 5.3 |
-| without payouts, 100,000 miners, 10 s | 1,429 | 361.5 | 16.34% | 2.51 | 6.2e-3 / 0.013 | 0.194 | 3.62% / 3.62% | 5.7 |
-| token share, 100,000 miners, 10 s | 4,237 | 376.0 | 16.88% | 2.63 | 0.018 / 0.037 | 0.202 | 3.77% / 3.77% | 6.2 |
-| whole, 1,000 miners, 2 s | 36,389 | 6.4 | 17.84% | 0.57 | 1.02 / 1.91 | 0.215 | 0.32% / 0.32% | 0.0 |
-| without payouts, 1,000 miners, 2 s | 1,429 | 6.4 | 11.33% | 0.30 | 0.042 / 0.079 | 0.128 | 0.32% / 0.32% | 0.0 |
-| token share, 1,000 miners, 2 s | 4,237 | 7.3 | 12.27% | 0.33 | 0.120 / 0.225 | 0.139 | 0.37% / 0.37% | 0.0 |
-| whole, 10,000 miners, 2 s | 350,749 | 37.9 | 50.23% | 91.81 | 9.79 / 18.3 | 0.850 | 1.92% / 1.92% | 0.3 |
-| without payouts, 10,000 miners, 2 s | 1,429 | 37.9 | 16.99% | 0.50 | 0.038 / 0.074 | 0.203 | 1.92% / 1.92% | 0.3 |
-| token share, 10,000 miners, 2 s | 4,237 | 44.6 | 18.63% | 0.57 | 0.106 / 0.209 | 0.227 | 2.26% / 2.26% | 0.4 |
-| whole, 100,000 miners, 2 s | 626,131 | 361.5 | 71.33% | 434.51 | 16.3 / 31.1 | 1.591 | 18.32% / 18.32% | 28.0 |
-| without payouts, 100,000 miners, 2 s | 1,429 | 361.5 | 49.47% | 2.74 | 0.031 / 0.064 | 0.878 | 18.32% / 18.32% | 31.2 |
-| token share, 100,000 miners, 2 s | 4,237 | 376.0 | 50.46% | 2.87 | 0.086 / 0.181 | 0.913 | 19.05% / 19.05% | 34.1 |
+| whole, 1,000 miners, 10 s | 36,261 | 6.4 | 4.15% | 0.56 | 0.202 / 0.379 | 0.043 | 0.06% / 0.06% | 0.0 |
+| without payouts, 1,000 miners, 10 s | 1,301 | 6.4 | 2.52% | 0.29 | 7.7e-3 / 0.014 | 0.026 | 0.06% / 0.06% | 0.0 |
+| token share, 1,000 miners, 10 s | 4,109 | 7.3 | 2.69% | 0.33 | 0.023 / 0.043 | 0.028 | 0.07% / 0.07% | 0.0 |
+| whole, 10,000 miners, 10 s | 350,621 | 37.9 | 16.46% | 2.79 | 1.94 / 3.64 | 0.196 | 0.38% / 0.38% | 0.1 |
+| without payouts, 10,000 miners, 10 s | 1,301 | 37.9 | 3.87% | 0.50 | 6.9e-3 / 0.013 | 0.040 | 0.38% / 0.38% | 0.1 |
+| token share, 10,000 miners, 10 s | 4,109 | 44.6 | 4.24% | 0.56 | 0.021 / 0.040 | 0.044 | 0.45% / 0.45% | 0.1 |
+| whole, 100,000 miners, 10 s | 626,003 | 361.5 | 32.56% | 6.85 | 3.23 / 6.21 | 0.466 | 3.65% / 3.65% | 5.1 |
+| without payouts, 100,000 miners, 10 s | 1,301 | 361.5 | 16.37% | 2.51 | 5.7e-3 / 0.012 | 0.195 | 3.65% / 3.65% | 5.5 |
+| token share, 100,000 miners, 10 s | 4,109 | 376.0 | 17.03% | 2.62 | 0.017 / 0.036 | 0.204 | 3.79% / 3.79% | 5.9 |
+| whole, 1,000 miners, 2 s | 36,261 | 6.4 | 18.00% | 0.56 | 1.00 / 1.87 | 0.218 | 0.32% / 0.32% | 0.0 |
+| without payouts, 1,000 miners, 2 s | 1,301 | 6.4 | 11.53% | 0.29 | 0.038 / 0.071 | 0.130 | 0.32% / 0.32% | 0.0 |
+| token share, 1,000 miners, 2 s | 4,109 | 7.3 | 12.42% | 0.33 | 0.114 / 0.215 | 0.141 | 0.37% / 0.37% | 0.0 |
+| whole, 10,000 miners, 2 s | 350,621 | 37.9 | 50.02% | 76.89 | 9.62 / 18.0 | 0.841 | 1.89% / 1.89% | 0.3 |
+| without payouts, 10,000 miners, 2 s | 1,301 | 37.9 | 17.24% | 0.50 | 0.034 / 0.066 | 0.207 | 1.89% / 1.89% | 0.3 |
+| token share, 10,000 miners, 2 s | 4,109 | 44.6 | 18.62% | 0.57 | 0.102 / 0.199 | 0.227 | 2.22% / 2.22% | 0.4 |
+| whole, 100,000 miners, 2 s | 626,003 | 361.5 | 70.63% | 390.87 | 16.0 / 30.7 | 1.578 | 18.01% / 18.01% | 27.8 |
+| without payouts, 100,000 miners, 2 s | 1,301 | 361.5 | 49.29% | 2.73 | 0.028 / 0.057 | 0.874 | 18.01% / 18.01% | 31.7 |
+| token share, 100,000 miners, 2 s | 4,109 | 376.0 | 50.41% | 2.86 | 0.082 / 0.173 | 0.914 | 18.73% / 18.73% | 34.7 |
 
 At 1,000 and 10,000 miners, shares without payouts keep the stale rate at
-2.6% and 3.9% at 10-second shares, against 4.3% and 17% whole; token shares
-come within half a point of that (2.8% and 4.4%). At 100,000 miners
+2.5% and 3.9% at 10-second shares, against 4.2% and 16% whole; token shares
+come within half a point of that (2.7% and 4.2%). At 100,000 miners
 validation itself (362 ms at each hop) keeps every form at 16% or more.
+These rows pay the measured miner counts directly, so one-minute blocks
+change them only through the smaller merkle branch and the minute blocks
+on the links: within 0.7 points of the ten-minute tables.
 
 ### 2. Relaying before full validation
 
 | Scenario | Share bytes | Validation (ms) | Stale | To all (s) | P2Pool up, mean / max (Mbit/s) | Uncles per chain share | Validation busy, mean / max | Validation wait (ms) |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
-| after validation, 1,000 miners, 10 s | 36,389 | 6.4 | 4.26% | 0.56 | 0.202 / 0.378 | 0.045 | 0.06% / 0.06% | 0.0 |
-| after the header check, 1,000 miners, 10 s | 36,389 | 6.4 | 3.99% | 0.53 | 0.204 / 0.380 | 0.042 | 0.06% / 0.06% | 0.0 |
-| after validation, 10,000 miners, 10 s | 350,749 | 37.9 | 16.62% | 2.79 | 1.93 / 3.62 | 0.198 | 0.38% / 0.38% | 0.1 |
-| after the header check, 10,000 miners, 10 s | 350,749 | 37.9 | 15.54% | 2.58 | 1.97 / 3.66 | 0.182 | 0.38% / 0.38% | 0.1 |
-| after validation, 100,000 miners, 10 s | 626,131 | 361.5 | 32.62% | 6.77 | 3.21 / 6.17 | 0.469 | 3.62% / 3.62% | 5.3 |
-| after the header check, 100,000 miners, 10 s | 626,131 | 361.5 | 24.66% | 6.21 | 3.51 / 6.53 | 0.321 | 3.62% / 3.62% | 5.1 |
-| after validation, 1,000 miners, 2 s | 36,389 | 6.4 | 17.84% | 0.57 | 1.02 / 1.91 | 0.215 | 0.32% / 0.32% | 0.0 |
-| after the header check, 1,000 miners, 2 s | 36,389 | 6.4 | 17.17% | 0.54 | 1.03 / 1.92 | 0.206 | 0.32% / 0.32% | 0.0 |
-| after validation, 10,000 miners, 2 s | 350,749 | 37.9 | 50.23% | 91.81 | 9.79 / 18.3 | 0.850 | 1.92% / 1.92% | 0.3 |
-| after the header check, 10,000 miners, 2 s | 350,749 | 37.9 | 48.36% | 96.97 | 9.95 / 18.5 | 0.795 | 1.92% / 1.92% | 0.3 |
-| after validation, 100,000 miners, 2 s | 626,131 | 361.5 | 71.33% | 434.51 | 16.3 / 31.1 | 1.591 | 18.32% / 18.32% | 28.0 |
-| after the header check, 100,000 miners, 2 s | 626,131 | 361.5 | 63.35% | 527.18 | 17.8 / 33.0 | 1.213 | 18.32% / 18.32% | 26.9 |
+| after validation, 1,000 miners, 10 s | 36,261 | 6.4 | 4.15% | 0.56 | 0.202 / 0.379 | 0.043 | 0.06% / 0.06% | 0.0 |
+| after the header check, 1,000 miners, 10 s | 36,261 | 6.4 | 3.91% | 0.53 | 0.205 / 0.381 | 0.041 | 0.06% / 0.06% | 0.0 |
+| after validation, 10,000 miners, 10 s | 350,621 | 37.9 | 16.46% | 2.79 | 1.94 / 3.64 | 0.196 | 0.38% / 0.38% | 0.1 |
+| after the header check, 10,000 miners, 10 s | 350,621 | 37.9 | 15.55% | 2.58 | 1.98 / 3.68 | 0.183 | 0.38% / 0.38% | 0.1 |
+| after validation, 100,000 miners, 10 s | 626,003 | 361.5 | 32.56% | 6.85 | 3.23 / 6.21 | 0.466 | 3.65% / 3.65% | 5.1 |
+| after the header check, 100,000 miners, 10 s | 626,003 | 361.5 | 24.68% | 8.05 | 3.54 / 6.57 | 0.322 | 3.65% / 3.65% | 4.8 |
+| after validation, 1,000 miners, 2 s | 36,261 | 6.4 | 18.00% | 0.56 | 1.00 / 1.87 | 0.218 | 0.32% / 0.32% | 0.0 |
+| after the header check, 1,000 miners, 2 s | 36,261 | 6.4 | 17.39% | 0.53 | 1.01 / 1.88 | 0.209 | 0.32% / 0.32% | 0.0 |
+| after validation, 10,000 miners, 2 s | 350,621 | 37.9 | 50.02% | 76.89 | 9.62 / 18.0 | 0.841 | 1.89% / 1.89% | 0.3 |
+| after the header check, 10,000 miners, 2 s | 350,621 | 37.9 | 47.95% | 81.35 | 9.78 / 18.2 | 0.780 | 1.89% / 1.89% | 0.3 |
+| after validation, 100,000 miners, 2 s | 626,003 | 361.5 | 70.63% | 390.87 | 16.0 / 30.7 | 1.578 | 18.01% / 18.01% | 27.8 |
+| after the header check, 100,000 miners, 2 s | 626,003 | 361.5 | 63.01% | 479.47 | 17.5 / 32.4 | 1.204 | 18.01% / 18.01% | 26.0 |
 
-Upstream is right: forwarding after the header check takes 0.3 to 1.9
+Upstream is right: forwarding after the header check takes 0.2 to 2.1
 points off the stale rate at 1,000 and 10,000 miners. It only matters when
 validation is slow: 33% to 25% at 100,000 miners.
 
@@ -1154,46 +1221,46 @@ validation is slow: 33% to 25% at 100,000 miners.
 
 | Scenario | Share bytes | Validation (ms) | Stale | To all (s) | P2Pool up, mean / max (Mbit/s) | Uncles per chain share | Validation busy, mean / max | Validation wait (ms) |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
-| whole, 10,000 miners, 20 Mbit/s up, 8 peers | 350,749 | 37.9 | 30.96% | 6.32 | 1.95 / 3.64 | 0.435 | 0.38% / 0.38% | 0.1 |
-| whole, 10,000 miners, 20 Mbit/s up, 16 peers | 350,749 | 37.9 | 40.78% | 9.81 | 4.21 / 7.58 | 0.639 | 0.38% / 0.38% | 0.1 |
-| whole, 10,000 miners, 20 Mbit/s up, 32 peers | 350,749 | 37.9 | 56.43% | 17.98 | 8.71 / 12.4 | 1.078 | 0.38% / 0.38% | 0.1 |
-| whole, 10,000 miners, 20 Mbit/s up, 64 peers | 350,749 | 37.9 | 81.70% | 367.94 | 17.7 / 22.2 | 1.950 | 0.38% / 0.38% | 0.1 |
-| without payouts, 10,000 miners, 20 Mbit/s up, 8 peers | 1,429 | 37.9 | 4.04% | 0.51 | 7.5e-3 / 0.015 | 0.042 | 0.38% / 0.38% | 0.1 |
-| without payouts, 10,000 miners, 20 Mbit/s up, 16 peers | 1,429 | 37.9 | 3.43% | 0.40 | 0.017 / 0.031 | 0.036 | 0.38% / 0.38% | 0.1 |
-| without payouts, 10,000 miners, 20 Mbit/s up, 32 peers | 1,429 | 37.9 | 3.17% | 0.35 | 0.035 / 0.051 | 0.033 | 0.38% / 0.38% | 0.1 |
-| without payouts, 10,000 miners, 20 Mbit/s up, 64 peers | 1,429 | 37.9 | 3.12% | 0.36 | 0.075 / 0.095 | 0.032 | 0.38% / 0.38% | 0.1 |
-| whole, 10,000 miners, 100 Mbit/s up, 8 peers | 350,749 | 37.9 | 10.94% | 1.59 | 1.90 / 3.59 | 0.122 | 0.38% / 0.38% | 0.1 |
-| whole, 10,000 miners, 100 Mbit/s up, 16 peers | 350,749 | 37.9 | 13.34% | 2.09 | 4.15 / 7.51 | 0.153 | 0.38% / 0.38% | 0.1 |
-| whole, 10,000 miners, 100 Mbit/s up, 32 peers | 350,749 | 37.9 | 19.25% | 3.05 | 8.64 / 12.3 | 0.235 | 0.38% / 0.38% | 0.1 |
-| whole, 10,000 miners, 100 Mbit/s up, 64 peers | 350,749 | 37.9 | 28.50% | 5.64 | 17.7 / 22.1 | 0.388 | 0.38% / 0.38% | 0.1 |
-| without payouts, 10,000 miners, 100 Mbit/s up, 8 peers | 1,429 | 37.9 | 3.86% | 0.49 | 7.5e-3 / 0.015 | 0.040 | 0.38% / 0.38% | 0.1 |
-| without payouts, 10,000 miners, 100 Mbit/s up, 16 peers | 1,429 | 37.9 | 3.23% | 0.37 | 0.016 / 0.031 | 0.033 | 0.38% / 0.38% | 0.1 |
-| without payouts, 10,000 miners, 100 Mbit/s up, 32 peers | 1,429 | 37.9 | 2.88% | 0.30 | 0.034 / 0.050 | 0.029 | 0.38% / 0.38% | 0.1 |
-| without payouts, 10,000 miners, 100 Mbit/s up, 64 peers | 1,429 | 37.9 | 2.59% | 0.27 | 0.072 / 0.093 | 0.027 | 0.38% / 0.38% | 0.1 |
+| whole, 10,000 miners, 20 Mbit/s up, 8 peers | 350,621 | 37.9 | 31.27% | 6.31 | 1.96 / 3.66 | 0.443 | 0.38% / 0.38% | 0.1 |
+| whole, 10,000 miners, 20 Mbit/s up, 16 peers | 350,621 | 37.9 | 41.25% | 9.81 | 4.23 / 7.63 | 0.657 | 0.38% / 0.38% | 0.1 |
+| whole, 10,000 miners, 20 Mbit/s up, 32 peers | 350,621 | 37.9 | 56.79% | 17.98 | 8.76 / 12.4 | 1.098 | 0.38% / 0.38% | 0.1 |
+| whole, 10,000 miners, 20 Mbit/s up, 64 peers | 350,621 | 37.9 | 81.52% | 347.47 | 17.8 / 22.4 | 1.866 | 0.38% / 0.38% | 0.1 |
+| without payouts, 10,000 miners, 20 Mbit/s up, 8 peers | 1,301 | 37.9 | 3.93% | 0.51 | 6.9e-3 / 0.013 | 0.041 | 0.38% / 0.38% | 0.1 |
+| without payouts, 10,000 miners, 20 Mbit/s up, 16 peers | 1,301 | 37.9 | 3.31% | 0.39 | 0.015 / 0.028 | 0.034 | 0.38% / 0.38% | 0.1 |
+| without payouts, 10,000 miners, 20 Mbit/s up, 32 peers | 1,301 | 37.9 | 3.10% | 0.34 | 0.032 / 0.047 | 0.032 | 0.38% / 0.38% | 0.1 |
+| without payouts, 10,000 miners, 20 Mbit/s up, 64 peers | 1,301 | 37.9 | 2.87% | 0.35 | 0.069 / 0.087 | 0.030 | 0.38% / 0.38% | 0.1 |
+| whole, 10,000 miners, 100 Mbit/s up, 8 peers | 350,621 | 37.9 | 10.75% | 1.59 | 1.91 / 3.61 | 0.121 | 0.38% / 0.38% | 0.1 |
+| whole, 10,000 miners, 100 Mbit/s up, 16 peers | 350,621 | 37.9 | 13.32% | 2.08 | 4.17 / 7.55 | 0.153 | 0.38% / 0.38% | 0.1 |
+| whole, 10,000 miners, 100 Mbit/s up, 32 peers | 350,621 | 37.9 | 19.14% | 3.04 | 8.69 / 12.4 | 0.234 | 0.38% / 0.38% | 0.1 |
+| whole, 10,000 miners, 100 Mbit/s up, 64 peers | 350,621 | 37.9 | 28.23% | 5.62 | 17.8 / 22.3 | 0.382 | 0.38% / 0.38% | 0.1 |
+| without payouts, 10,000 miners, 100 Mbit/s up, 8 peers | 1,301 | 37.9 | 3.82% | 0.49 | 6.9e-3 / 0.013 | 0.040 | 0.38% / 0.38% | 0.1 |
+| without payouts, 10,000 miners, 100 Mbit/s up, 16 peers | 1,301 | 37.9 | 3.09% | 0.37 | 0.015 / 0.028 | 0.032 | 0.38% / 0.38% | 0.1 |
+| without payouts, 10,000 miners, 100 Mbit/s up, 32 peers | 1,301 | 37.9 | 2.82% | 0.30 | 0.032 / 0.046 | 0.029 | 0.38% / 0.38% | 0.1 |
+| without payouts, 10,000 miners, 100 Mbit/s up, 64 peers | 1,301 | 37.9 | 2.53% | 0.26 | 0.067 / 0.085 | 0.026 | 0.38% / 0.38% | 0.1 |
 
 Upstream is right for whole shares: at 10,000 miners (a 350 kB share) more
 peers raise the stale rate, from 31% at 8 peers to 82% at 64 on a 20 Mbit/s
-upload, and from 11% to 29% on 100 Mbit/s. Only with shares sent without
-payouts (1.4 kB) do more peers help, from 4.0% to 3.1% on 20 Mbit/s and 3.9%
-to 2.6% on 100.
+upload, and from 11% to 28% on 100 Mbit/s. Only with shares sent without
+payouts (1.3 kB) do more peers help, from 3.9% to 2.9% on 20 Mbit/s and 3.8%
+to 2.5% on 100.
 
 ### 4. The uncle cap
 
 | Scenario | Share bytes | Validation (ms) | Stale | To all (s) | P2Pool up, mean / max (Mbit/s) | Uncles per chain share | Validation busy, mean / max | Validation wait (ms) |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
-| uncle cap 3, 10,000 miners, 10 s | 350,749 | 37.9 | 16.62% | 2.79 | 1.93 / 3.62 | 0.198 | 0.38% / 0.38% | 0.1 |
-| uncle cap 6, 10,000 miners, 10 s | 350,749 | 37.9 | 16.62% | 2.79 | 1.93 / 3.62 | 0.198 | 0.38% / 0.38% | 0.1 |
-| uncle cap 12, 10,000 miners, 10 s | 350,749 | 37.9 | 16.62% | 2.79 | 1.93 / 3.62 | 0.198 | 0.38% / 0.38% | 0.1 |
-| uncle cap 3, 10,000 miners, 2 s | 350,749 | 37.9 | 50.23% | 91.81 | 9.79 / 18.3 | 0.850 | 1.92% / 1.92% | 0.3 |
-| uncle cap 6, 10,000 miners, 2 s | 350,749 | 37.9 | 50.27% | 91.82 | 9.79 / 18.3 | 0.853 | 1.92% / 1.92% | 0.3 |
-| uncle cap 12, 10,000 miners, 2 s | 350,749 | 37.9 | 50.27% | 91.82 | 9.79 / 18.3 | 0.853 | 1.92% / 1.92% | 0.3 |
-| uncle cap 3, 10,000 miners, 1 s | 350,749 | 37.9 | 67.34% | 313.73 | 19.3 / 36.1 | 1.350 | 3.79% / 3.79% | 0.5 |
-| uncle cap 6, 10,000 miners, 1 s | 350,749 | 37.9 | 67.39% | 313.73 | 19.3 / 36.1 | 1.400 | 3.79% / 3.79% | 0.5 |
-| uncle cap 12, 10,000 miners, 1 s | 350,749 | 37.9 | 67.34% | 313.73 | 19.3 / 36.1 | 1.400 | 3.79% / 3.79% | 0.5 |
+| uncle cap 3, 10,000 miners, 10 s | 350,621 | 37.9 | 16.46% | 2.79 | 1.94 / 3.64 | 0.196 | 0.38% / 0.38% | 0.1 |
+| uncle cap 6, 10,000 miners, 10 s | 350,621 | 37.9 | 16.46% | 2.79 | 1.94 / 3.64 | 0.196 | 0.38% / 0.38% | 0.1 |
+| uncle cap 12, 10,000 miners, 10 s | 350,621 | 37.9 | 16.46% | 2.79 | 1.94 / 3.64 | 0.196 | 0.38% / 0.38% | 0.1 |
+| uncle cap 3, 10,000 miners, 2 s | 350,621 | 37.9 | 50.02% | 76.89 | 9.62 / 18.0 | 0.841 | 1.89% / 1.89% | 0.3 |
+| uncle cap 6, 10,000 miners, 2 s | 350,621 | 37.9 | 50.00% | 76.89 | 9.62 / 18.0 | 0.841 | 1.89% / 1.89% | 0.3 |
+| uncle cap 12, 10,000 miners, 2 s | 350,621 | 37.9 | 50.00% | 76.89 | 9.62 / 18.0 | 0.841 | 1.89% / 1.89% | 0.3 |
+| uncle cap 3, 10,000 miners, 1 s | 350,621 | 37.9 | 67.63% | 310.99 | 19.4 / 36.2 | 1.381 | 3.80% / 3.80% | 0.5 |
+| uncle cap 6, 10,000 miners, 1 s | 350,621 | 37.9 | 67.61% | 311.00 | 19.4 / 36.2 | 1.409 | 3.80% / 3.80% | 0.5 |
+| uncle cap 12, 10,000 miners, 1 s | 350,621 | 37.9 | 67.56% | 311.02 | 19.4 / 36.2 | 1.402 | 3.80% / 3.80% | 0.5 |
 
 Caps of 6 and 12 change neither the stale rate nor propagation: at
 10-second shares a chain share names 0.2 uncles, so a cap of 3 rarely binds,
-and at 1-second shares 1.35 to 1.40. In this model the cap only decides
+and at 1-second shares 1.38 to 1.41. In this model the cap only decides
 which stale shares are paid. It adds no latency, because every uncle was
 validated when it arrived and naming one costs 32 bytes; deeper header sync
 and the payout of deep forks are not modelled. Not worth changing on this
@@ -1203,95 +1270,97 @@ evidence.
 
 | Scenario | Share bytes | Validation (ms) | Stale | To all (s) | P2Pool up, mean / max (Mbit/s) | Uncles per chain share | Validation busy, mean / max | Validation wait (ms) |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
-| 1,000 miners, no weak shares, 10 s | 36,389 | 6.4 | 4.20% | 0.56 | 0.211 / 0.395 | 0.045 | 0.07% / 0.07% | 0.0 |
-| 1,000 miners, no weak shares, 5 s | 36,389 | 6.4 | 7.82% | 0.56 | 0.424 / 0.793 | 0.084 | 0.13% / 0.13% | 0.0 |
-| 1,000 miners, no weak shares, 2 s | 36,389 | 6.4 | 18.36% | 0.57 | 1.05 / 1.96 | 0.222 | 0.33% / 0.33% | 0.0 |
-| 1,000 miners, no weak shares, 1 s | 36,389 | 6.4 | 31.18% | 0.57 | 2.10 / 3.92 | 0.442 | 0.67% / 0.67% | 0.0 |
-| 1,000 miners, 32 weak shares a share, each, 10 s | 36,389 | 6.4 | 4.20% | 0.56 | 0.392 / 0.727 | 0.045 | 0.15% / 0.15% | 0.0 |
-| 1,000 miners, 32 weak shares a share, per node, 10 s | 36,389 | 6.4 | 4.20% | 0.56 | 0.392 / 0.727 | 0.045 | 0.15% / 0.15% | 0.0 |
-| 1,000 miners, 32 weak shares a share, one, 10 s | 36,389 | 6.4 | 4.20% | 0.56 | 0.392 / 0.727 | 0.045 | 0.09% / 0.09% | 0.0 |
-| 1,000 miners, 32 weak shares a share, each, 5 s | 36,389 | 6.4 | 7.82% | 0.56 | 0.786 / 1.46 | 0.084 | 0.30% / 0.30% | 0.0 |
-| 1,000 miners, 32 weak shares a share, per node, 5 s | 36,389 | 6.4 | 7.82% | 0.56 | 0.786 / 1.46 | 0.084 | 0.30% / 0.30% | 0.0 |
-| 1,000 miners, 32 weak shares a share, one, 5 s | 36,389 | 6.4 | 7.82% | 0.56 | 0.786 / 1.46 | 0.084 | 0.19% / 0.19% | 0.0 |
-| 1,000 miners, 32 weak shares a share, each, 2 s | 36,389 | 6.4 | 18.36% | 0.57 | 1.95 / 3.62 | 0.222 | 0.75% / 0.75% | 0.0 |
-| 1,000 miners, 32 weak shares a share, per node, 2 s | 36,389 | 6.4 | 18.36% | 0.57 | 1.95 / 3.62 | 0.222 | 0.74% / 0.74% | 0.0 |
-| 1,000 miners, 32 weak shares a share, one, 2 s | 36,389 | 6.4 | 18.36% | 0.57 | 1.95 / 3.62 | 0.222 | 0.46% / 0.46% | 0.0 |
-| 1,000 miners, 32 weak shares a share, each, 1 s | 36,389 | 6.4 | 31.18% | 0.57 | 3.90 / 7.24 | 0.443 | 1.50% / 1.50% | 0.0 |
-| 1,000 miners, 32 weak shares a share, per node, 1 s | 36,389 | 6.4 | 31.18% | 0.57 | 3.90 / 7.24 | 0.443 | 1.48% / 1.48% | 0.0 |
-| 1,000 miners, 32 weak shares a share, one, 1 s | 36,389 | 6.4 | 31.18% | 0.57 | 3.91 / 7.24 | 0.443 | 0.93% / 0.93% | 0.0 |
-| 10,000 miners, no weak shares, 10 s | 350,749 | 37.9 | 16.88% | 2.80 | 2.02 / 3.78 | 0.203 | 0.40% / 0.40% | 0.1 |
-| 10,000 miners, no weak shares, 5 s | 350,749 | 37.9 | 28.09% | 2.88 | 4.06 / 7.61 | 0.381 | 0.80% / 0.80% | 0.1 |
-| 10,000 miners, no weak shares, 2 s | 350,749 | 37.9 | 50.41% | 12.21 | 10.1 / 18.8 | 0.883 | 1.97% / 1.97% | 0.3 |
-| 10,000 miners, no weak shares, 1 s | 350,749 | 37.9 | 67.83% | 45.26 | 20.1 / 37.6 | 1.334 | 3.94% / 3.94% | 0.5 |
-| 10,000 miners, 32 weak shares a share, each, 10 s | 350,749 | 37.9 | 16.88% | 2.81 | 2.20 / 4.11 | 0.203 | 1.60% / 1.60% | 0.1 |
-| 10,000 miners, 32 weak shares a share, per node, 10 s | 350,749 | 37.9 | 16.88% | 2.81 | 2.20 / 4.11 | 0.203 | 1.58% / 1.58% | 0.1 |
-| 10,000 miners, 32 weak shares a share, one, 10 s | 350,749 | 37.9 | 16.88% | 2.81 | 2.20 / 4.11 | 0.203 | 0.76% / 0.76% | 0.1 |
-| 10,000 miners, 32 weak shares a share, each, 5 s | 350,749 | 37.9 | 28.09% | 2.89 | 4.42 / 8.26 | 0.383 | 3.20% / 3.20% | 0.3 |
-| 10,000 miners, 32 weak shares a share, per node, 5 s | 350,749 | 37.9 | 28.09% | 2.89 | 4.42 / 8.26 | 0.383 | 3.16% / 3.16% | 0.3 |
-| 10,000 miners, 32 weak shares a share, one, 5 s | 350,749 | 37.9 | 28.09% | 2.89 | 4.42 / 8.27 | 0.383 | 1.52% / 1.52% | 0.2 |
-| 10,000 miners, 32 weak shares a share, each, 2 s | 350,749 | 37.9 | 50.41% | 15.60 | 10.9 / 20.5 | 0.856 | 7.98% / 7.98% | 0.9 |
-| 10,000 miners, 32 weak shares a share, per node, 2 s | 350,749 | 37.9 | 50.50% | 15.61 | 10.9 / 20.4 | 0.861 | 7.85% / 7.85% | 0.9 |
-| 10,000 miners, 32 weak shares a share, one, 2 s | 350,749 | 37.9 | 50.41% | 15.62 | 11.0 / 20.5 | 0.863 | 3.81% / 3.81% | 0.7 |
-| 10,000 miners, 32 weak shares a share, each, 1 s | 350,749 | 37.9 | 68.73% | 53.75 | 21.9 / 40.9 | 1.327 | 15.96% / 15.96% | 3.0 |
-| 10,000 miners, 32 weak shares a share, per node, 1 s | 350,749 | 37.9 | 68.64% | 53.65 | 21.9 / 40.9 | 1.329 | 15.60% / 15.61% | 3.0 |
-| 10,000 miners, 32 weak shares a share, one, 1 s | 350,749 | 37.9 | 68.64% | 53.74 | 21.9 / 40.9 | 1.334 | 7.88% / 7.88% | 2.0 |
-| 100,000 miners, no weak shares, 10 s | 626,131 | 361.5 | 33.21% | 6.81 | 3.35 / 6.45 | 0.486 | 3.79% / 3.79% | 5.2 |
-| 100,000 miners, no weak shares, 5 s | 626,131 | 361.5 | 48.89% | 10.25 | 6.74 / 13.0 | 0.832 | 7.61% / 7.61% | 10.6 |
-| 100,000 miners, no weak shares, 2 s | 626,131 | 361.5 | 71.83% | 58.18 | 16.7 / 32.0 | 1.631 | 18.81% / 18.81% | 27.0 |
-| 100,000 miners, no weak shares, 1 s | 626,131 | 361.5 | 84.10% | 230.18 | 33.9 / 64.4 | 2.123 | 37.59% / 37.59% | 53.6 |
-| 100,000 miners, 32 weak shares a share, each, 10 s | 626,131 | 361.5 | 33.57% | 6.83 | 3.51 / 6.74 | 0.493 | 18.16% / 18.16% | 11.3 |
-| 100,000 miners, 32 weak shares a share, per node, 10 s | 626,131 | 361.5 | 33.57% | 6.83 | 3.51 / 6.74 | 0.493 | 17.78% / 17.78% | 11.2 |
-| 100,000 miners, 32 weak shares a share, one, 10 s | 626,131 | 361.5 | 33.21% | 6.81 | 3.53 / 6.78 | 0.485 | 4.62% / 4.62% | 7.0 |
-| 100,000 miners, 32 weak shares a share, each, 5 s | 626,131 | 361.5 | 49.24% | 11.28 | 7.04 / 13.5 | 0.844 | 36.35% / 36.35% | 29.7 |
-| 100,000 miners, 32 weak shares a share, per node, 5 s | 626,131 | 361.5 | 49.07% | 11.26 | 7.04 / 13.5 | 0.833 | 35.58% / 35.60% | 29.2 |
-| 100,000 miners, 32 weak shares a share, one, 5 s | 626,131 | 361.5 | 48.89% | 11.37 | 7.09 / 13.6 | 0.826 | 9.26% / 9.26% | 15.4 |
-| 100,000 miners, 32 weak shares a share, each, 2 s | 626,131 | 361.5 | 74.44% | 62.23 | 17.2 / 33.2 | 1.778 | 90.66% / 90.66% | 243.8 |
-| 100,000 miners, 32 weak shares a share, per node, 2 s | 626,131 | 361.5 | 73.54% | 62.49 | 17.2 / 33.2 | 1.705 | 87.79% / 87.93% | 218.7 |
-| 100,000 miners, 32 weak shares a share, one, 2 s | 626,131 | 361.5 | 71.92% | 64.69 | 17.6 / 33.6 | 1.616 | 24.80% / 24.81% | 47.8 |
-| 100,000 miners, 32 weak shares a share, each, 1 s | 626,131 | 361.5 | 98.74% | 590.34 | 23.4 / 44.4 | 2.214 | 181.28% / 181.28% | 104067.8 |
-| 100,000 miners, 32 weak shares a share, per node, 1 s | 626,131 | 361.5 | 98.65% | 481.67 | 23.8 / 44.9 | 2.133 | 164.33% / 164.90% | 80995.3 |
-| 100,000 miners, 32 weak shares a share, one, 1 s | 626,131 | 361.5 | 83.92% | 261.59 | 35.6 / 67.4 | 1.983 | 53.46% / 53.46% | 122.5 |
-| 10,000 miners, nodes 5x slower, 32 weak shares a share, each, 10 s | 350,749 | 189.5 | 22.05% | 3.81 | 2.06 / 3.95 | 0.280 | 7.99% / 7.99% | 2.4 |
-| 10,000 miners, nodes 5x slower, 32 weak shares a share, per node, 10 s | 350,749 | 189.5 | 22.05% | 3.81 | 2.06 / 3.95 | 0.280 | 7.88% / 7.88% | 2.4 |
-| 10,000 miners, nodes 5x slower, 32 weak shares a share, one, 10 s | 350,749 | 189.5 | 22.05% | 3.81 | 2.07 / 3.96 | 0.280 | 3.78% / 3.78% | 1.8 |
-| 10,000 miners, nodes 5x slower, 32 weak shares a share, each, 5 s | 350,749 | 189.5 | 35.29% | 3.89 | 4.14 / 7.95 | 0.520 | 16.00% / 16.00% | 5.5 |
-| 10,000 miners, nodes 5x slower, 32 weak shares a share, per node, 5 s | 350,749 | 189.5 | 35.29% | 3.89 | 4.14 / 7.95 | 0.520 | 15.77% / 15.77% | 5.5 |
-| 10,000 miners, nodes 5x slower, 32 weak shares a share, one, 5 s | 350,749 | 189.5 | 35.29% | 3.88 | 4.16 / 7.97 | 0.520 | 7.57% / 7.57% | 4.1 |
-| 10,000 miners, nodes 5x slower, 32 weak shares a share, each, 2 s | 350,749 | 189.5 | 58.87% | 13.85 | 10.2 / 19.6 | 1.187 | 39.90% / 39.90% | 20.4 |
-| 10,000 miners, nodes 5x slower, 32 weak shares a share, per node, 2 s | 350,749 | 189.5 | 58.96% | 13.88 | 10.2 / 19.6 | 1.198 | 39.21% / 39.22% | 20.3 |
-| 10,000 miners, nodes 5x slower, 32 weak shares a share, one, 2 s | 350,749 | 189.5 | 58.51% | 14.05 | 10.3 / 19.7 | 1.159 | 18.98% / 18.98% | 12.6 |
-| 10,000 miners, nodes 5x slower, 32 weak shares a share, each, 1 s | 350,749 | 189.5 | 75.92% | 46.71 | 20.4 / 39.1 | 1.827 | 79.78% / 79.78% | 87.4 |
-| 10,000 miners, nodes 5x slower, 32 weak shares a share, per node, 1 s | 350,749 | 189.5 | 76.01% | 46.83 | 20.4 / 39.0 | 1.811 | 77.91% / 77.93% | 83.3 |
-| 10,000 miners, nodes 5x slower, 32 weak shares a share, one, 1 s | 350,749 | 189.5 | 74.75% | 47.84 | 20.7 / 39.4 | 1.764 | 39.03% / 39.04% | 33.7 |
-| 100,000 miners, token shares, 32 weak shares a share, each, 10 s | 4,237 | 376.0 | 16.52% | 2.67 | 0.164 / 0.324 | 0.198 | 22.94% / 22.94% | 13.1 |
-| 100,000 miners, token shares, 32 weak shares a share, per node, 10 s | 4,237 | 376.0 | 16.52% | 2.66 | 0.165 / 0.325 | 0.198 | 22.43% / 22.43% | 13.0 |
-| 100,000 miners, token shares, 32 weak shares a share, one, 10 s | 4,237 | 376.0 | 16.16% | 2.62 | 0.195 / 0.364 | 0.193 | 4.52% / 4.52% | 7.4 |
-| 100,000 miners, token shares, 32 weak shares a share, each, 5 s | 4,237 | 376.0 | 29.78% | 2.80 | 0.318 / 0.631 | 0.415 | 45.91% / 45.91% | 33.1 |
-| 100,000 miners, token shares, 32 weak shares a share, per node, 5 s | 4,237 | 376.0 | 29.78% | 2.80 | 0.319 / 0.633 | 0.415 | 44.91% / 44.91% | 32.6 |
-| 100,000 miners, token shares, 32 weak shares a share, one, 5 s | 4,237 | 376.0 | 28.62% | 2.69 | 0.384 / 0.718 | 0.394 | 9.02% / 9.02% | 15.3 |
-| 100,000 miners, token shares, 32 weak shares a share, each, 2 s | 4,237 | 376.0 | 96.22% | 203.04 | 0.594 / 1.04 | 2.465 | 114.56% / 114.56% | 33945.4 |
-| 100,000 miners, token shares, 32 weak shares a share, per node, 2 s | 4,237 | 376.0 | 94.60% | 112.43 | 0.596 / 1.03 | 2.066 | 107.48% / 107.73% | 18259.5 |
-| 100,000 miners, token shares, 32 weak shares a share, one, 2 s | 4,237 | 376.0 | 50.86% | 2.88 | 0.911 / 1.71 | 0.947 | 21.98% / 21.98% | 40.3 |
-| 100,000 miners, token shares, 32 weak shares a share, each, 1 s | 4,237 | 376.0 | 99.01% | 957.45 | 1.18 / 2.06 | 2.333 | 229.08% / 229.08% | 187151.3 |
-| 100,000 miners, token shares, 32 weak shares a share, per node, 1 s | 4,237 | 376.0 | 98.83% | 801.10 | 1.18 / 2.10 | 2.077 | 205.80% / 206.70% | 153001.7 |
-| 100,000 miners, token shares, 32 weak shares a share, one, 1 s | 4,237 | 376.0 | 68.91% | 3.31 | 1.68 / 3.20 | 1.480 | 43.50% / 43.50% | 92.8 |
-| 100,000 miners, all at level 0, 32 weak shares a share, each, 10 s | 1,028,473 | 437.6 | 42.50% | 13.88 | 5.74 / 11.0 | 0.686 | 47.13% / 47.13% | 57.4 |
-| 100,000 miners, all at level 0, 32 weak shares a share, per node, 10 s | 1,028,473 | 437.6 | 42.32% | 13.81 | 5.74 / 10.9 | 0.686 | 45.89% / 45.95% | 55.7 |
-| 100,000 miners, all at level 0, 32 weak shares a share, one, 10 s | 1,028,473 | 437.6 | 41.79% | 13.74 | 5.80 / 11.0 | 0.666 | 6.49% / 6.49% | 13.5 |
-| 100,000 miners, all at level 0, 32 weak shares a share, each, 5 s | 1,028,473 | 437.6 | 63.91% | 50.88 | 11.3 / 21.6 | 1.331 | 94.31% / 94.31% | 436.7 |
-| 100,000 miners, all at level 0, 32 weak shares a share, per node, 5 s | 1,028,473 | 437.6 | 63.38% | 51.27 | 11.4 / 21.7 | 1.348 | 91.53% / 91.66% | 352.0 |
-| 100,000 miners, all at level 0, 32 weak shares a share, one, 5 s | 1,028,473 | 437.6 | 59.56% | 52.95 | 11.7 / 22.1 | 1.176 | 14.04% / 14.04% | 31.4 |
-| 100,000 miners, all at level 0, 32 weak shares a share, each, 2 s | 1,028,473 | 437.6 | 99.01% | 2013.15 | 18.0 / 30.8 | 2.182 | 235.50% / 235.50% | 393030.4 |
-| 100,000 miners, all at level 0, 32 weak shares a share, per node, 2 s | 1,028,473 | 437.6 | 98.92% | 1656.77 | 18.1 / 32.9 | 2.167 | 209.18% / 210.62% | 313671.5 |
-| 100,000 miners, all at level 0, 32 weak shares a share, one, 2 s | 1,028,473 | 437.6 | 79.48% | 244.34 | 29.1 / 54.9 | 1.767 | 43.12% / 43.13% | 115.0 |
-| 100,000 miners, all at level 0, 32 weak shares a share, each, 1 s | 1,028,473 | 437.6 | 99.37% | 2908.26 | 35.7 / 61.9 | 2.143 | 470.97% / 470.97% | 636793.3 |
-| 100,000 miners, all at level 0, 32 weak shares a share, per node, 1 s | 1,028,473 | 437.6 | 99.37% | 2449.10 | 35.9 / 65.3 | 1.714 | 406.39% / 409.17% | 523496.1 |
-| 100,000 miners, all at level 0, 32 weak shares a share, one, 1 s | 1,028,473 | 437.6 | 89.67% | 754.48 | 58.8 / 110 | 2.214 | 91.37% / 91.41% | 369.2 |
+| 1,000 miners, no weak shares, 10 s | 36,261 | 6.4 | 4.91% | 0.56 | 0.211 / 0.395 | 0.051 | 0.07% / 0.07% | 0.0 |
+| 1,000 miners, no weak shares, 5 s | 36,261 | 6.4 | 7.54% | 0.56 | 0.419 / 0.782 | 0.082 | 0.13% / 0.13% | 0.0 |
+| 1,000 miners, no weak shares, 2 s | 36,261 | 6.4 | 16.82% | 0.56 | 1.04 / 1.94 | 0.202 | 0.33% / 0.33% | 0.0 |
+| 1,000 miners, no weak shares, 1 s | 36,261 | 6.4 | 31.52% | 0.57 | 2.10 / 3.94 | 0.448 | 0.67% / 0.67% | 0.0 |
+| 1,000 miners, 32 weak shares a share, each, 10 s | 36,261 | 6.4 | 4.91% | 0.56 | 0.392 / 0.727 | 0.051 | 0.15% / 0.15% | 0.0 |
+| 1,000 miners, 32 weak shares a share, per node, 10 s | 36,261 | 6.4 | 4.91% | 0.56 | 0.392 / 0.727 | 0.051 | 0.15% / 0.15% | 0.0 |
+| 1,000 miners, 32 weak shares a share, one, 10 s | 36,261 | 6.4 | 4.91% | 0.56 | 0.392 / 0.727 | 0.051 | 0.09% / 0.09% | 0.0 |
+| 1,000 miners, 32 weak shares a share, each, 5 s | 36,261 | 6.4 | 7.54% | 0.56 | 0.780 / 1.45 | 0.082 | 0.30% / 0.30% | 0.0 |
+| 1,000 miners, 32 weak shares a share, per node, 5 s | 36,261 | 6.4 | 7.54% | 0.56 | 0.780 / 1.45 | 0.082 | 0.30% / 0.30% | 0.0 |
+| 1,000 miners, 32 weak shares a share, one, 5 s | 36,261 | 6.4 | 7.54% | 0.56 | 0.781 / 1.45 | 0.082 | 0.19% / 0.19% | 0.0 |
+| 1,000 miners, 32 weak shares a share, each, 2 s | 36,261 | 6.4 | 16.82% | 0.56 | 1.94 / 3.60 | 0.202 | 0.75% / 0.75% | 0.0 |
+| 1,000 miners, 32 weak shares a share, per node, 2 s | 36,261 | 6.4 | 16.82% | 0.56 | 1.94 / 3.60 | 0.202 | 0.74% / 0.74% | 0.0 |
+| 1,000 miners, 32 weak shares a share, one, 2 s | 36,261 | 6.4 | 16.82% | 0.56 | 1.94 / 3.60 | 0.202 | 0.46% / 0.46% | 0.0 |
+| 1,000 miners, 32 weak shares a share, each, 1 s | 36,261 | 6.4 | 31.52% | 0.59 | 3.91 / 7.26 | 0.448 | 1.50% / 1.50% | 0.0 |
+| 1,000 miners, 32 weak shares a share, per node, 1 s | 36,261 | 6.4 | 31.52% | 0.59 | 3.91 / 7.26 | 0.448 | 1.49% / 1.49% | 0.0 |
+| 1,000 miners, 32 weak shares a share, one, 1 s | 36,261 | 6.4 | 31.52% | 0.59 | 3.91 / 7.26 | 0.448 | 0.93% / 0.93% | 0.0 |
+| 10,000 miners, no weak shares, 10 s | 350,621 | 37.9 | 17.48% | 2.78 | 2.03 / 3.79 | 0.206 | 0.40% / 0.40% | 0.1 |
+| 10,000 miners, no weak shares, 5 s | 350,621 | 37.9 | 28.46% | 2.87 | 4.02 / 7.51 | 0.389 | 0.79% / 0.79% | 0.1 |
+| 10,000 miners, no weak shares, 2 s | 350,621 | 37.9 | 49.36% | 16.09 | 9.96 / 18.6 | 0.819 | 1.95% / 1.95% | 0.2 |
+| 10,000 miners, no weak shares, 1 s | 350,621 | 37.9 | 68.21% | 46.73 | 20.3 / 37.9 | 1.370 | 3.97% / 3.97% | 0.5 |
+| 10,000 miners, 32 weak shares a share, each, 10 s | 350,621 | 37.9 | 17.48% | 2.78 | 2.20 / 4.12 | 0.206 | 1.60% / 1.60% | 0.1 |
+| 10,000 miners, 32 weak shares a share, per node, 10 s | 350,621 | 37.9 | 17.48% | 2.78 | 2.21 / 4.12 | 0.206 | 1.58% / 1.58% | 0.1 |
+| 10,000 miners, 32 weak shares a share, one, 10 s | 350,621 | 37.9 | 17.48% | 2.78 | 2.21 / 4.12 | 0.206 | 0.76% / 0.76% | 0.1 |
+| 10,000 miners, 32 weak shares a share, each, 5 s | 350,621 | 37.9 | 28.46% | 2.90 | 4.38 / 8.17 | 0.389 | 3.19% / 3.19% | 0.3 |
+| 10,000 miners, 32 weak shares a share, per node, 5 s | 350,621 | 37.9 | 28.46% | 2.90 | 4.38 / 8.17 | 0.389 | 3.15% / 3.15% | 0.3 |
+| 10,000 miners, 32 weak shares a share, one, 5 s | 350,621 | 37.9 | 28.46% | 2.90 | 4.38 / 8.18 | 0.389 | 1.51% / 1.51% | 0.2 |
+| 10,000 miners, 32 weak shares a share, each, 2 s | 350,621 | 37.9 | 49.64% | 20.21 | 10.8 / 20.3 | 0.819 | 7.96% / 7.96% | 0.9 |
+| 10,000 miners, 32 weak shares a share, per node, 2 s | 350,621 | 37.9 | 49.55% | 20.20 | 10.8 / 20.3 | 0.820 | 7.83% / 7.84% | 0.9 |
+| 10,000 miners, 32 weak shares a share, one, 2 s | 350,621 | 37.9 | 49.55% | 20.26 | 10.9 / 20.3 | 0.818 | 3.79% / 3.79% | 0.7 |
+| 10,000 miners, 32 weak shares a share, each, 1 s | 350,621 | 37.9 | 68.48% | 55.26 | 22.1 / 41.2 | 1.292 | 15.99% / 15.99% | 3.1 |
+| 10,000 miners, 32 weak shares a share, per node, 1 s | 350,621 | 37.9 | 68.30% | 55.28 | 22.1 / 41.2 | 1.291 | 15.65% / 15.65% | 3.0 |
+| 10,000 miners, 32 weak shares a share, one, 1 s | 350,621 | 37.9 | 68.75% | 55.34 | 22.1 / 41.2 | 1.303 | 7.91% / 7.92% | 2.0 |
+| 100,000 miners, no weak shares, 10 s | 626,003 | 361.5 | 34.08% | 6.78 | 3.36 / 6.47 | 0.503 | 3.80% / 3.80% | 5.2 |
+| 100,000 miners, no weak shares, 5 s | 626,003 | 361.5 | 49.28% | 10.37 | 6.67 / 12.8 | 0.870 | 7.54% / 7.54% | 11.0 |
+| 100,000 miners, no weak shares, 2 s | 626,003 | 361.5 | 71.27% | 63.61 | 16.6 / 31.8 | 1.614 | 18.64% / 18.64% | 26.6 |
+| 100,000 miners, no weak shares, 1 s | 626,003 | 361.5 | 83.84% | 224.43 | 34.2 / 64.9 | 2.077 | 37.89% / 37.89% | 55.0 |
+| 100,000 miners, 32 weak shares a share, each, 10 s | 626,003 | 361.5 | 34.17% | 6.80 | 3.52 / 6.76 | 0.505 | 18.17% / 18.17% | 11.2 |
+| 100,000 miners, 32 weak shares a share, per node, 10 s | 626,003 | 361.5 | 34.08% | 6.80 | 3.52 / 6.76 | 0.503 | 17.79% / 17.79% | 11.2 |
+| 100,000 miners, 32 weak shares a share, one, 10 s | 626,003 | 361.5 | 34.08% | 6.79 | 3.54 / 6.80 | 0.503 | 4.62% / 4.62% | 7.0 |
+| 100,000 miners, 32 weak shares a share, each, 5 s | 626,003 | 361.5 | 49.55% | 11.24 | 6.97 / 13.4 | 0.871 | 36.28% / 36.28% | 30.0 |
+| 100,000 miners, 32 weak shares a share, per node, 5 s | 626,003 | 361.5 | 49.37% | 11.23 | 6.98 / 13.4 | 0.865 | 35.46% / 35.47% | 29.7 |
+| 100,000 miners, 32 weak shares a share, one, 5 s | 626,003 | 361.5 | 49.19% | 11.35 | 7.03 / 13.5 | 0.864 | 9.18% / 9.18% | 15.5 |
+| 100,000 miners, 32 weak shares a share, each, 2 s | 626,003 | 361.5 | 73.64% | 68.24 | 17.0 / 32.9 | 1.628 | 90.49% / 90.49% | 242.2 |
+| 100,000 miners, 32 weak shares a share, per node, 2 s | 626,003 | 361.5 | 73.55% | 68.47 | 17.1 / 32.9 | 1.690 | 87.68% / 87.72% | 214.7 |
+| 100,000 miners, 32 weak shares a share, one, 2 s | 626,003 | 361.5 | 71.27% | 70.62 | 17.4 / 33.3 | 1.580 | 24.39% / 24.40% | 47.5 |
+| 100,000 miners, 32 weak shares a share, each, 1 s | 626,003 | 361.5 | 98.75% | 597.94 | 23.5 / 44.6 | 2.214 | 181.58% / 181.58% | 103784.2 |
+| 100,000 miners, 32 weak shares a share, per node, 1 s | 626,003 | 361.5 | 98.57% | 487.51 | 24.0 / 45.3 | 2.062 | 164.67% / 165.23% | 80456.5 |
+| 100,000 miners, 32 weak shares a share, one, 1 s | 626,003 | 361.5 | 84.29% | 263.93 | 35.9 / 67.8 | 2.028 | 53.57% / 53.60% | 126.8 |
+| 10,000 miners, nodes 5x slower, 32 weak shares a share, each, 10 s | 350,621 | 189.5 | 22.66% | 3.78 | 2.07 / 3.97 | 0.283 | 8.00% / 8.00% | 2.4 |
+| 10,000 miners, nodes 5x slower, 32 weak shares a share, per node, 10 s | 350,621 | 189.5 | 22.66% | 3.78 | 2.07 / 3.97 | 0.283 | 7.89% / 7.89% | 2.4 |
+| 10,000 miners, nodes 5x slower, 32 weak shares a share, one, 10 s | 350,621 | 189.5 | 22.66% | 3.78 | 2.08 / 3.98 | 0.283 | 3.79% / 3.79% | 1.9 |
+| 10,000 miners, nodes 5x slower, 32 weak shares a share, each, 5 s | 350,621 | 189.5 | 36.00% | 3.89 | 4.11 / 7.85 | 0.546 | 15.97% / 15.97% | 5.4 |
+| 10,000 miners, nodes 5x slower, 32 weak shares a share, per node, 5 s | 350,621 | 189.5 | 36.00% | 3.89 | 4.11 / 7.85 | 0.546 | 15.73% / 15.73% | 5.4 |
+| 10,000 miners, nodes 5x slower, 32 weak shares a share, one, 5 s | 350,621 | 189.5 | 36.09% | 3.89 | 4.12 / 7.87 | 0.548 | 7.52% / 7.52% | 4.0 |
+| 10,000 miners, nodes 5x slower, 32 weak shares a share, each, 2 s | 350,621 | 189.5 | 57.73% | 17.90 | 10.2 / 19.5 | 1.106 | 39.81% / 39.81% | 19.9 |
+| 10,000 miners, nodes 5x slower, 32 weak shares a share, per node, 2 s | 350,621 | 189.5 | 57.64% | 17.95 | 10.2 / 19.5 | 1.096 | 39.14% / 39.14% | 19.7 |
+| 10,000 miners, nodes 5x slower, 32 weak shares a share, one, 2 s | 350,621 | 189.5 | 57.64% | 18.17 | 10.2 / 19.5 | 1.096 | 18.89% / 18.89% | 12.2 |
+| 10,000 miners, nodes 5x slower, 32 weak shares a share, each, 1 s | 350,621 | 189.5 | 75.45% | 48.48 | 20.5 / 39.4 | 1.766 | 79.93% / 79.93% | 89.1 |
+| 10,000 miners, nodes 5x slower, 32 weak shares a share, per node, 1 s | 350,621 | 189.5 | 75.80% | 48.60 | 20.6 / 39.4 | 1.770 | 78.04% / 78.06% | 84.8 |
+| 10,000 miners, nodes 5x slower, 32 weak shares a share, one, 1 s | 350,621 | 189.5 | 75.00% | 49.61 | 20.8 / 39.6 | 1.777 | 39.25% / 39.25% | 34.4 |
+| 100,000 miners, token shares, 32 weak shares a share, each, 10 s | 4,109 | 376.0 | 17.66% | 2.67 | 0.163 / 0.322 | 0.209 | 22.95% / 22.95% | 13.2 |
+| 100,000 miners, token shares, 32 weak shares a share, per node, 10 s | 4,109 | 376.0 | 17.66% | 2.67 | 0.164 / 0.323 | 0.209 | 22.47% / 22.48% | 13.1 |
+| 100,000 miners, token shares, 32 weak shares a share, one, 10 s | 4,109 | 376.0 | 17.48% | 2.63 | 0.195 / 0.363 | 0.207 | 4.53% / 4.53% | 7.3 |
+| 100,000 miners, token shares, 32 weak shares a share, each, 5 s | 4,109 | 376.0 | 30.34% | 2.80 | 0.316 / 0.627 | 0.424 | 45.84% / 45.84% | 32.9 |
+| 100,000 miners, token shares, 32 weak shares a share, per node, 5 s | 4,109 | 376.0 | 30.43% | 2.80 | 0.318 / 0.629 | 0.426 | 44.84% / 44.84% | 32.3 |
+| 100,000 miners, token shares, 32 weak shares a share, one, 5 s | 4,109 | 376.0 | 29.71% | 2.69 | 0.383 / 0.715 | 0.414 | 8.90% / 8.91% | 15.1 |
+| 100,000 miners, token shares, 32 weak shares a share, each, 2 s | 4,109 | 376.0 | 95.91% | 198.67 | 0.592 / 1.03 | 2.478 | 114.38% / 114.38% | 32308.2 |
+| 100,000 miners, token shares, 32 weak shares a share, per node, 2 s | 4,109 | 376.0 | 94.00% | 106.83 | 0.593 / 1.10 | 2.299 | 107.42% / 107.65% | 16897.3 |
+| 100,000 miners, token shares, 32 weak shares a share, one, 2 s | 4,109 | 376.0 | 50.09% | 2.87 | 0.908 / 1.70 | 0.888 | 21.89% / 21.89% | 39.0 |
+| 100,000 miners, token shares, 32 weak shares a share, each, 1 s | 4,109 | 376.0 | 98.93% | 967.54 | 1.18 / 2.05 | 2.000 | 229.40% / 229.40% | 187052.8 |
+| 100,000 miners, token shares, 32 weak shares a share, per node, 1 s | 4,109 | 376.0 | 98.93% | 810.25 | 1.18 / 2.11 | 2.167 | 206.44% / 207.26% | 153485.3 |
+| 100,000 miners, token shares, 32 weak shares a share, one, 1 s | 4,109 | 376.0 | 69.11% | 3.32 | 1.67 / 3.19 | 1.562 | 43.91% / 43.93% | 94.3 |
+| 100,000 miners, all at level 0, 32 weak shares a share, each, 10 s | 1,028,345 | 437.6 | 43.18% | 13.51 | 5.76 / 11.0 | 0.696 | 47.15% / 47.15% | 58.3 |
+| 100,000 miners, all at level 0, 32 weak shares a share, per node, 10 s | 1,028,345 | 437.6 | 43.09% | 13.49 | 5.76 / 11.0 | 0.695 | 45.95% / 45.96% | 56.7 |
+| 100,000 miners, all at level 0, 32 weak shares a share, one, 10 s | 1,028,345 | 437.6 | 42.73% | 13.41 | 5.81 / 11.1 | 0.685 | 6.48% / 6.48% | 13.6 |
+| 100,000 miners, all at level 0, 32 weak shares a share, each, 5 s | 1,028,345 | 437.6 | 64.09% | 49.58 | 11.2 / 21.5 | 1.301 | 94.22% / 94.22% | 450.0 |
+| 100,000 miners, all at level 0, 32 weak shares a share, per node, 5 s | 1,028,345 | 437.6 | 62.84% | 50.25 | 11.3 / 21.6 | 1.291 | 91.42% / 91.44% | 356.7 |
+| 100,000 miners, all at level 0, 32 weak shares a share, one, 5 s | 1,028,345 | 437.6 | 57.90% | 52.50 | 11.6 / 21.9 | 1.042 | 13.79% / 13.80% | 31.3 |
+| 100,000 miners, all at level 0, 32 weak shares a share, each, 2 s | 1,028,345 | 437.6 | 99.00% | 2055.21 | 17.8 / 31.3 | 1.818 | 235.30% / 235.30% | 392280.1 |
+| 100,000 miners, all at level 0, 32 weak shares a share, per node, 2 s | 1,028,345 | 437.6 | 98.91% | 1691.95 | 17.9 / 33.1 | 1.833 | 209.40% / 210.37% | 312765.0 |
+| 100,000 miners, all at level 0, 32 weak shares a share, one, 2 s | 1,028,345 | 437.6 | 78.91% | 242.81 | 28.8 / 54.6 | 1.770 | 42.11% / 42.18% | 113.3 |
+| 100,000 miners, all at level 0, 32 weak shares a share, each, 1 s | 1,028,345 | 437.6 | 99.38% | 2937.43 | 36.0 / 63.4 | 1.429 | 471.33% / 471.33% | 638289.8 |
+| 100,000 miners, all at level 0, 32 weak shares a share, per node, 1 s | 1,028,345 | 437.6 | 99.38% | 2465.34 | 36.2 / 67.1 | 1.857 | 405.32% / 407.87% | 522273.8 |
+| 100,000 miners, all at level 0, 32 weak shares a share, one, 1 s | 1,028,345 | 437.6 | 89.38% | 761.30 | 59.3 / 111 | 1.942 | 90.35% / 91.06% | 374.4 |
 
 Upstream is right, and the queue shows where:
 - At 1,000 miners validation stays under 2% of a node's time even at
   1-second shares with 32 weak shares a share. The limit is propagation:
-  4.2% stale at 10-second shares, 31% at 1-second.
+  4.9% stale at 10-second shares, 32% at 1-second (these runs mine 1,080
+  share intervals, so their stale rates are noisier than the 8,640-interval
+  rows above).
 - At 10,000 miners whole shares are already 17% stale at 10-second shares.
   Weak shares take 16% of a node's time at 1-second shares, and 78% on a
   node five times slower; half that when the pool mines one template.
@@ -1304,8 +1373,8 @@ Upstream is right, and the queue shows where:
   a node, as in this pool of 1,000 equal nodes, the load is within a few
   points of the worst case, because the 32 weak shares of a share come from
   about 32 different nodes. With one template for the whole pool a node
-  with 100,000 miners is 5% busy at 10-second shares and 53% at 1-second
-  (44% on token shares, 91% at level 0), and no share period overflows.
+  with 100,000 miners is 5% busy at 10-second shares and 54% at 1-second
+  (44% on token shares, 90% at level 0), and no share period overflows.
 
 So a faster share period is bounded by propagation for small pools and by
 validation, mostly of weak shares mined on different templates, for pools
@@ -1317,20 +1386,20 @@ build the same template.
 
 | Scenario | Share bytes | Validation (ms) | Stale | To all (s) | P2Pool up, mean / max (Mbit/s) | Uncles per chain share | Validation busy, mean / max | Validation wait (ms) |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
-| 1,000 nodes, whole, 10,000 miners, no weak shares | 350,749 | 37.9 | 16.88% | 2.80 | 2.02 / 3.78 | 0.203 | 0.40% / 0.40% | 0.1 |
-| 1,000 nodes, whole, 10,000 miners, 32 weak shares a share | 350,749 | 37.9 | 16.88% | 2.81 | 2.20 / 4.11 | 0.203 | 1.60% / 1.60% | 0.1 |
-| 1,000 nodes, without payouts, 10,000 miners, no weak shares | 1,429 | 37.9 | 4.11% | 0.50 | 7.9e-3 / 0.015 | 0.044 | 0.40% / 0.40% | 0.1 |
-| 1,000 nodes, without payouts, 10,000 miners, 32 weak shares a share | 1,429 | 37.9 | 4.11% | 0.50 | 0.186 / 0.343 | 0.044 | 1.60% / 1.60% | 0.1 |
-| 3,000 nodes, whole, 10,000 miners, no weak shares | 350,749 | 37.9 | 17.23% | 3.29 | 2.02 / 4.09 | 0.202 | 0.40% / 0.40% | 0.0 |
-| 3,000 nodes, whole, 10,000 miners, 32 weak shares a share | 350,749 | 37.9 | 17.23% | 3.29 | 2.20 / 4.44 | 0.202 | 1.60% / 1.60% | 0.1 |
-| 3,000 nodes, without payouts, 10,000 miners, no weak shares | 1,429 | 37.9 | 4.55% | 0.56 | 7.9e-3 / 0.016 | 0.049 | 0.40% / 0.40% | 0.1 |
-| 3,000 nodes, without payouts, 10,000 miners, 32 weak shares a share | 1,429 | 37.9 | 4.55% | 0.56 | 0.186 / 0.371 | 0.049 | 1.60% / 1.60% | 0.1 |
-| 10,000 nodes, whole, 10,000 miners, no weak shares | 350,749 | 37.9 | 19.73% | 4.40 | 2.02 / 4.37 | 0.242 | 0.40% / 0.40% | 0.1 |
-| 10,000 nodes, without payouts, 10,000 miners, no weak shares | 1,429 | 37.9 | 4.64% | 0.63 | 7.8e-3 / 0.018 | 0.050 | 0.40% / 0.40% | 0.1 |
+| 1,000 nodes, whole, 10,000 miners, no weak shares | 350,621 | 37.9 | 17.48% | 2.78 | 2.03 / 3.79 | 0.206 | 0.40% / 0.40% | 0.1 |
+| 1,000 nodes, whole, 10,000 miners, 32 weak shares a share | 350,621 | 37.9 | 17.48% | 2.78 | 2.20 / 4.12 | 0.206 | 1.60% / 1.60% | 0.1 |
+| 1,000 nodes, without payouts, 10,000 miners, no weak shares | 1,301 | 37.9 | 5.00% | 0.50 | 7.2e-3 / 0.014 | 0.052 | 0.40% / 0.40% | 0.1 |
+| 1,000 nodes, without payouts, 10,000 miners, 32 weak shares a share | 1,301 | 37.9 | 5.00% | 0.50 | 0.185 / 0.342 | 0.052 | 1.60% / 1.60% | 0.1 |
+| 3,000 nodes, whole, 10,000 miners, no weak shares | 350,621 | 37.9 | 19.54% | 3.27 | 2.03 / 4.10 | 0.230 | 0.40% / 0.40% | 0.1 |
+| 3,000 nodes, whole, 10,000 miners, 32 weak shares a share | 350,621 | 37.9 | 19.54% | 3.27 | 2.21 / 4.45 | 0.230 | 1.60% / 1.60% | 0.1 |
+| 3,000 nodes, without payouts, 10,000 miners, no weak shares | 1,301 | 37.9 | 5.62% | 0.56 | 7.2e-3 / 0.015 | 0.059 | 0.40% / 0.40% | 0.1 |
+| 3,000 nodes, without payouts, 10,000 miners, 32 weak shares a share | 1,301 | 37.9 | 5.62% | 0.56 | 0.185 / 0.369 | 0.059 | 1.60% / 1.60% | 0.1 |
+| 10,000 nodes, whole, 10,000 miners, no weak shares | 350,621 | 37.9 | 21.14% | 4.39 | 2.03 / 4.38 | 0.261 | 0.40% / 0.40% | 0.1 |
+| 10,000 nodes, without payouts, 10,000 miners, no weak shares | 1,301 | 37.9 | 5.89% | 0.63 | 7.2e-3 / 0.016 | 0.062 | 0.40% / 0.40% | 0.1 |
 
 Ten times the nodes cost little: from 1,000 to 10,000 nodes the stale rate
-of shares sent without payouts goes from 4.1% to 4.6%, and of whole shares
-from 16.9% to 19.7%. Hops grow with the logarithm of the node count, so the
+of shares sent without payouts goes from 5.0% to 5.9%, and of whole shares
+from 17.5% to 21.1%. Hops grow with the logarithm of the node count, so the
 share's size and its validation at each hop matter far more than the size
 of the network. Weak shares do not change the stale rate at 1,000 or 3,000
 nodes; they add 0.2 Mbit/s of upload a node.

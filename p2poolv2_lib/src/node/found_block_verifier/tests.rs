@@ -4,6 +4,7 @@
 
 use super::*;
 use crate::accounting::stats::metrics::spawn_test_metrics_handle;
+use crate::shares::bch_headers::KnownBchHeader;
 use crate::test_utils::TestShareBlockBuilder;
 use bitcoin::hashes::Hash;
 use mockall::Sequence;
@@ -90,12 +91,91 @@ async fn a_candidate_below_bchn_finalization_is_no_longer_checked() {
         .returning(move || Ok(vec![candidate.clone()]));
     store.expect_is_current().return_const(true);
     store.expect_record_accepted_found_block().never();
+    // No known headers: ten blocks by height are 6,000 ticks.
+    store.expect_get_bch_best_hash().returning(|_| Ok(None));
+    store.expect_get_bch_header().returning(|_| Ok(None));
     let metrics = spawn_test_metrics_handle();
     let client = BitcoindRpcClient::new(&server.uri(), "user", "pass").unwrap();
     let mut verifier = FoundBlockVerifier::new(client, store, metrics);
 
     verifier.verify_round().await;
     verifier.verify_round().await;
+}
+
+/// BCHN's finalization depth counts ticks (CHIP-2025-03): on one-minute
+/// blocks, read from the known headers of BCHN's tip and of the block that
+/// took the candidate's height, ten blocks are 600 ticks and not final, so
+/// the candidate is asked about again; at a tip 6,000 ticks past that block
+/// it is settled.
+#[tokio::test]
+async fn bchn_finalization_counts_ticks_on_one_minute_blocks() {
+    for (tip_height, tip_ticks, asked) in [(332_010, 600, 2), (332_100, 6_000, 1)] {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(
+                serde_json::json!({ "method": "getblockchaininfo" }),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "result": { "initialblockdownload": false, "chain": "chip", "blocks": tip_height },
+                "error": null, "id": 0
+            })))
+            .mount(&server)
+            .await;
+        let at_height = BlockHash::from_byte_array([0x33; 32]);
+        Mock::given(method("POST"))
+            .and(body_partial_json(serde_json::json!({
+                "method": "getblockhash", "params": [332_000]
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "result": at_height.to_string(),
+                "error": null, "id": 0
+            })))
+            .expect(asked)
+            .mount(&server)
+            .await;
+        let candidate = FoundBlock {
+            bitcoin_height: 332_000,
+            bitcoin_blockhash: BlockHash::from_byte_array([0x11; 32]),
+            share_blockhash: BlockHash::from_byte_array([0x22; 32]),
+            bitcoin_time: 1_700_000_000,
+            miner_bitcoin_address: "miner".to_string(),
+            effort: None,
+        };
+        let tip_hash = BlockHash::from_byte_array([0x44; 32]);
+        let block = |height: u32, ticks: i64| KnownBchHeader {
+            height,
+            header: TestShareBlockBuilder::new().build().header.bitcoin_header,
+            ticks: 1_000_000 + ticks,
+            next_interval: 60,
+        };
+        let mut store = ChainStoreHandle::default();
+        store
+            .expect_get_candidate_found_blocks()
+            .times(2)
+            .returning(move || Ok(vec![candidate.clone()]));
+        store.expect_is_current().return_const(true);
+        store.expect_record_accepted_found_block().never();
+        store
+            .expect_get_bch_best_hash()
+            .returning(move |height| Ok((height == tip_height).then_some(tip_hash)));
+        store.expect_get_bch_header().returning(move |hash| {
+            Ok(if *hash == tip_hash {
+                Some(block(tip_height, tip_ticks))
+            } else if *hash == at_height {
+                Some(block(332_000, 0))
+            } else {
+                None
+            })
+        });
+        let metrics = spawn_test_metrics_handle();
+        let client = BitcoindRpcClient::new(&server.uri(), "user", "pass").unwrap();
+        // The pins would count every one of these blocks as ten minutes.
+        let mut verifier = FoundBlockVerifier::new(client, store, metrics)
+            .with_tick_schedule(TickSchedule::TEN_MINUTES);
+
+        verifier.verify_round().await;
+        verifier.verify_round().await;
+    }
 }
 
 #[tokio::test]

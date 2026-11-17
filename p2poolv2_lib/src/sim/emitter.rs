@@ -33,6 +33,7 @@ use crate::sim::timing::{
     sample_exponential_secs,
 };
 use crate::stratum::emission::EmissionSender;
+use crate::stratum::work::band_policy::asking_band;
 use crate::stratum::work::prepared_notify::PreparedNotifyParams;
 use crate::stratum::work::tracker::{JobTracker, start_tracker_actor};
 use bitcoin::hashes::Hash;
@@ -45,6 +46,25 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::watch;
 use tracing::{debug, info, warn};
+
+/// How many times easier than its weak target a job asks for with
+/// `[sim] weak_asks`. Any easier target asks; twice keeps it clear of the
+/// compact form's rounding.
+const SIM_ASK_MULTIPLE: f64 = 2.0;
+
+/// [`SimEmitter::asking_band`] with `weak_asks` the `[sim] weak_asks`
+/// setting.
+fn sim_asking_band(weak_asks: bool, prepared: &PreparedNotifyParams) -> Option<JobBand> {
+    if !weak_asks {
+        return None;
+    }
+    asking_band(
+        prepared.bits(),
+        prepared.weak_target()?,
+        SIM_ASK_MULTIPLE,
+        prepared.target_ceiling()?,
+    )
+}
 
 /// Miner `index` of the node seeded `seed` (`[sim] virtual_miners`): a
 /// Bitcoin Cash P2PKH payout address and the share owner of the same key
@@ -115,20 +135,35 @@ impl SimEmitter {
     /// The band of this miner's next job on `prepared`: with
     /// `share_multiple` set, that multiple of the minimum's work, within the
     /// share's band cap unless `share_multiple_ignores_cap`
-    /// (`shares::band::heavier_job_band`); `None`, the minimum, otherwise.
+    /// (`shares::band::heavier_job_band`); with `weak_asks`, the minimum
+    /// asking for an easier weak target ([`Self::asking_band`]); `None`, the
+    /// minimum, otherwise.
     fn job_band(&self, prepared: &PreparedNotifyParams) -> Option<JobBand> {
-        self.config.share_multiple.map(|multiple| {
-            let band_cap = if self.config.share_multiple_ignores_cap {
-                BAND_CAP_MAX
-            } else {
-                prepared.band_cap()
-            };
-            heavier_job_band(
-                prepared.bits(),
-                band_cap,
-                u64::from(multiple) * u64::from(BAND_CAP_UNIT),
-            )
-        })
+        match self.config.share_multiple {
+            Some(multiple) => {
+                let band_cap = if self.config.share_multiple_ignores_cap {
+                    BAND_CAP_MAX
+                } else {
+                    prepared.band_cap()
+                };
+                Some(heavier_job_band(
+                    prepared.bits(),
+                    band_cap,
+                    u64::from(multiple) * u64::from(BAND_CAP_UNIT),
+                ))
+            }
+            None => self.asking_band(prepared),
+        }
+    }
+
+    /// With `[sim] weak_asks`, the band of a job at the minimum on `prepared`
+    /// whose weak shares ask for an easier weak target: wanting one
+    /// [`SIM_ASK_MULTIPLE`] times as easy as the template's, never easier
+    /// than the chain's ceiling (`stratum::work::band_policy::asking_band`).
+    /// `None` without the setting, without a weak target or ceiling, or at
+    /// the ceiling.
+    fn asking_band(&self, prepared: &PreparedNotifyParams) -> Option<JobBand> {
+        sim_asking_band(self.config.weak_asks, prepared)
     }
 
     /// The weak target this miner's proofs are paced by on `prepared`: the
@@ -322,8 +357,9 @@ impl SimEmitter {
                 Err(e) => warn!("Sim emitter: failed to build emission: {e}"),
             }
             if last_stats.elapsed() >= STATS_INTERVAL {
+                let (weak_carried, weak_asking) = prepared.weak_counts();
                 info!(
-                    "sim stats: emitted={emitted} weak_emitted={weak_emitted} pool_difficulty={:.1} hashrate={} job_difficulty={difficulty:.1} band_cap={} weak_ratio={}",
+                    "sim stats: emitted={emitted} weak_emitted={weak_emitted} pool_difficulty={:.1} hashrate={} job_difficulty={difficulty:.1} band_cap={} weak_ratio={} weak_carried={weak_carried} weak_asking={weak_asking}",
                     difficulty_from_bits(prepared.bits()),
                     self.config.hashrate,
                     prepared.band_cap(),
@@ -340,6 +376,62 @@ impl SimEmitter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A template at the minimum `0x1c40_0000` whose weak target is
+    /// `0x1d01_0000`, under a ceiling of `ceiling`.
+    fn template_with_weak_target(ceiling: u32) -> PreparedNotifyParams {
+        use crate::accounting::OutputPair;
+        use crate::stratum::work::block_template::BlockTemplate;
+        use crate::stratum::work::prepared_notify::PreparedNotifyParamsBuilder;
+        use bitcoin::{Amount, BlockHash, CompactTarget};
+
+        let template: BlockTemplate = serde_json::from_str(include_str!(
+            "../../../bitcoindrpc/test_data/bchn-regtest-template.json"
+        ))
+        .unwrap();
+        PreparedNotifyParamsBuilder::new(
+            Arc::new(template),
+            vec![OutputPair {
+                address: crate::test_utils::make_test_address(1),
+                amount: Amount::from_sat(1),
+            }],
+            b"test",
+            false,
+        )
+        .prev_share_blockhash(BlockHash::from_byte_array([1; 32]))
+        .bits(CompactTarget::from_consensus(0x1c40_0000))
+        .include_merge_mining(true)
+        .weak_target(Some(Target::from_compact(CompactTarget::from_consensus(
+            0x1d01_0000,
+        ))))
+        .target_ceiling(Some(CompactTarget::from_consensus(ceiling)))
+        .build()
+        .unwrap()
+    }
+
+    /// With `[sim] weak_asks` a job at the minimum wants a target easier than
+    /// its weak target, so its weak shares ask; without it the job wants its
+    /// own bits.
+    #[test]
+    fn weak_asks_makes_jobs_at_the_minimum_ask_for_an_easier_weak_target() {
+        let prepared = template_with_weak_target(0x1e00_ffff);
+        let weak_target = prepared.weak_target().unwrap();
+
+        let band = sim_asking_band(true, &prepared).unwrap();
+
+        assert_eq!(band.bits, prepared.bits());
+        assert!(Target::from_compact(band.wanted_bits) > weak_target);
+        assert_eq!(sim_asking_band(false, &prepared), None);
+    }
+
+    /// At the ceiling no easier weak target exists, so even with
+    /// `[sim] weak_asks` the job asks for nothing.
+    #[test]
+    fn weak_asks_asks_for_nothing_at_the_ceiling() {
+        let prepared = template_with_weak_target(0x1d01_0000);
+
+        assert_eq!(sim_asking_band(true, &prepared), None);
+    }
 
     #[test]
     fn virtual_miners_differ_by_index_and_by_node_seed() {

@@ -36,6 +36,7 @@ pub mod payout_outputs;
 pub mod preparation;
 mod server;
 mod session;
+mod socks5;
 mod template_distribution;
 
 pub use mining::EXTRANONCE_SIZE;
