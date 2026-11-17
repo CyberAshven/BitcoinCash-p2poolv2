@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+A node keeps its peer ID across restarts. Its libp2p key is made on the
+first start and kept in `p2p_node_key` beside the store (only its owner may
+read it on Unix), or wherever `[network] node_key_path` says; a file that
+holds no key stops the node instead of being replaced. Before, every start
+made a new key, so a restarted node was a stranger to the peers that knew
+it, and nothing could list or announce it by its peer ID. `ephemeral_node_key
+= true` keeps the old behaviour for a node that wants no identity linking its
+restarts. No share-chain rule, message or store change.
+
 Share-chain rule change on Bitcoin Cash, a flag day: P2Pool follows Bitcoin
 Cash's one-minute blocks (CHIP-2025-03) the way BCHN does (protocol
 segments `bch-prev-1off-ticks` and `mm2-roots-asert8-ticks`, store format

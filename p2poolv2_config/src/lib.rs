@@ -1389,10 +1389,43 @@ pub struct NetworkConfig {
     // (`Config::with_bitcoin_cash_dns_seed_off`).
     #[serde(default = "default_dns_seed")]
     pub dns_seed: bool,
+    /// File holding this node's libp2p identity, whose public key is its
+    /// peer ID. Created on the first start and read on every start after,
+    /// so peers, saved peer lists and announcements keep finding the node
+    /// under one peer ID. Default: `p2p_node_key` in the directory holding
+    /// the store (`NetworkConfig::node_key_file`).
+    #[serde(default)]
+    pub node_key_path: Option<String>,
+    /// Give the node a new peer ID on every start instead, as it had before
+    /// identities were kept. Nothing then links a node's peer ID across
+    /// restarts, but peers and announcements forget it each time.
+    #[serde(default)]
+    pub ephemeral_node_key: bool,
 }
 
 fn default_dns_seed() -> bool {
     true
+}
+
+/// File name of the node identity when `node_key_path` is not set.
+pub const DEFAULT_NODE_KEY_FILE: &str = "p2p_node_key";
+
+impl NetworkConfig {
+    /// Where this node keeps its libp2p identity: `node_key_path`, else
+    /// [`DEFAULT_NODE_KEY_FILE`] in the directory holding `store_path`.
+    /// `None` with `ephemeral_node_key`.
+    pub fn node_key_file(&self, store_path: &str) -> Option<std::path::PathBuf> {
+        if self.ephemeral_node_key {
+            return None;
+        }
+        Some(match &self.node_key_path {
+            Some(path) => std::path::PathBuf::from(path),
+            None => std::path::Path::new(store_path)
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new("."))
+                .join(DEFAULT_NODE_KEY_FILE),
+        })
+    }
 }
 
 impl Default for NetworkConfig {
@@ -1420,6 +1453,8 @@ impl Default for NetworkConfig {
             blocked_ips: vec![],
             external_address: None,
             dns_seed: true,
+            node_key_path: None,
+            ephemeral_node_key: false,
         }
     }
 }
@@ -1990,6 +2025,36 @@ mod tests {
     use p2poolv2_wallet::bch_share::{BchShareAddress, BchShareNetwork};
     use temp_env::{with_var, with_vars};
     use tokio_test::assert_err;
+
+    /// The node key sits beside the store unless `node_key_path` names a
+    /// file, and an ephemeral node keeps none.
+    #[test]
+    fn node_key_file_defaults_beside_the_store() {
+        let mut network = NetworkConfig::default();
+        assert_eq!(
+            network.node_key_file("/var/lib/p2pool/store.db"),
+            Some(std::path::PathBuf::from("/var/lib/p2pool").join(DEFAULT_NODE_KEY_FILE))
+        );
+        assert_eq!(
+            network.node_key_file("store.db"),
+            Some(std::path::PathBuf::from("").join(DEFAULT_NODE_KEY_FILE))
+        );
+        network.node_key_path = Some("/etc/p2poolv2/node.key".into());
+        assert_eq!(
+            network.node_key_file("/var/lib/p2pool/store.db"),
+            Some(std::path::PathBuf::from("/etc/p2poolv2/node.key"))
+        );
+        network.ephemeral_node_key = true;
+        assert_eq!(network.node_key_file("/var/lib/p2pool/store.db"), None);
+    }
+
+    /// The sample config keeps the node's identity by default.
+    #[test]
+    fn the_sample_config_keeps_the_node_key() {
+        let config = Config::load("../config.sample.toml").unwrap();
+        assert!(!config.network.ephemeral_node_key);
+        assert!(config.network.node_key_path.is_none());
+    }
 
     #[test]
     fn test_config_builder() {

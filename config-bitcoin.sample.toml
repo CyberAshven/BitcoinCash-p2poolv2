@@ -31,6 +31,12 @@ dial_timeout_secs = 30
 # Optional external address for nodes behind NAT. If set, this address
 # is advertised to peers instead of auto-detecting from identify observations.
 # external_address = "/ip4/203.0.113.1/tcp/6884"
+# This node's peer ID comes from a key kept in p2p_node_key beside the store,
+# made on the first start, so peers keep finding the node under one peer ID
+# after a restart. node_key_path puts the key elsewhere; ephemeral_node_key =
+# true gives a new peer ID on every start instead, which nothing can link.
+# node_key_path = "./p2p_node_key"
+# ephemeral_node_key = false
 
 [store]
 path = "./store.db"

@@ -10,6 +10,7 @@ mod dial_filter;
 mod dns_seeds;
 pub mod emission_worker;
 mod found_block_verifier;
+mod node_key;
 pub mod organise_worker;
 pub mod p2p_health;
 pub mod payout_tree_executor;
@@ -221,7 +222,8 @@ impl Node {
         response_worker_tx: ResponseWorkerSender,
         share_transaction_pool: Option<ShareTransactionPool>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        let id_keys = libp2p::identity::Keypair::generate_ed25519();
+        let id_keys =
+            node_key::load_or_create(config.network.node_key_file(&config.store.path).as_deref())?;
 
         let genesis_hash = crate::shares::bch_genesis::genesis_for_stratum(&config.stratum)
             .map_err(|error| -> Box<dyn Error> { error })?
@@ -847,6 +849,8 @@ mod tests {
             blocked_ips: vec![],
             external_address: None,
             dns_seed: false,
+            node_key_path: None,
+            ephemeral_node_key: true,
         };
         network_config.dial_peers = vec![unreachable_peer];
         network_config.dial_timeout_secs = 2;
@@ -972,6 +976,8 @@ mod tests {
                 blocked_ips: vec![],
                 external_address,
                 dns_seed: false,
+                node_key_path: None,
+                ephemeral_node_key: true,
             },
             bitcoinrpc: BitcoinRpcConfig {
                 url: "http://localhost:8332".to_string(),
@@ -1027,6 +1033,31 @@ mod tests {
             None,
         )
         .expect("Node initialization failed")
+    }
+
+    /// A node restarted on the same key file has the same peer ID; one with
+    /// `ephemeral_node_key` gets a new one each start.
+    #[tokio::test]
+    async fn a_restarted_node_keeps_its_peer_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = build_test_config("/ip4/127.0.0.1/tcp/0", None);
+        config.store.path = dir.path().join("store.db").display().to_string();
+        config.network.ephemeral_node_key = false;
+
+        let first = *build_test_node(config.clone()).swarm.local_peer_id();
+        assert!(
+            dir.path()
+                .join(crate::config::DEFAULT_NODE_KEY_FILE)
+                .exists()
+        );
+        let restarted = *build_test_node(config.clone()).swarm.local_peer_id();
+        assert_eq!(first, restarted);
+
+        config.network.ephemeral_node_key = true;
+        let ephemeral = *build_test_node(config.clone()).swarm.local_peer_id();
+        let ephemeral_again = *build_test_node(config).swarm.local_peer_id();
+        assert_ne!(ephemeral, first);
+        assert_ne!(ephemeral, ephemeral_again);
     }
 
     #[tokio::test]
