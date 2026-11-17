@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+A syncing Bitcoin Cash node no longer marks an honest share invalid over a
+weak share paid from shares it never fetched: the body prune depth adds
+`WEAK_DEPTH` (242,174 shares, 414 in the sim). No share-chain rule change.
+
 Weak shares follow the asks (#118, issue #79 part 6), a flag day: protocol
 segment `weak4-640-100-48-256-320-64-4096-64-32`, store format 10, new
 genesis shares. A share header counts the weak shares it carries that ask

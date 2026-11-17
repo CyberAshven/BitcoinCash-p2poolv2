@@ -14,8 +14,8 @@ fn a_14_day_cap_gives_the_node_s_depths() {
     );
     assert_eq!(
         kept_body_shares(14.0),
-        242_486.0,
-        "BCH_PRUNE_DEPTH and the pruner's lag"
+        242_534.0,
+        "BCH_PRUNE_DEPTH, with WEAK_DEPTH, and the pruner's lag"
     );
 }
 

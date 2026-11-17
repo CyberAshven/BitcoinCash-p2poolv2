@@ -63,9 +63,9 @@ batch of 2026-10-24 (audit A12), Bitcoin Cash derives its own from its
 | `PPLNS_WINDOW_SHARES` | 120,960 | the window cap, unchanged |
 | `MAX_UNCLES_DEPTH` | 3 | an uncle of the deepest window share |
 | `BCH_PAYOUT_DEPTH` | 121,063 | 100 + 120,960 + 3: the deepest share a coinbase pays |
-| `BCH_PRUNE_DEPTH` | 242,126 | 2 x `BCH_PAYOUT_DEPTH` |
+| `BCH_PRUNE_DEPTH` | 242,174 | 2 x `BCH_PAYOUT_DEPTH` + `WEAK_DEPTH` (48): the deepest share a payout for a weak share carried at the bottom of the zone reads |
 | `PRUNE_INTERVAL` | 360 | unchanged |
-| Block bodies kept below the confirmed tip | 242,486 | `BCH_PRUNE_DEPTH + PRUNE_INTERVAL` |
+| Block bodies kept below the confirmed tip | 242,534 | `BCH_PRUNE_DEPTH + PRUNE_INTERVAL` |
 
 - `BCH_PAYOUT_DEPTH` is a share-chain rule: a Bitcoin Cash share coinbase
   output can be spent from depth 100 and expires 121,063 shares below the
@@ -74,10 +74,25 @@ batch of 2026-10-24 (audit A12), Bitcoin Cash derives its own from its
   ("Reorg Depth Limit"), 121,063 shares below the confirmed tip.
 - Doubled, it is the prune depth, for the same reason as on Bitcoin: a
   spend at the bottom of the zone may use outputs down to two payout depths
-  below the tip, exactly the prune height.
-- The window walk reads headers only (`PplnsWindow` caches confirmed headers
-  and their uncles), and headers are never pruned, so pruning cannot remove
-  anything a payout needs at any depth.
+  below the tip. Bitcoin Cash adds `WEAK_DEPTH` (48 shares,
+  `ChainDepths::weak_anchor_depth`): a weak share carried by a share at the
+  bottom of the zone may have its parent that much lower, and is paid from a
+  window anchored there.
+- The window walk reads headers (`PplnsWindow` caches confirmed headers and
+  their uncles), which are never pruned, and on Bitcoin Cash the summary of
+  the weak shares each share carries (`WeakSummaries`), which is body data.
+  A payout reads at most one payout depth below the share it pays for, and
+  the deepest share a node fully checks, at the bottom of a syncing node's
+  zone or on the deepest fork it follows, sits one payout depth below the
+  tip: payouts read summaries down to two payout depths, and a weak share
+  carried at the bottom of the zone `WEAK_DEPTH` lower, to the prune height.
+  The body keeps them, so pruning cannot remove anything a payout needs.
+  Until 2026-11-16 the prune depth was two payout depths alone: a syncing
+  node never fetched the bodies the weak share payouts read up to 46 shares
+  below it, credited those shares without their weak shares, and could mark
+  an honest share invalid (the alpha side of run 43851198602 did). A confirmed share
+  whose summary is missing is credited without its weak shares, which is
+  right only for a share confirmed from its header below the prune height.
 - Every chain's depths are asserted at compile time: the walk plus its
   uncles fits the payout depth, and the deepest followed fork with its
   uncles stays above the prune target. The store, the block receiver, the
@@ -85,7 +100,7 @@ batch of 2026-10-24 (audit A12), Bitcoin Cash derives its own from its
   the node's chain's depths (`Store::with_chain`, `ChainDepths::for_chain`).
 - The sim build shortens the window to 80 shares; Bitcoin Cash's maturity
   stays 100 there, so the sim's `BCH_PAYOUT_DEPTH` is 183 and its prune
-  depth 366.
+  depth 414 (2 x 183 + 48).
 - Bitcoin Cash nodes relay share transactions and mine them in their shares
   (since 2026-10-22, `shares/transaction_pool.rs`, `handle_stratum_share.rs`),
   so a block may spend an output this node never fetched. Both rules that
@@ -855,13 +870,13 @@ take 32 bytes; P2SH32 outputs take 44. The 367-byte allowance includes a
 tree output and all other fields at their largest sizes. There is no BCH
 witness commitment. See `accounting/payout/coinbase_budget.rs`.
 
-| No-token P2PKH payees | Coinbase budget | GB per year if kept | GB for 242,126 retained coinbases |
+| No-token P2PKH payees | Coinbase budget | GB per year if kept | GB for 242,174 retained coinbases |
 |---|---|---|---|
 | 10 | 707 B | 2.23 | 0.17 |
 | 100 | 3,767 B | 11.88 | 0.91 |
 | 1,000 | 34,367 B | 108.38 | 8.32 |
 
-`BCH_PRUNE_DEPTH` is 242,126 shares, about 28 days at this rate. Token
+`BCH_PRUNE_DEPTH` is 242,174 shares, about 28 days at this rate. Token
 shares cap their coinbase at 3,072 bytes and use a payout tree as needed.
 No-token coinbases may reach the 1,000,000-byte
 [BCH transaction maximum](https://github.com/bitcoin-cash-node/bitcoin-cash-node/blob/master/src/consensus/consensus.h).

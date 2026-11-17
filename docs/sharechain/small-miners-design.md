@@ -877,7 +877,7 @@ At the ceiling, against today's count:
 |---|---:|---:|
 | Weak shares a second | 3.5 | 35 |
 | Relay of weak shares, at 0.8 KB each | 2.8 KB/s | 28 KB/s |
-| Stored until the body is pruned (242,486 shares, 28 days) | 6.7 GB | 67 GB |
+| Stored until the body is pruned (242,534 shares, 28 days) | 6.7 GB | 67 GB |
 | Weak pool, at most (4 x `WEAK_CAP` x `WEAK_DEPTH`) | 12,288 weak shares | 122,880 |
 
 Validation is the real ceiling, not bandwidth. A weak share costs a node

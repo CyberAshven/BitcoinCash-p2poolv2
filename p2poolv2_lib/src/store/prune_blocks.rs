@@ -385,6 +385,7 @@ mod tests {
     use crate::accounting::payout::sharechain_pplns::pplns_window::{
         BCH_PAYOUT_DEPTH, BCH_PRUNE_DEPTH,
     };
+    use crate::shares::weak::WEAK_DEPTH;
     use crate::store::block_tx_metadata::{BlockMetadata, ChainMembership, Status};
     use crate::test_utils::{
         TestShareBlockBuilder, build_confirmed_test_chain, confirm_test_block,
@@ -436,8 +437,8 @@ mod tests {
     /// (the maturity skip, the window capped at 120,960 shares and an uncle
     /// of the deepest one), which is exactly `BCH_PAYOUT_DEPTH`. The
     /// full-validation zone, output expiry and the reorg limit are that
-    /// depth; the prune depth is twice it, 242,126, against Bitcoin's
-    /// 127,008 and 254,016.
+    /// depth; the prune depth is twice it and `WEAK_DEPTH`, 242,174, against
+    /// Bitcoin's 127,008 and 254,016.
     #[test]
     #[cfg(not(feature = "sim"))]
     fn test_bitcoin_cash_depths_come_from_its_100_share_maturity() {
@@ -448,32 +449,32 @@ mod tests {
         );
         assert_eq!(BCH_PAYOUT_DEPTH, 121_063);
         assert_eq!(BITCOIN_CASH.max_reorg_depth(), 121_063);
-        assert_eq!(BCH_PRUNE_DEPTH, 242_126);
-        assert_eq!(BITCOIN_CASH.prune_depth(), 242_126);
+        assert_eq!(BCH_PRUNE_DEPTH, 242_174);
+        assert_eq!(BITCOIN_CASH.prune_depth(), 242_174);
         assert_eq!(PAYOUT_DEPTH, 127_008);
         assert_eq!(PRUNE_DEPTH, 254_016);
         let tip: u32 = 1_000_000;
         let deepest_paid_height = tip - BCH_PAYOUT_DEPTH as u32;
         assert_eq!(deepest_paid_height, 878_937);
         assert_eq!(reorg_floor_for_tip(BITCOIN_CASH, tip), 878_937);
-        assert_eq!(prune_height_for_tip(BITCOIN_CASH, tip), 757_874);
-        assert_eq!(prune_target_for_tip(BITCOIN_CASH, tip), 757_514);
+        assert_eq!(prune_height_for_tip(BITCOIN_CASH, tip), 757_826);
+        assert_eq!(prune_target_for_tip(BITCOIN_CASH, tip), 757_466);
         assert!(prune_height_for_tip(BITCOIN_CASH, tip) < deepest_paid_height);
     }
 
     /// A Bitcoin Cash share coinbase output is spendable from depth 100 until
     /// it expires at `BCH_PAYOUT_DEPTH`. An in-zone spend at
     /// `tip - BCH_PAYOUT_DEPTH` may spend an output down to
-    /// `tip - 2 * BCH_PAYOUT_DEPTH`, which is exactly the prune height: that
-    /// body is still held, and the deepest fork the node follows, with its
-    /// uncles, stays above the prune target.
+    /// `tip - 2 * BCH_PAYOUT_DEPTH`, which is `WEAK_DEPTH` above the prune
+    /// height: that body is still held, and the deepest fork the node
+    /// follows, with its uncles, stays above the prune target.
     #[test]
     fn test_bitcoin_cash_spendable_outputs_stay_above_the_prune_height() {
         let tip: u32 = 1_000_000;
         let oldest_spendable_root = tip - 2 * BCH_PAYOUT_DEPTH as u32;
         assert_eq!(
-            oldest_spendable_root,
-            prune_height_for_tip(BITCOIN_CASH, tip)
+            oldest_spendable_root - prune_height_for_tip(BITCOIN_CASH, tip),
+            WEAK_DEPTH
         );
         assert!(prune_target_for_tip(BITCOIN_CASH, tip) < oldest_spendable_root);
         assert!(
@@ -510,6 +511,24 @@ mod tests {
             .with_chain(crate::config::Chain::BitcoinCash);
         assert_eq!(store.depths(), BITCOIN_CASH);
         assert_eq!(store.stored_chain(), None);
+    }
+
+    /// A weak share carried by the deepest share a syncing node fully checks,
+    /// one payout depth below its tip, may have its parent `WEAK_DEPTH` lower
+    /// and is paid from a window anchored there. The shares that window pays
+    /// sit above the prune height, so the syncing node fetched their bodies
+    /// and summaries; with the prune depth at two payout depths they fell up
+    /// to 46 shares below it, were credited without their weak shares, and
+    /// an honest share failed its weak share's payout check.
+    #[test]
+    fn test_a_weak_share_carried_at_the_bottom_of_the_zone_reads_above_the_prune_height() {
+        let tip = 3 * BCH_PRUNE_DEPTH as u32;
+        let deepest_checked = tip - BCH_PAYOUT_DEPTH as u32 + 1;
+        let deepest_weak_parent = deepest_checked - WEAK_DEPTH;
+        let deepest_read = deepest_weak_parent + 1 - BCH_PAYOUT_DEPTH as u32;
+
+        assert!(deepest_read >= prune_height_for_tip(BITCOIN_CASH, tip));
+        assert_eq!(tip - 2 * BCH_PAYOUT_DEPTH as u32 - deepest_read, 46);
     }
 
     #[test]

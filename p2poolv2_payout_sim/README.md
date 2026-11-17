@@ -1046,9 +1046,9 @@ What the storage table shows:
    coinbase is full, and the rest of its payees go to the tree.
 2. **The coinbase is most of what a node keeps:** 8.3 GB for 28 days with
    1,000 payees; 14.8 GB at the default level's ceiling, reached from about
-   1,800 payees; 82.5 GB with 10,000 payees at level 1, and 236 GB at level
-   1's ceiling (82.5 GB with 10,000 payees, 148 GB at the default level's
-   ceiling and 242 GB at the full 1 MB with ten-minute blocks). A 30-day cap
+   1,800 payees; 82.6 GB with 10,000 payees at level 1, and 236 GB at level
+   1's ceiling (82.6 GB with 10,000 payees, 148 GB at the default level's
+   ceiling and 243 GB at the full 1 MB with ten-minute blocks). A 30-day cap
    doubles each. Never pruned, they would grow by 108 GB to 3.1 TB a year.
 3. **Stored without its payouts it takes 367 bytes,** 0.09 GB for 28 days.
    Every node can rebuild the payouts from the chain, as it already does to
@@ -2056,12 +2056,12 @@ difficulty, to push the cap up.
 |---|---|---|---|---|---|---|---|---|
 | 10 | 5 (17,472 sat) | 10 | 0 | 0.707 | 0.171 | 0.367 | 2.23 | 0 |
 | 10 | 1 (1,092 sat) | 10 | 0 | 0.707 | 0.171 | 0.367 | 2.23 | 0 |
-| 100 | 5 (17,472 sat) | 100 | 0 | 3.77 | 0.913 | 1.95 | 11.9 | 0 |
-| 100 | 1 (1,092 sat) | 100 | 0 | 3.77 | 0.913 | 1.95 | 11.9 | 0 |
-| 1,000 | 5 (17,472 sat) | 1,000 | 0 | 34.4 | 8.33 | 17.8 | 108 | 0 |
-| 1,000 | 1 (1,092 sat) | 1,000 | 0 | 34.4 | 8.33 | 17.8 | 108 | 0 |
+| 100 | 5 (17,472 sat) | 100 | 0 | 3.77 | 0.914 | 1.96 | 11.9 | 0 |
+| 100 | 1 (1,092 sat) | 100 | 0 | 3.77 | 0.914 | 1.96 | 11.9 | 0 |
+| 1,000 | 5 (17,472 sat) | 1,000 | 0 | 34.4 | 8.34 | 17.8 | 108 | 0 |
+| 1,000 | 1 (1,092 sat) | 1,000 | 0 | 34.4 | 8.34 | 17.8 | 108 | 0 |
 | 10,000 | 5 (17,472 sat) | 1,788 | 0 | 61.2 | 14.8 | 31.7 | 193 | 0 |
-| 10,000 | 1 (1,092 sat) | 10,000 | 0 | 340 | 82.5 | 177 | 1,073 | 0 |
+| 10,000 | 1 (1,092 sat) | 10,000 | 0 | 340 | 82.6 | 177 | 1,073 | 0 |
 | 100,000 | 5 (17,472 sat) | 1,788 | 0 | 61.2 | 14.8 | 31.7 | 193 | 0 |
 | 100,000 | 1 (1,092 sat) | 28,617 | 0 | 973 | 236 | 505 | 3,070 | 0 |
 | 1,000,000 | 5 (17,472 sat) | 1,788 | 0 | 61.2 | 14.8 | 31.7 | 193 | 0 |
