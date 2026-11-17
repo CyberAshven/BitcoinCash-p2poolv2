@@ -28,6 +28,9 @@ made a new key, so a restarted node was a stranger to the peers that knew
 it, and nothing could list or announce it by its peer ID. `ephemeral_node_key
 = true` keeps the old behaviour for a node that wants no identity linking its
 restarts. No share-chain rule, message or store change.
+A node keeps at least 16 outgoing peers (`[network] target_outgoing_peers`),
+at most one per IPv4 /16 or IPv6 /32, with a 60-second backoff that doubles;
+the sample configs raise `max_established_incoming` from 50 to 128 (#122).
 
 Share-chain rule change on Bitcoin Cash, a flag day: P2Pool follows Bitcoin
 Cash's one-minute blocks (CHIP-2025-03) the way BCHN does (protocol

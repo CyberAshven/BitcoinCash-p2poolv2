@@ -146,7 +146,9 @@ address (dynamic DNS) stays reachable. A Bitcoin Cash node
 never uses DNS seeds: the seeds built into P2Poolv2 are Bitcoin nodes, and
 there are no Bitcoin Cash seeds yet. `dns_seed` is ignored and always off on
 `chain = "bitcoin-cash"`, so without `dial_peers` the node only waits for
-peers to dial it.
+peers to dial it. Once connected, it dials more of the peers its peers tell
+it of until it has `target_outgoing_peers` outgoing peers, 16 by default,
+spread over network groups ([P2P network](p2p-network.md#outgoing-peers)).
 
 `wait_for_chain_sync` in `[stratum]` decides when the Stratum port opens.
 With `true`, the default when the line is missing, it opens only once the

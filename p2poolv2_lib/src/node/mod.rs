@@ -13,6 +13,7 @@ mod found_block_verifier;
 mod node_key;
 pub(crate) mod nostr_seeds;
 pub mod organise_worker;
+mod outgoing_peer_target;
 pub mod p2p_health;
 pub mod payout_tree_executor;
 pub mod peer_reconnector;
@@ -62,7 +63,7 @@ use libp2p::tcp::tokio::{TcpStream, Transport as TcpTransport};
 use libp2p::{
     Multiaddr, Swarm,
     kad::{Event as KademliaEvent, QueryResult},
-    swarm::{SwarmEvent, dial_opts::DialOpts},
+    swarm::{DialError, SwarmEvent, dial_opts::DialOpts},
 };
 use std::collections::HashSet;
 use std::error::Error;
@@ -113,6 +114,7 @@ pub enum SwarmSend<C> {
 
 use connection_tracker::{BlockedIps, ConnectionAction, ConnectionTracker, PING_FAILURE_THRESHOLD};
 use dial_filter::DialFilter;
+use outgoing_peer_target::{OutgoingCounts, OutgoingPeerTarget};
 
 /// Close a connection after this long with no streams in use and no protocol
 /// asking to keep it alive.
@@ -198,6 +200,9 @@ struct Node {
     request_response_handler: RequestResponseHandler<ResponseChannel<Message>>,
     monitoring_event_sender: MonitoringEventSender,
     peer_reconnector: peer_reconnector::PeerReconnector,
+    /// Dials known peers while the node has fewer outgoing peers than
+    /// target_outgoing_peers.
+    outgoing_peer_target: OutgoingPeerTarget,
     connection_tracker: ConnectionTracker,
     /// Whether an external address has been confirmed and advertised
     external_address_confirmed: bool,
@@ -374,6 +379,7 @@ impl Node {
         );
 
         let peer_reconnector = peer_reconnector::PeerReconnector::new(&config.network.dial_peers);
+        let outgoing_peer_target = OutgoingPeerTarget::new(&config.network, blocked_ips.clone());
 
         let mut node = Self {
             swarm,
@@ -383,6 +389,7 @@ impl Node {
             request_response_handler,
             monitoring_event_sender,
             peer_reconnector,
+            outgoing_peer_target,
             connection_tracker: ConnectionTracker::new(blocked_ips),
             external_address_confirmed,
             listen_port,
@@ -476,8 +483,13 @@ impl Node {
 
     /// Snapshot of P2P health counters for `/metrics`.
     pub(crate) fn p2p_health(&self) -> P2pHealth {
+        let connected_peers = self.connection_tracker.connected_peer_count();
+        let outgoing_peers = self.outgoing_peer_target.outgoing_peer_count();
         P2pHealth {
-            connected_peers: self.connection_tracker.connected_peer_count(),
+            connected_peers,
+            outgoing_peers,
+            incoming_peers: connected_peers.saturating_sub(outgoing_peers),
+            outgoing_target_dials_total: self.outgoing_peer_target.dials_attempted_total(),
             connections_total: self.connection_tracker.connections_total(),
             ping_failures_total: self.connection_tracker.ping_failures_total(),
             connections_closed_unresponsive_total: self
@@ -513,6 +525,53 @@ impl Node {
                     error!("Failed to redial {address}: {error}");
                     self.peer_reconnector.record_dial_failure(&address);
                 }
+            }
+        }
+    }
+
+    /// Dial one known peer while the node has fewer outgoing peers than
+    /// target_outgoing_peers. Called on the outgoing target timer; see
+    /// outgoing_peer_target for how the peer is chosen. The started dial's
+    /// ConnectionId is handed to the target so its outcome can be matched
+    /// back to it.
+    fn dial_toward_outgoing_target(&mut self) {
+        let network_info = self.swarm.network_info();
+        let counters = network_info.connection_counters();
+        let counts = OutgoingCounts {
+            pending: counters.num_pending_outgoing(),
+            established: counters.num_established_outgoing(),
+        };
+        let swarm = &self.swarm;
+        let Some(dial) = self
+            .outgoing_peer_target
+            .next_dial(counts, |peer_id| swarm.is_connected(peer_id))
+        else {
+            return;
+        };
+        let dial_opts = DialOpts::peer_id(dial.peer_id)
+            .addresses(vec![dial.address.clone()])
+            .build();
+        let connection_id = dial_opts.connection_id();
+        match self.swarm.dial(dial_opts) {
+            Ok(()) => {
+                debug!(
+                    "Dialing {} at {} toward the outgoing peer target",
+                    dial.peer_id, dial.address
+                );
+                self.outgoing_peer_target
+                    .record_dial_started(connection_id, dial);
+            }
+            // Another dial to the peer is in flight, or the connection limits
+            // are full: neither is the peer's fault.
+            Err(error @ (DialError::DialPeerConditionFalse(_) | DialError::Denied { .. })) => {
+                debug!("Did not dial {} at {}: {error}", dial.peer_id, dial.address);
+            }
+            Err(error) => {
+                debug!(
+                    "Failed to dial {} at {}: {error}",
+                    dial.peer_id, dial.address
+                );
+                self.outgoing_peer_target.record_dial_failure(&dial.peer_id);
             }
         }
     }
@@ -575,6 +634,11 @@ impl Node {
             } => {
                 self.peer_reconnector
                     .record_connection_established(connection_id);
+                self.outgoing_peer_target.record_connection_established(
+                    peer_id,
+                    connection_id,
+                    &endpoint,
+                );
 
                 match self
                     .connection_tracker
@@ -631,6 +695,8 @@ impl Node {
                 self.connection_tracker.clear_ping_failures(connection_id);
                 self.connection_tracker
                     .handle_closed(&peer_id, num_established);
+                self.outgoing_peer_target
+                    .record_connection_closed(connection_id);
                 if num_established > 0 {
                     info!(
                         "Closed connection {connection_id} to peer {peer_id}, {num_established} still open"
@@ -657,6 +723,8 @@ impl Node {
                     "Failed to connect to peer: {peer_id:?}, error: {error}, connection_id: {connection_id}"
                 );
                 self.peer_reconnector
+                    .record_connection_failure(connection_id);
+                self.outgoing_peer_target
                     .record_connection_failure(connection_id);
                 Ok(())
             }
@@ -695,6 +763,8 @@ impl Node {
                 );
                 self.connection_tracker
                     .record_identified(&peer_id, info.agent_version.clone());
+                self.outgoing_peer_target
+                    .learn_addresses(peer_id, &info.listen_addrs);
                 // Add the peer's routable advertised addresses to Kademlia
                 for addr in info.listen_addrs {
                     if address_filter::is_routable_multiaddr(&addr) {
@@ -815,6 +885,8 @@ impl Node {
                 debug!(
                     "Routing updated for peer: {peer}, is_new_peer: {is_new_peer}, addresses: {addresses:?}, bucket_range: {bucket_range:?}, old_peer: {old_peer:?}"
                 );
+                self.outgoing_peer_target
+                    .learn_addresses(peer, addresses.iter());
             }
             KademliaEvent::OutboundQueryProgressed { result, .. } => match result {
                 QueryResult::GetClosestPeers(Ok(ok)) => {
@@ -870,16 +942,21 @@ mod tests {
     use crate::node::request_response_handler::block_fetcher::create_block_fetcher_channel;
     use crate::node::response_worker::create_response_worker_channel;
     use crate::node::validation_worker::create_validation_channel;
+    use bitcoin::BlockHash;
+    use bitcoin::hashes::Hash;
     use bitcoindrpc::BitcoinRpcConfig;
     use futures::StreamExt;
-    use libp2p::core::Endpoint;
     use libp2p::core::transport::{DialOpts as TransportDialOpts, PortUse, Transport};
+    use libp2p::core::{ConnectedPoint, Endpoint};
+    use libp2p::identify;
+    use libp2p::identity::Keypair;
     use libp2p::ping::Failure;
     use libp2p::swarm::{ConnectionId, DialError, SwarmEvent};
     use libp2p::tcp::Config as TcpConfig;
     use libp2p::tcp::tokio::Transport as TcpTransport;
     use libp2p::{Multiaddr, PeerId, TransportError};
     use std::io;
+    use std::num::NonZeroU32;
     use std::sync::Arc;
     use std::time::{Duration, Instant};
     use tokio::time::advance;
@@ -911,6 +988,7 @@ mod tests {
             ephemeral_node_key: true,
             nostr_relays: vec![],
             nostr_announce: false,
+            target_outgoing_peers: 16,
         };
         network_config.dial_peers = vec![unreachable_peer];
         network_config.dial_timeout_secs = 2;
@@ -1040,6 +1118,7 @@ mod tests {
                 ephemeral_node_key: true,
                 nostr_relays: vec![],
                 nostr_announce: false,
+                target_outgoing_peers: 16,
             },
             bitcoinrpc: BitcoinRpcConfig {
                 url: "http://localhost:8332".to_string(),
@@ -1537,5 +1616,96 @@ mod tests {
         node.handle_swarm_event(connection_closed(peer, 2, 0))
             .unwrap();
         assert!(!node.request_response_handler.has_peer(&peer));
+    }
+
+    /// Below its outgoing target the node dials a peer that Identify reported
+    /// at a routable address. The swarm is never polled, so the dial stays
+    /// pending and no packet is sent.
+    #[tokio::test]
+    async fn test_outgoing_target_dials_a_peer_identify_reported() {
+        let mut node = build_test_node(build_test_config("/ip4/127.0.0.1/tcp/0", None));
+        let public_key = Keypair::generate_ed25519().public();
+        let peer_id = public_key.to_peer_id();
+        let info = identify::Info {
+            public_key,
+            protocol_version: "test".to_string(),
+            agent_version: "p2poolv2/test".to_string(),
+            listen_addrs: vec!["/ip4/1.2.3.4/tcp/6884".parse().unwrap()],
+            protocols: vec![],
+            observed_addr: "/ip4/127.0.0.1/tcp/1".parse().unwrap(),
+            signed_peer_record: None,
+        };
+        node.handle_identify_event(identify::Event::Received {
+            connection_id: ConnectionId::new_unchecked(1),
+            peer_id,
+            info,
+        });
+
+        node.dial_toward_outgoing_target();
+
+        let counters = node.swarm.network_info();
+        assert_eq!(counters.connection_counters().num_pending_outgoing(), 1);
+        assert_eq!(node.p2p_health().outgoing_target_dials_total, 1);
+    }
+
+    fn connection_established(
+        peer_id: PeerId,
+        connection: usize,
+        endpoint: ConnectedPoint,
+    ) -> SwarmEvent<P2PoolBehaviourEvent> {
+        SwarmEvent::ConnectionEstablished {
+            peer_id,
+            connection_id: ConnectionId::new_unchecked(connection),
+            endpoint,
+            num_established: NonZeroU32::new(1).unwrap(),
+            concurrent_dial_errors: None,
+            established_in: Duration::from_millis(10),
+        }
+    }
+
+    /// /metrics splits the connected peers into those this node dialed and
+    /// those that only dialed it.
+    #[tokio::test]
+    async fn test_p2p_health_splits_connected_peers_into_outgoing_and_incoming() {
+        let mut node = build_test_node(build_test_config("/ip4/127.0.0.1/tcp/0", None));
+        node.chain_store_handle
+            .expect_get_tip_height()
+            .returning(|| Ok(None));
+        node.chain_store_handle
+            .expect_get_chain_tip()
+            .returning(|| Ok(BlockHash::all_zeros()));
+        let outgoing = PeerId::random();
+        let incoming = PeerId::random();
+
+        node.handle_swarm_event(connection_established(
+            outgoing,
+            1,
+            ConnectedPoint::Dialer {
+                address: "/ip4/1.2.3.4/tcp/6884".parse().unwrap(),
+                role_override: Endpoint::Dialer,
+                port_use: PortUse::Reuse,
+            },
+        ))
+        .unwrap();
+        node.handle_swarm_event(connection_established(
+            incoming,
+            2,
+            ConnectedPoint::Listener {
+                local_addr: "/ip4/0.0.0.0/tcp/6884".parse().unwrap(),
+                send_back_addr: "/ip4/5.6.7.8/tcp/51234".parse().unwrap(),
+            },
+        ))
+        .unwrap();
+
+        let health = node.p2p_health();
+        assert_eq!(health.connected_peers, 2);
+        assert_eq!(health.outgoing_peers, 1);
+        assert_eq!(health.incoming_peers, 1);
+
+        node.handle_swarm_event(connection_closed(outgoing, 1, 0))
+            .unwrap();
+        let health = node.p2p_health();
+        assert_eq!(health.outgoing_peers, 0);
+        assert_eq!(health.incoming_peers, 1);
     }
 }

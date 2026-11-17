@@ -35,6 +35,7 @@ pub fn default_test_config() -> Config {
             ephemeral_node_key: true,
             nostr_relays: vec![],
             nostr_announce: false,
+            target_outgoing_peers: 16,
         },
         bitcoinrpc: BitcoinRpcConfig {
             url: "http://localhost:8332".to_string(),
