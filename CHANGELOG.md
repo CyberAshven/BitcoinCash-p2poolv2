@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+A node keeps at least 16 outgoing peers (`[network] target_outgoing_peers`),
+at most one per IPv4 /16 or IPv6 /32, with a 60-second backoff that doubles;
+the sample configs raise `max_established_incoming` from 50 to 128 (#122).
+
 Share-chain rule change on Bitcoin Cash, a flag day: P2Pool follows Bitcoin
 Cash's one-minute blocks (CHIP-2025-03) the way BCHN does (protocol
 segments `bch-prev-1off-ticks` and `mm2-roots-asert8-ticks`, store format

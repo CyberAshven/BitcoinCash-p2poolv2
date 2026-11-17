@@ -108,6 +108,36 @@ pub fn is_routable_multiaddr(address: &Multiaddr) -> bool {
     false
 }
 
+/// A network group as Bitcoin Cash Node draws one (`CNetAddr::GetGroup` in
+/// `src/netaddress.cpp`): the first 16 bits of an IPv4 address or the first
+/// 32 bits of an IPv6 address. Addresses in one group are cheap to get in
+/// bulk; many groups are not, so outgoing peers are spread over groups.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum NetworkGroup {
+    Ipv4([u8; 2]),
+    Ipv6([u16; 2]),
+}
+
+/// The network group of the globally routable IP address in `address`, or
+/// None when the address has no IP or its IP is not globally routable.
+pub(crate) fn network_group(address: &Multiaddr) -> Option<NetworkGroup> {
+    for protocol in address.iter() {
+        match protocol {
+            Protocol::Ip4(ip) => {
+                let octets = ip.octets();
+                return is_ipv4_global(&ip).then_some(NetworkGroup::Ipv4([octets[0], octets[1]]));
+            }
+            Protocol::Ip6(ip) => {
+                let segments = ip.segments();
+                return is_ipv6_global(&ip)
+                    .then_some(NetworkGroup::Ipv6([segments[0], segments[1]]));
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 /// Extracts the TCP port from a multiaddr string (e.g. "/ip4/0.0.0.0/tcp/6884").
 /// Returns None if the string is not a valid multiaddr, has no TCP component,
 /// or the port is 0 (ephemeral).
@@ -341,5 +371,38 @@ mod tests {
     fn test_build_external_address_rejects_loopback() {
         let observed: Multiaddr = "/ip4/127.0.0.1/tcp/54321".parse().unwrap();
         assert_eq!(build_external_address(&observed, 6884), None);
+    }
+
+    #[test]
+    fn test_network_group_of_ipv4_is_its_slash_16() {
+        let first: Multiaddr = "/ip4/8.8.4.4/tcp/6884".parse().unwrap();
+        let second: Multiaddr = "/ip4/8.8.200.1/tcp/6885".parse().unwrap();
+        let other: Multiaddr = "/ip4/8.9.4.4/tcp/6884".parse().unwrap();
+        assert_eq!(network_group(&first), Some(NetworkGroup::Ipv4([8, 8])));
+        assert_eq!(network_group(&first), network_group(&second));
+        assert_ne!(network_group(&first), network_group(&other));
+    }
+
+    #[test]
+    fn test_network_group_of_ipv6_is_its_slash_32() {
+        let first: Multiaddr = "/ip6/2001:4860:4860::8888/tcp/6884".parse().unwrap();
+        let second: Multiaddr = "/ip6/2001:4860:1::1/tcp/6884".parse().unwrap();
+        let other: Multiaddr = "/ip6/2001:4861::1/tcp/6884".parse().unwrap();
+        assert_eq!(
+            network_group(&first),
+            Some(NetworkGroup::Ipv6([0x2001, 0x4860]))
+        );
+        assert_eq!(network_group(&first), network_group(&second));
+        assert_ne!(network_group(&first), network_group(&other));
+    }
+
+    #[test]
+    fn test_network_group_is_none_for_unroutable_and_dns_addresses() {
+        let loopback: Multiaddr = "/ip4/127.0.0.1/tcp/6884".parse().unwrap();
+        let private: Multiaddr = "/ip4/192.168.1.1/tcp/6884".parse().unwrap();
+        let dns: Multiaddr = "/dns4/pool.example.com/tcp/6884".parse().unwrap();
+        assert_eq!(network_group(&loopback), None);
+        assert_eq!(network_group(&private), None);
+        assert_eq!(network_group(&dns), None);
     }
 }
