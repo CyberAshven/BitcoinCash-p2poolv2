@@ -17,6 +17,26 @@ fn a_14_day_cap_gives_the_node_s_depths() {
         242_534.0,
         "BCH_PRUNE_DEPTH, with WEAK_DEPTH, and the pruner's lag"
     );
+    assert_eq!(
+        kept_whole_weak_share_shares(14.0),
+        121_423.0,
+        "BCH_PAYOUT_DEPTH and the pruner's lag"
+    );
+}
+
+/// At 32 weak shares a share a node keeps them whole for one payout depth,
+/// 3.1 GB, and their summaries, at most 156 bytes each, for two, 1.2 GB:
+/// 4.3 GB, against 7.4 GB keeping both for two.
+#[test]
+fn whole_weak_shares_for_one_payout_depth_and_summaries_for_two() {
+    let pruned = kept_weak_share_bytes(32.0, 14.0, kept_whole_weak_share_shares(14.0));
+    let kept = kept_weak_share_bytes(32.0, 14.0, kept_body_shares(14.0));
+    assert_eq!(
+        pruned,
+        121_423.0 * 32.0 * 800.0 + 242_534.0 * (34.0 + 32.0 * 156.0)
+    );
+    assert_eq!((pruned / 1.0e8).round(), 43.0);
+    assert_eq!((kept / 1.0e8).round(), 74.0);
 }
 
 #[test]

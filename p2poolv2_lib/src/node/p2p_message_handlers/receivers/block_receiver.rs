@@ -391,6 +391,24 @@ impl BlockReceiver {
         }
     }
 
+    /// Whether a share at `known_height` sits at least one payout depth below
+    /// the candidate tip, below the zone where shares are fully validated:
+    /// the only place a body whose weak shares were pruned is stored. Those
+    /// bodies come from peers that pruned them one payout depth and an hour
+    /// below their confirmed tip, so a node whose headers are synced always
+    /// finds them below its zone; a node whose tip lags further drops them,
+    /// and the hash stays fetchable. False when the height or the tip is not
+    /// known.
+    fn below_payout_depth(&self, known_height: Option<u32>) -> bool {
+        let Some(height) = known_height else {
+            return false;
+        };
+        match self.chain_store_handle.get_candidate_tip_height() {
+            Ok(Some(tip_height)) => !self.depths.is_within_payout_depth(height, tip_height),
+            Ok(None) | Err(_) => false,
+        }
+    }
+
     /// Whether the block's parent and uncles have the data validation needs.
     ///
     /// Each must have its block body stored, not merely its header.
@@ -678,6 +696,13 @@ impl BlockReceiver {
         let prune_height = self.current_prune_height();
         if known_height.is_some_and(|height| height < prune_height) {
             debug!("Dropping block {block_hash}: below prune height {prune_height}");
+            self.remove_from_pending(&block_hash);
+            return Ok(());
+        }
+        if share_block.pruned_weak_shares.is_some() && !self.below_payout_depth(known_height) {
+            debug!(
+                "Dropping block {block_hash}: its weak shares were pruned, and within the payout depth a body is stored only with them whole"
+            );
             self.remove_from_pending(&block_hash);
             return Ok(());
         }

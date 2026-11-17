@@ -19,7 +19,7 @@ use crate::shares::merge_mining::MergeMiningCommitment;
 use crate::shares::share_commitment::ShareCommitment;
 use crate::shares::share_version::ShareVersion;
 use crate::shares::validation::MAX_UNCLES;
-use crate::shares::weak::{WEAK_CAP, WeakShare};
+use crate::shares::weak::{PrunedWeakShares, WEAK_CAP, WeakShare};
 use crate::sim_overrides;
 use bitcoin::consensus::encode::Error::ParseFailed;
 use bitcoin::secp256k1::Secp256k1;
@@ -696,6 +696,15 @@ pub struct ShareBlock {
     /// empty on Bitcoin.
     #[serde(default)]
     pub weak_shares: Vec<WeakShare>,
+    /// The carried weak shares after a node pruned them: their leaf root
+    /// and summary, which the header's weak root commits
+    /// (`shares::weak::PrunedWeakShares`). Set only on a body whose header
+    /// commits weak shares and whose `weak_shares` is empty: a body served or
+    /// read below one payout depth on a node that prunes them. Such a body
+    /// passes the body check by its weak root alone, and is checked fully
+    /// only with its weak shares whole.
+    #[serde(skip)]
+    pub pruned_weak_shares: Option<PrunedWeakShares>,
 }
 
 /// The bitcoin coinbase of a block written before `ShareBlock` carried one:
@@ -855,6 +864,7 @@ impl ShareBlock {
             template_merkle_branches: vec![],
             bitcoin_coinbase,
             weak_shares: Vec::new(),
+            pruned_weak_shares: None,
         })
     }
 }
@@ -886,10 +896,32 @@ impl Encodable for ShareBlock {
             for weak_share in &self.weak_shares {
                 len += weak_share.consensus_encode(w)?;
             }
+            // A count of zero under a header that commits weak shares is
+            // followed by one byte: 1 when their pruned form follows, their
+            // leaf root and summary, and 0 when the body leaves them out, as
+            // a share relayed with weak hashes does.
+            if self.weak_shares.is_empty() && self.header.weak_count > 0 {
+                match &self.pruned_weak_shares {
+                    Some(pruned_weak_shares) => {
+                        len += WEAK_SHARES_PRUNED.consensus_encode(w)?;
+                        len += pruned_weak_shares.consensus_encode(w)?;
+                    }
+                    None => len += WEAK_SHARES_LEFT_OUT.consensus_encode(w)?,
+                }
+            }
         }
         Ok(len)
     }
 }
+
+/// The byte after a zero weak share count, under a header that commits weak
+/// shares, of a body that leaves them out: a share relayed with weak hashes.
+const WEAK_SHARES_LEFT_OUT: u8 = 0;
+
+/// The byte after a zero weak share count, under a header that commits weak
+/// shares, of a body whose weak shares were pruned: their leaf root and
+/// summary follow (`PrunedWeakShares`).
+const WEAK_SHARES_PRUNED: u8 = 1;
 
 /// Decode ShareBlock using rust-bitcoin.
 ///
@@ -930,12 +962,23 @@ impl Decodable for ShareBlock {
         } else {
             Vec::new()
         };
+        let pruned_weak_shares =
+            if header.carries_band() && weak_shares.is_empty() && header.weak_count > 0 {
+                match u8::consensus_decode(r)? {
+                    WEAK_SHARES_LEFT_OUT => None,
+                    WEAK_SHARES_PRUNED => Some(PrunedWeakShares::consensus_decode(r)?),
+                    _ => return Err(ParseFailed("unknown form of left out weak shares")),
+                }
+            } else {
+                None
+            };
         Ok(ShareBlock {
             header,
             transactions,
             template_merkle_branches,
             bitcoin_coinbase,
             weak_shares,
+            pruned_weak_shares,
         })
     }
 }
@@ -1172,7 +1215,10 @@ mod tests {
         assert_eq!(decoded.header.weak_ratio, 256_000);
         assert_eq!(decoded.header.weak_count, 1);
         assert_eq!(decoded.header.weak_asking, 1);
-        assert_eq!(decoded.header.weak_root, weak_share.committed_hash());
+        assert_eq!(
+            decoded.header.weak_root,
+            crate::shares::weak::weak_root(std::slice::from_ref(&weak_share))
+        );
         assert_eq!(decoded.weak_shares, vec![weak_share]);
         CoinbaseProof::verify(&share.header, &share.template_merkle_branches).unwrap();
     }

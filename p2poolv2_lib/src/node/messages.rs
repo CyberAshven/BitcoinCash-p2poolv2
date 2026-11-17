@@ -521,7 +521,7 @@ impl Encodable for ShareWithWeakHashes {
 impl Decodable for ShareWithWeakHashes {
     fn consensus_decode<R: Read + ?Sized>(r: &mut R) -> Result<Self, encode::Error> {
         let share_block = ShareBlock::consensus_decode(r)?;
-        if !share_block.weak_shares.is_empty() {
+        if !share_block.weak_shares.is_empty() || share_block.pruned_weak_shares.is_some() {
             return Err(encode::Error::ParseFailed(
                 "A share with weak hashes carries weak shares in its body",
             ));

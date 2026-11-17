@@ -524,6 +524,20 @@ impl StoreHandle {
         reply_rx.await.map_err(|_| StoreError::ChannelClosed)?
     }
 
+    /// Delete the whole weak shares at heights `[from, to)` in one batch,
+    /// keeping their leaf root and summary. Returns how many blocks lost them.
+    pub async fn prune_weak_shares_chunk(&self, from: u32, to: u32) -> Result<usize, StoreError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.write_tx
+            .send(WriteCommand::PruneWeakSharesChunk {
+                from,
+                to,
+                reply: reply_tx,
+            })
+            .map_err(|_| StoreError::ChannelClosed)?;
+        reply_rx.await.map_err(|_| StoreError::ChannelClosed)?
+    }
+
     /// Add a PPLNS share for accounting.
     pub async fn add_pplns_share(&self, pplns_share: SimplePplnsShare) -> Result<(), StoreError> {
         let (reply_tx, reply_rx) = oneshot::channel();
@@ -629,6 +643,7 @@ mockall::mock! {
         pub async fn mark_payout_tree_executed(&self, coinbase_txid: Txid) -> Result<(), StoreError>;
         pub async fn record_unknown_payout_tree_tip(&self, coinbase_txid: Txid, bitcoin_tip: BlockHash) -> Result<bool, StoreError>;
         pub async fn prune_block_bodies_chunk(&self, from: u32, to: u32) -> Result<PruneStats, StoreError>;
+        pub async fn prune_weak_shares_chunk(&self, from: u32, to: u32) -> Result<usize, StoreError>;
 
         // Sync chain state updates
         pub fn set_genesis_blockhash(&self, hash: BlockHash);

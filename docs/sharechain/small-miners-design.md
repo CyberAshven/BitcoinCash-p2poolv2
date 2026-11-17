@@ -877,7 +877,7 @@ At the ceiling, against today's count:
 |---|---:|---:|
 | Weak shares a second | 3.5 | 35 |
 | Relay of weak shares, at 0.8 KB each | 2.8 KB/s | 28 KB/s |
-| Stored until the body is pruned (242,534 shares, 28 days) | 6.7 GB | 67 GB |
+| Stored: whole for 121,423 shares (14 days), their summary with the body for 242,534 (28 days) | 4.3 GB | 43 GB |
 | Weak pool, at most (4 x `WEAK_CAP` x `WEAK_DEPTH`) | 12,288 weak shares | 122,880 |
 
 Validation is the real ceiling, not bandwidth. A weak share costs a node
@@ -952,7 +952,7 @@ store format 10, because the header gains `weak_asking`.
 | 3 Weak shares | `weak-64-500-6`, then `weak2-64-500-6`, then `weak2-64-100-48-256`, then `weak3-64-100-48-256` | 5, then 6, then 7, then 9 | same flag day; old nodes cannot read the new header or the weak share message; the weak root's leaves then became whole encodings, a second flag day, and study #85's cut, depth and `R_MAX` a third |
 | 4 Payout levels | `levels-546x2`, then `levels-546x2-k1` | 4, then 8 | same flag day; old nodes cannot read the longer header |
 | 5 Share period | none; share version 2 | 3 | share-version vote; not planned (section 5) |
-| 6 Weak shares that follow the asks | `weak4-640-100-48-256-320-64-4096-64-32` | 10 | flag day: the header gains `weak_asking` and a new genesis |
+| 6 Weak shares that follow the asks | `weak4-640-100-48-256-320-64-4096-64-32`, then `-summary` appended | 10, then 11 | flag day: the header gains `weak_asking` and a new genesis; the weak root also commits the summary, so whole weak shares are pruned one payout depth below the tip |
 
 A part that changes what a stored share holds raises the store format when
 it merges, so the numbers follow the merge order: part 4 raised it to 4

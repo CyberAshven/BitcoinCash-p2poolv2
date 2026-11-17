@@ -663,11 +663,11 @@ fn test_share_with_weak_hashes_round_trips_and_lists_weak_shares_by_hash() {
         let decoded: Message = encode::deserialize(&bytes).unwrap();
         assert_eq!(decoded, message);
 
-        //* Besides the hashes, the message keeps the share's empty weak list
-        //* and an empty prefilled list (a byte each) and always writes the
-        //* header count, which a whole share without carried headers leaves
-        //* out (one more).
-        let overhead = if bch_headers.is_empty() { 3 } else { 2 };
+        //* Besides the hashes, the message keeps the share's empty weak list,
+        //* the byte saying its weak shares are left out and an empty prefilled
+        //* list (a byte each) and always writes the header count, which a
+        //* whole share without carried headers leaves out (one more).
+        let overhead = if bch_headers.is_empty() { 4 } else { 3 };
         let whole = Message::ShareBlock(share.clone(), bch_headers);
         let weak_bytes: usize = share.weak_shares.iter().map(WeakShare::encoded_size).sum();
         assert_eq!(

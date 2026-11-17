@@ -15,6 +15,9 @@ spendability, and deleting old block bodies.
   limit at `PAYOUT_DEPTH` below the confirmed tip ("Reorg Depth Limit"). The
   marker and the tighter limit landed on 2026-10-23, after share
   transactions (2026-10-22) made them necessary.
+- Bitcoin Cash, 2026-11-16: whole weak shares are pruned one payout depth
+  below the confirmed tip, their leaf root and summary kept with the body
+  ("Weak Shares").
 - Open: the reorg depth limit redoes its refusal on every announcement of a
   refused block (see "Reorg Depth Limit").
 
@@ -66,6 +69,7 @@ batch of 2026-10-24 (audit A12), Bitcoin Cash derives its own from its
 | `BCH_PRUNE_DEPTH` | 242,174 | 2 x `BCH_PAYOUT_DEPTH` + `WEAK_DEPTH` (48): the deepest share a payout for a weak share carried at the bottom of the zone reads |
 | `PRUNE_INTERVAL` | 360 | unchanged |
 | Block bodies kept below the confirmed tip | 242,534 | `BCH_PRUNE_DEPTH + PRUNE_INTERVAL` |
+| Whole weak shares kept below the confirmed tip | 121,423 | `BCH_PAYOUT_DEPTH + PRUNE_INTERVAL`; their summary stays with the body ("Weak Shares") |
 
 - `BCH_PAYOUT_DEPTH` is a share-chain rule: a Bitcoin Cash share coinbase
   output can be spent from depth 100 and expires 121,063 shares below the
@@ -367,7 +371,8 @@ Relevant code:
 | `FoundBlocks` | kept forever | Never pruned (`metrics.md`) |
 | `Uncles` | kept | Small, and derived from headers |
 | `BlockTxids`, `BitcoinTxids`, `BitcoinCoinbase` | deleted below the prune target | Body data. Nothing writes `BitcoinTxids` yet; its key is deleted anyway so a future writer cannot leak data |
-| `WeakShares`, `WeakSummaries` | deleted below the prune target | Body data: the weak shares a Bitcoin Cash share carries and the summary of their hashes and credit the PPLNS window reads. A pruned block is below every window, so nothing reads its summary again |
+| `WeakShares` | deleted below the weak share prune target, one payout depth and one `PRUNE_INTERVAL` below the confirmed tip, unless `store.keep_whole_weak_shares`; then below the prune target | The weak shares a Bitcoin Cash share carries, whole. Read only to check a share inside the payout depth, to serve them to a peer whose zone holds that share, and to show them ("Weak Shares") |
+| `WeakSummaries` | deleted below the prune target | Body data: the leaf root and summary of a share's weak shares (`PrunedWeakShares`), their hashes and credit, which the PPLNS window and the carried-once rule read. Payouts read them down to the prune height, two payout depths and `WEAK_DEPTH`; a pruned block is below every window, so nothing reads its summary again |
 | `Tx`, `Inputs`, `Outputs`, `TxidsBlocks`, `SpendsIndex` | deleted below the prune target, unless a kept block still includes the txid | Body data that can be shared between blocks |
 | candidate `BlockHeight` entries | deleted at every height below the prune target | Far below the confirmed tip they duplicate the confirmed entries |
 
@@ -405,6 +410,8 @@ and the reorg floor's from the confirmed tip:
 prune_height_for_tip(candidate tip) = tip - PRUNE_DEPTH                   // the gates
 prune_target_for_tip(confirmed tip) = tip - PRUNE_DEPTH - PRUNE_INTERVAL  // deletion
 reorg_floor_for_tip(confirmed tip)  = tip - MAX_REORG_DEPTH               // reorg limit
+weak_share_prune_target_for_tip(confirmed tip)
+                                    = tip - PAYOUT_DEPTH - PRUNE_INTERVAL // whole weak shares
 ```
 
 - **The gates use `prune_height`.** `organise_block`,
@@ -540,7 +547,8 @@ At 6 hours a run deletes about 2,160 heights, and the node holds between
   as success without queuing validation.
 - **Block requests.** A pruned body goes through the existing
   `get_share -> None` path, which replies `NotFound` without penalising the
-  requester.
+  requester. A body whose whole weak shares were pruned is served with
+  their leaf root and summary in their place ("Weak Shares").
 - **Headers.** `getheaders` serves every header from genesis with its
   stored merkle branch, pruned heights included.
 - **API.** `/share` with `full=true` returns the header with
@@ -557,6 +565,79 @@ At 6 hours a run deletes about 2,160 heights, and the node holds between
   `share-processing-pipeline.md`, "BlockReceiver ancestry gate"). An entry
   waiting on a parent below `prune_height` is released by the ancestry gate,
   which exempts that parent, or expires.
+
+### Weak Shares
+
+Bitcoin Cash only. A share body carries its weak shares whole, about 0.8 KB
+each, and the store keeps beside them their leaf root and summary
+(`PrunedWeakShares` in `shares/weak.rs`, the `WeakSummaries` column
+family): the proof-of-work hashes the carried-once rule reads and the
+credit groups the PPLNS window reads, at most 156 bytes a weak share. Whole
+weak shares are deleted at the weak share prune target, one payout depth
+and one `PRUNE_INTERVAL` below the confirmed tip; the leaf root and summary
+go with the body at the prune target.
+
+**What reads them**, and what each needs:
+
+| Reader | Reads | Deepest it reads |
+|---|---|---|
+| PPLNS window: payouts and the coinbase check (`weak_credit.rs`) | summaries | One payout depth below the share paid for. The deepest share a node fully checks, at the bottom of a syncing node's zone or on a branch forking at the reorg floor, sits one payout depth below the tip, so two payout depths; a weak share it carries is paid from up to `WEAK_DEPTH` lower, the prune height |
+| Carried-once rule (`weak_shares_carried_by_ancestors`), weak pool (`carried_by_chain`) | summary proof-of-work hashes | `WEAK_DEPTH - 1` shares |
+| Body check (`check_weak_shares_match_header`) | the weak shares the body carries, or their leaf root and summary | every body received |
+| Full validation (`validate_carried_weak_headers`, `validate_carried_weak_coinbases`) | whole weak shares | a share within the payout depth of the candidate tip, or on a branch forking at most `MAX_REORG_DEPTH` below the confirmed tip |
+| `getdata` (sync and fetch) | whole weak shares, or their leaf root and summary | every body down to the requester's prune height |
+| `GetCarriedWeakShares` | whole weak shares | shares just relayed |
+| Validation by hash from the store (`validation_worker`) | the stored body | a block not yet `BlockValid` |
+| API `/share`, the dashboard and web share pages, `db_query` | whole weak shares, else the summary | any |
+
+**The bound is in shares.** The weak share prune target is
+`BCH_PAYOUT_DEPTH + PRUNE_INTERVAL` below the confirmed tip:
+`BCH_COINBASE_MATURITY + PPLNS_WINDOW_SHARES + MAX_UNCLES_DEPTH`, plus the
+pruner's lag. A window is sized by work, the paying header's difficulty
+times three blocks, but never past `PPLNS_WINDOW_SHARES` shares; a pool
+that is small, a difficulty that rises, or a paying header claiming more
+difficulty than Bitcoin Cash requires only lengthens it to that cap. No
+difficulty, time span or day count moves the bound: 121,423 shares is 14
+days at 10-second shares and 1.4 days at 1-second shares, and the window's
+cap is the same 120,960 shares in both.
+
+**Why the summary is committed.** A syncing node fetches bodies down to its
+prune height, two payout depths and `WEAK_DEPTH` below the tip, and pays
+from summaries down there. Under `weak4` alone a summary could be checked only by the whole weak
+shares it came from, so every node would have had to keep them two payout
+depths. Since `-summary` (`BCH_WEAK_SHARE_RULE_TAG`) the weak root is
+`SHA-256d(leaf root || SHA-256d(summary))`, so a body served with the leaf
+root and summary in place of its weak shares is checked against the
+header like any other body part, and a summary altered by the serving peer
+is a bad copy.
+
+**Serving and receiving.** `get_share` returns a body whose whole weak
+shares were pruned with `pruned_weak_shares` set, and `getdata` sends it as
+is: a zero weak share count, then a form byte and the leaf root and
+summary. The receiver checks it (`check_pruned_weak_shares_match_header`)
+and stores it only for a share at least one payout depth below its
+candidate tip (`BlockReceiver::below_payout_depth`). A serving node prunes
+an hour below its own payout depth, so a node whose headers are synced
+always finds such a body below its zone; one whose tip lags further drops
+it and the hash stays fetchable. Full validation of a pruned body ends
+without a verdict (`FailureKind::Unresolvable`), never with a root mismatch:
+it happens only after the candidate tip fell back across the payout depth.
+
+**Writer.** A whole body stored below the weak share prune target keeps
+only its leaf root and summary, since the pruner has passed it.
+
+**Pruner.** `prune_weak_shares_if_due` runs after `prune_block_bodies_if_due`
+in the same background task, gated the same way, one writer command
+(`PruneWeakSharesChunk`) per `PRUNE_INTERVAL` heights, deleting only keys
+present. Its start is held in memory; after a restart it begins at the body
+prune target, below which no body is left.
+
+**Setting.** `store.keep_whole_weak_shares = true`, for an explorer or an
+archive, keeps them whole until the body is pruned. It keeps what it
+receives: an archive that syncs late gets the weak shares of shares more
+than one payout depth deep whole only from a peer that still holds them,
+and otherwise their leaf root and summary. Every node, pruned or not,
+serves every body a syncing peer asks for.
 
 ### Reorg Depth Limit
 
@@ -650,6 +731,14 @@ disconnecting a peer whose chain is refused is left for later.
   refused, exactly that deep followed, the old prune-target margin now
   refused, the floor following the confirmed tip), and `prune_blocks.rs`
   tests of `reorg_floor_for_tip`.
+- Weak shares (`p2poolv2_tests/src/weak_share_pruning_test.rs`): a pruned
+  node serves the leaf root and summary and a syncing node checks and
+  stores them; a tampered summary is a bad copy; whole weak shares go below
+  the target and not one share sooner; a restart after pruning; a window at
+  its share cap at the bottom of the zone pays from kept summaries; the
+  deepest reorg reads summaries just above the body prune target; a paying
+  header claiming more difficulty is still capped. `prune_blocks.rs` checks
+  the bound in shares at the production depths and in every build.
 - Missing input: `share_store.rs`, `transaction_store.rs` (the marker, its
   encoding, propagation, `UnknownCoinbaseRoot`, the confirmation re-check of
   unheld sources) and `p2poolv2_tests/src/missing_input_test.rs` (cases (a)

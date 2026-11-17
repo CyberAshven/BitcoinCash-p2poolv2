@@ -35,6 +35,13 @@ dial_timeout_secs = 30
 [store]
 path = "./store.db"
 pplns_ttl_days = 7
+# Keep the whole weak shares a Bitcoin Cash share carries until its body is
+# pruned (242,534 shares), for an explorer or an archive.
+# By default they are pruned one payout depth (121,423 shares) below the tip
+# and only their summary, which the payouts read, stays with the body. Every
+# node serves every body a syncing peer asks for either way. A node that
+# syncs late keeps whole only the weak shares a peer still holds whole.
+# keep_whole_weak_shares = false
 
 [stratum]
 # Mine Bitcoin Cash: BCHN templates, CashAddr payouts, the Bitcoin Cash

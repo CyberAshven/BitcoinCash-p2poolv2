@@ -1152,6 +1152,7 @@ mod tests {
             template_merkle_branches: vec![],
             bitcoin_coinbase: coinbase,
             weak_shares: Vec::new(),
+            pruned_weak_shares: None,
         }
     }
 

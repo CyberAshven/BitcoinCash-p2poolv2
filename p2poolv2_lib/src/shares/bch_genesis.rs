@@ -113,6 +113,7 @@ pub fn build(network: BchShareNetwork) -> Result<ShareBlock, Box<dyn Error + Sen
         template_merkle_branches: vec![],
         bitcoin_coinbase,
         weak_shares: Vec::new(),
+        pruned_weak_shares: None,
     })
 }
 
