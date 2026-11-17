@@ -543,7 +543,9 @@ mod tests {
 
         assert_ne!(current, before, "weak shares by hash change the messages");
         assert!(
-            current.ends_with("/weak4-640-100-48-256-320-64-4096-64-32-summary/weak-by-hash/without-payouts/1.0.0"),
+            current.ends_with(
+                "/weak4-640-100-48-256-320-64-4096-64-32-summary/weak-by-hash/without-payouts/1.0.0"
+            ),
             "{current}"
         );
         assert!(
@@ -557,11 +559,11 @@ mod tests {
         );
     }
 
-    /// From 2026-11-16 a new share is relayed without its coinbase's outputs
-    /// (`ShareWithoutPayouts`). A node on `weak-by-hash` alone derived the
-    /// string without `/without-payouts`: it cannot read the new share
-    /// message, and a node after it cannot read the one it sends, so the two
-    /// fail the handshake rather than drop each other's shares as malformed.
+    /// From 2026-11-16 a new share with large coinbase outputs is relayed
+    /// without them (`ShareWithoutPayouts`). A node on `weak-by-hash` alone
+    /// derived the string without `/without-payouts`: it cannot read the new
+    /// share message, so the two fail the handshake rather than drop large
+    /// shares as malformed.
     #[test]
     fn test_bitcoin_cash_protocol_string_carries_the_without_payouts_message() {
         let genesis_hash = bch_genesis::build(BchShareNetwork::Chipnet)
@@ -572,7 +574,7 @@ mod tests {
 
         assert_ne!(current, weak_by_hash_only);
         assert!(
-            weak_by_hash_only.ends_with("/weak3-64-100-48-256/weak-by-hash/1.0.0"),
+            weak_by_hash_only.ends_with("/weak-by-hash/1.0.0"),
             "{weak_by_hash_only}"
         );
         let kad = kad_protocol_string(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash);
