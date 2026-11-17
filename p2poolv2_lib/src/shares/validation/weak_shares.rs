@@ -47,8 +47,8 @@ use crate::shares::share_block::{ShareBlock, ShareHeader, is_terminal_blockhash}
 use crate::shares::share_commitment::ShareCommitment;
 use crate::shares::share_version::check_share_version_alone;
 use crate::shares::weak::{
-    WEAK_BYTES, WEAK_CAP, WEAK_DEPTH, WeakShare, parent_weak_target, weak_cap_for_asking,
-    weak_count_allowed, weak_root, weak_share_asks,
+    PrunedWeakShares, WEAK_BYTES, WEAK_CAP, WEAK_DEPTH, WeakShare, parent_weak_target,
+    weak_cap_for_asking, weak_count_allowed, weak_root, weak_share_asks,
 };
 use crate::sim_overrides;
 use crate::store::writer::StoreError;
@@ -234,9 +234,11 @@ impl WeakPayoutCache {
 }
 
 /// The body check of a share's weak shares, against its header alone: as
-/// many as `weak_count`, no proof-of-work hash twice, and the merkle root of
-/// their whole encodings (`weak_root`) the header's `weak_root`. A failure is
-/// a bad copy of the share, as for its other body parts.
+/// many as `weak_count`, no proof-of-work hash twice, and their weak root
+/// (`weak_root`: their leaf root and their summary) the header's
+/// `weak_root`. A body whose weak shares were pruned is checked by its leaf
+/// root and summary instead ([`check_pruned_weak_shares_match_header`]). A
+/// failure is a bad copy of the share, as for its other body parts.
 ///
 /// The root binds every field of every carried weak share, so a copy that
 /// alters any of them fails here, before it is stored, and is fetched again.
@@ -252,6 +254,14 @@ impl WeakPayoutCache {
 /// so two encodings of one proof of work are a repeat too.
 pub(crate) fn check_weak_shares_match_header(share: &ShareBlock) -> Result<(), ValidationError> {
     let header = &share.header;
+    if let Some(pruned_weak_shares) = &share.pruned_weak_shares {
+        if !share.weak_shares.is_empty() {
+            return Err(ValidationError::consensus(
+                "Share carries weak shares whole and pruned",
+            ));
+        }
+        return check_pruned_weak_shares_match_header(header, pruned_weak_shares);
+    }
     if share.weak_shares.len() != usize::from(header.weak_count) {
         return Err(ValidationError::consensus(format!(
             "Share carries {} weak shares, its header commits {}",
@@ -274,6 +284,59 @@ pub(crate) fn check_weak_shares_match_header(share: &ShareBlock) -> Result<(), V
     if root != header.weak_root {
         return Err(ValidationError::consensus(format!(
             "Carried weak shares have root {root}, the header commits {}",
+            header.weak_root
+        )));
+    }
+    Ok(())
+}
+
+/// The body check of a share served with its weak shares pruned: their
+/// summary holds `weak_count` proof-of-work hashes, none twice, in credit
+/// groups that count as many, and their leaf root and summary give the
+/// header's `weak_root` (`PrunedWeakShares::weak_root`). A failure is a bad
+/// copy, as for a whole body.
+///
+/// The root fixes the summary the miner committed, which is all a share
+/// below the payout depth is read for: the payouts of shares above it and
+/// the carried-once rule. Its weak shares themselves are checked only inside
+/// the payout depth, where a body without them is never used
+/// ([`DefaultShareValidator::validate_share_block`]).
+fn check_pruned_weak_shares_match_header(
+    header: &ShareHeader,
+    pruned_weak_shares: &PrunedWeakShares,
+) -> Result<(), ValidationError> {
+    let summary = &pruned_weak_shares.summary;
+    let committed = usize::from(header.weak_count);
+    if committed == 0 || summary.pow_hashes.len() != committed {
+        return Err(ValidationError::consensus(format!(
+            "Pruned weak shares sum up {} weak shares, the header commits {committed}",
+            summary.pow_hashes.len()
+        )));
+    }
+    let grouped: u64 = summary
+        .groups
+        .iter()
+        .map(|group| u64::from(group.count))
+        .sum();
+    if grouped != committed as u64 {
+        return Err(ValidationError::consensus(format!(
+            "Pruned weak shares group {grouped} weak shares, the header commits {committed}"
+        )));
+    }
+    let mut seen = HashSet::with_capacity(committed);
+    if let Some(repeated) = summary
+        .pow_hashes
+        .iter()
+        .find(|pow_hash| !seen.insert(**pow_hash))
+    {
+        return Err(ValidationError::consensus(format!(
+            "Weak share {repeated} is summed up more than once"
+        )));
+    }
+    let root = pruned_weak_shares.weak_root();
+    if root != header.weak_root {
+        return Err(ValidationError::consensus(format!(
+            "Pruned weak shares have root {root}, the header commits {}",
             header.weak_root
         )));
     }

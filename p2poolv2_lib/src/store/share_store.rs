@@ -7,7 +7,7 @@ use super::{ColumnFamily, Store, writer::StoreError};
 use crate::shares::share_block::{
     MerkleBranches, ShareBlock, ShareHeader, ShareTransaction, Txids, is_terminal_blockhash,
 };
-use crate::shares::weak::{StoredWeakShares, WeakShare, WeakSummary};
+use crate::shares::weak::{PrunedWeakShares, StoredWeakShares, WeakShare, WeakSummary};
 use crate::store::block_tx_metadata::ChainMembership;
 use crate::store::block_tx_metadata::Status::{BlockValid, HeaderValid, Invalid, Pending};
 use crate::store::transaction_store::{BLOCK_TXIDS_SUFFIX, txids_key};
@@ -76,7 +76,7 @@ impl Store {
 
         self.add_bitcoin_coinbase(&blockhash, &share.bitcoin_coinbase, batch)?;
 
-        self.add_weak_shares(&blockhash, &share.weak_shares, batch)?;
+        self.add_weak_shares(&blockhash, share, block_height, batch)?;
 
         // Update block index for parent
         self.update_block_index(&share.header.prev_share_blockhash, &blockhash, batch)?;
@@ -186,35 +186,50 @@ impl Store {
         Ok(())
     }
 
-    /// Store the weak shares a share block carries (`shares::weak`), and the
-    /// summary the PPLNS window and the carried-once rule read instead of
-    /// them: their proof-of-work hashes and credit groups. Nothing is written
+    /// Store the weak shares a share block carries (`shares::weak`), and
+    /// beside them their pruned form (`PrunedWeakShares`): their leaf root and
+    /// the summary the PPLNS window and the carried-once rule read instead of
+    /// them, their proof-of-work hashes and credit groups. Nothing is written
     /// for a share carrying none.
+    ///
+    /// A body served with its weak shares pruned stores its pruned form
+    /// alone. So does a whole body at `block_height` below the weak share
+    /// prune target (`Store::weak_share_prune_target`), which the pruner has
+    /// already passed.
     fn add_weak_shares(
         &self,
         blockhash: &BlockHash,
-        weak_shares: &[WeakShare],
+        share: &ShareBlock,
+        block_height: u32,
         batch: &mut rocksdb::WriteBatch,
     ) -> Result<(), StoreError> {
-        if weak_shares.is_empty() {
-            return Ok(());
-        }
+        let pruned_weak_shares = match &share.pruned_weak_shares {
+            Some(pruned_weak_shares) if share.weak_shares.is_empty() => pruned_weak_shares.clone(),
+            _ if share.weak_shares.is_empty() => return Ok(()),
+            _ => PrunedWeakShares::of(&share.weak_shares),
+        };
         let key = consensus::serialize(blockhash);
-        let weak_shares_cf = self.db.cf_handle(&ColumnFamily::WeakShares).unwrap();
-        let mut stored = Vec::new();
-        StoredWeakShares(weak_shares.to_vec()).consensus_encode(&mut stored)?;
-        batch.put_cf::<&[u8], Vec<u8>>(&weak_shares_cf, &key, stored);
+        let keeps_whole = self
+            .weak_share_prune_target()?
+            .is_none_or(|target| block_height >= target);
+        if !share.weak_shares.is_empty() && keeps_whole {
+            let weak_shares_cf = self.db.cf_handle(&ColumnFamily::WeakShares).unwrap();
+            let mut stored = Vec::new();
+            StoredWeakShares(share.weak_shares.clone()).consensus_encode(&mut stored)?;
+            batch.put_cf::<&[u8], Vec<u8>>(&weak_shares_cf, &key, stored);
+        }
         let summaries_cf = self.db.cf_handle(&ColumnFamily::WeakSummaries).unwrap();
         batch.put_cf::<&[u8], Vec<u8>>(
             &summaries_cf,
             &key,
-            consensus::serialize(&WeakSummary::of(weak_shares)),
+            consensus::serialize(&pruned_weak_shares),
         );
         Ok(())
     }
 
-    /// The weak shares a stored share block carries, empty for none or for a
-    /// share held without its body.
+    /// The weak shares a stored share block carries, empty for none, for a
+    /// share held without its body and for one whose weak shares were pruned
+    /// (`get_pruned_weak_shares` has those).
     pub fn get_weak_shares(&self, blockhash: &BlockHash) -> Result<Vec<WeakShare>, StoreError> {
         let column_family = self.db.cf_handle(&ColumnFamily::WeakShares).unwrap();
         let key = consensus::serialize(blockhash);
@@ -225,8 +240,26 @@ impl Store {
         }
     }
 
+    /// The pruned form of the weak shares a stored share block carries,
+    /// their leaf root and summary, kept until its body is pruned. `None`
+    /// for a share carrying none or held without its body.
+    pub fn get_pruned_weak_shares(
+        &self,
+        blockhash: &BlockHash,
+    ) -> Result<Option<PrunedWeakShares>, StoreError> {
+        let column_family = self.db.cf_handle(&ColumnFamily::WeakSummaries).unwrap();
+        let key = consensus::serialize(blockhash);
+        match self.db.get_cf::<&[u8]>(&column_family, &key) {
+            Ok(Some(data)) => Ok(Some(encode::deserialize::<PrunedWeakShares>(&data)?)),
+            Ok(None) => Ok(None),
+            Err(error) => Err(StoreError::Database(error.to_string())),
+        }
+    }
+
     /// The weak share summaries of the given shares, keyed by share; a share
-    /// carrying no weak shares, or held without its body, has none.
+    /// carrying no weak shares, or held without its body, has none. A share
+    /// whose whole weak shares were pruned keeps its summary until its body
+    /// is pruned.
     pub fn get_weak_summaries(
         &self,
         blockhashes: &[BlockHash],
@@ -239,7 +272,10 @@ impl Store {
         let mut summaries = HashMap::with_capacity(blockhashes.len());
         for (blockhash, result) in blockhashes.iter().zip(self.db.multi_get_cf(keys)) {
             if let Some(data) = result? {
-                summaries.insert(*blockhash, encode::deserialize::<WeakSummary>(&data)?);
+                summaries.insert(
+                    *blockhash,
+                    encode::deserialize::<PrunedWeakShares>(&data)?.summary,
+                );
             }
         }
         Ok(summaries)
@@ -347,6 +383,11 @@ impl Store {
     ///
     /// Returns None if the header, txids or bitcoin coinbase are missing,
     /// or any transaction cannot be reconstructed.
+    ///
+    /// A share whose whole weak shares were pruned is returned with their
+    /// pruned form in their place (`ShareBlock::pruned_weak_shares`), which is
+    /// what it is served with; None if its header commits weak shares and
+    /// neither form is stored.
     pub fn get_share(&self, blockhash: &BlockHash) -> Option<ShareBlock> {
         let header = match self.get_share_header(blockhash) {
             Ok(Some(header)) => header,
@@ -364,12 +405,18 @@ impl Store {
         let template_merkle_branches = self.get_template_merkle_branches(blockhash).ok()?;
         let bitcoin_coinbase = self.get_bitcoin_coinbase(blockhash).ok()??;
         let weak_shares = self.get_weak_shares(blockhash).ok()?;
+        let pruned_weak_shares = if weak_shares.is_empty() && header.weak_count > 0 {
+            Some(self.get_pruned_weak_shares(blockhash).ok()??)
+        } else {
+            None
+        };
         Some(ShareBlock {
             header,
             transactions,
             template_merkle_branches,
             bitcoin_coinbase,
             weak_shares,
+            pruned_weak_shares,
         })
     }
 

@@ -87,6 +87,11 @@ pub struct SwarmSettings {
     /// target (`[sim] weak_asks`), in node order, comma separated `0` or `1`,
     /// such as `1,0,0`. A node past the list does not ask.
     pub weak_asks: Vec<bool>,
+    /// `KEEP_WHOLE_WEAK_SHARES`: whether each node keeps whole weak shares
+    /// until their share's body is pruned (`[store] keep_whole_weak_shares`),
+    /// in node order, comma separated `0` or `1`. A node past the list prunes
+    /// them one payout depth below its tip.
+    pub keep_whole_weak_shares: Vec<bool>,
     /// `VIRTUAL_MINERS`: miners each node models (`[sim] virtual_miners`), so
     /// a small swarm has many payees.
     pub virtual_miners: Option<u32>,
@@ -136,6 +141,18 @@ fn parse_one_payout_level(value: &str, token: &str) -> ToolResult<u8> {
 /// The nodes of a `WEAK_ASKS` value that ask: comma-separated `0` or `1`,
 /// empty for none.
 pub fn parse_weak_asks(value: &str) -> ToolResult<Vec<bool>> {
+    parse_node_flags("WEAK_ASKS", value)
+}
+
+/// The nodes of a `KEEP_WHOLE_WEAK_SHARES` value that keep whole weak shares
+/// to the body prune depth: comma-separated `0` or `1`, empty for none.
+pub fn parse_keep_whole_weak_shares(value: &str) -> ToolResult<Vec<bool>> {
+    parse_node_flags("KEEP_WHOLE_WEAK_SHARES", value)
+}
+
+/// A per-node flag list in the environment variable `variable`:
+/// comma-separated `0` or `1`, in node order, empty for none.
+fn parse_node_flags(variable: &str, value: &str) -> ToolResult<Vec<bool>> {
     if value.trim().is_empty() {
         return Ok(Vec::new());
     }
@@ -145,7 +162,7 @@ pub fn parse_weak_asks(value: &str) -> ToolResult<Vec<bool>> {
             "0" => Ok(false),
             "1" => Ok(true),
             other => Err(ToolError::message(format!(
-                "WEAK_ASKS={value:?}: {other:?} is not 0 or 1"
+                "{variable}={value:?}: {other:?} is not 0 or 1"
             ))),
         })
         .collect()
@@ -185,6 +202,10 @@ impl SwarmSettings {
             payout_levels: parse_payout_levels(&env_vars::string("PAYOUT_LEVELS", ""))?,
             weak_shares: env_vars::string("WEAK_SHARES", "0") == "1",
             weak_asks: parse_weak_asks(&env_vars::string("WEAK_ASKS", ""))?,
+            keep_whole_weak_shares: parse_keep_whole_weak_shares(&env_vars::string(
+                "KEEP_WHOLE_WEAK_SHARES",
+                "",
+            ))?,
             virtual_miners: env_vars::optional("VIRTUAL_MINERS")?,
             merge_tokens: env_vars::optional_string("MERGE_TOKENS"),
             log_level: env_vars::string("LOG_LEVEL", "debug"),
@@ -327,7 +348,7 @@ dial_timeout_secs = 30
 [store]
 path = "{store}"
 pplns_ttl_days = 7
-
+{store_options}
 [stratum]
 wait_for_chain_sync = false
 hostname = "127.0.0.1"
@@ -397,6 +418,16 @@ ideal_block_time_secs = {block_time}
             .map(|path| format!("merge_mining_tokens = \"{}\"\n", toml_basic_string(path)))
             .unwrap_or_default(),
         log_level = toml_basic_string(&settings.log_level),
+        store_options = if settings
+            .keep_whole_weak_shares
+            .get(index)
+            .copied()
+            .unwrap_or(false)
+        {
+            "keep_whole_weak_shares = true\n"
+        } else {
+            ""
+        },
         sim_options = sim_options(settings, index),
     );
     config

@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Whole weak shares are pruned one payout depth below the tip (#129, on #118's
+flag day): protocol segment `weak4-640-100-48-256-320-64-4096-64-32-summary`,
+store format 11. The weak root commits the weak shares' summary, so a deeper
+body is served with the summary and checked against the header; a node keeps
+4.3 GB of weak shares instead of 7.4 at 32 a share.
+`store.keep_whole_weak_shares = true` keeps them whole, for an archive.
+
+A syncing Bitcoin Cash node no longer marks an honest share invalid over a
+weak share paid from shares it never fetched: the body prune depth adds
+`WEAK_DEPTH` (242,174 shares, 414 in the sim). No share-chain rule change.
+
 Weak shares follow the asks (#118, issue #79 part 6), a flag day: protocol
 segment `weak4-640-100-48-256-320-64-4096-64-32`, store format 10, new
 genesis shares. A share header counts the weak shares it carries that ask

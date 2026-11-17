@@ -410,7 +410,10 @@ async fn jobs_commit_to_the_weak_shares_the_template_carries() {
     assert_eq!(minimum_commitment.weak_ratio, 256_000);
     assert_eq!(minimum_commitment.weak_count, 1);
     assert_eq!(minimum_commitment.weak_asking, 1);
-    assert_eq!(minimum_commitment.weak_root, weak_share.committed_hash());
+    assert_eq!(
+        minimum_commitment.weak_root,
+        weak_root(std::slice::from_ref(&weak_share))
+    );
     assert_eq!(minimum.weak_shares.as_ref(), &[weak_share]);
     assert!(minimum_coinbase2.contains(&hex::encode(minimum_commitment.hash().as_byte_array())));
     let heavier_commitment = tracker

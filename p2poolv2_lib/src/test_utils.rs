@@ -2473,6 +2473,7 @@ pub fn build_block_from_work_components(path: &str, nsecs: u64) -> ShareBlock {
         template_merkle_branches,
         bitcoin_coinbase,
         weak_shares: Vec::new(),
+        pruned_weak_shares: None,
     }
 }
 
@@ -2813,6 +2814,7 @@ pub fn empty_share_block_from_header(header: ShareHeader) -> ShareBlock {
         template_merkle_branches: vec![],
         bitcoin_coinbase: empty_bitcoin_coinbase(),
         weak_shares: Vec::new(),
+        pruned_weak_shares: None,
     }
 }
 
@@ -2827,6 +2829,7 @@ pub fn valid_share_block_from_fixture() -> ShareBlock {
         template_merkle_branches: vec![],
         bitcoin_coinbase: empty_bitcoin_coinbase(),
         weak_shares: Vec::new(),
+        pruned_weak_shares: None,
     }
 }
 
@@ -2996,6 +2999,7 @@ fn test_share_block(
         template_merkle_branches: vec![],
         bitcoin_coinbase,
         weak_shares: weak.weak_shares,
+        pruned_weak_shares: None,
     }
 }
 

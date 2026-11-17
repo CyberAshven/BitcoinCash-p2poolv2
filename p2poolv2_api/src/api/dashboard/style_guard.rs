@@ -543,6 +543,7 @@ fn share_output(uncles: Vec<String>) -> ShareLookupOutput {
         weak_ratio: 1024,
         weak_root: "00".repeat(32),
         weak_shares: Vec::new(),
+        weak_summary: None,
     }
 }
 

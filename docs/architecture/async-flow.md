@@ -203,7 +203,7 @@ because they involve compaction-visible mutations and batch commits.
 These are planning estimates, not disk or cache measurements. MB and GB
 use decimal bytes. The rate assumption is one stored share per 10 seconds.
 The BCH payout window is capped at 120,960 shares, about two weeks. Body
-retention is longer: `BCH_PRUNE_DEPTH` is 242,126 shares, about 28 days,
+retention is longer: `BCH_PRUNE_DEPTH` is 242,174 shares, about 28 days,
 before the prune interval and background-task lag. Headers and merkle
 branches remain after body pruning.
 
@@ -221,7 +221,7 @@ There is no BCH witness data or witness commitment. Token shares cap the
 coinbase at 3,072 bytes and move excess payees to a payout tree. No-token
 coinbases may reach 1,000,000 bytes. See `accounting/payout/coinbase_budget.rs`.
 
-| Coinbase scenario | Bytes per coinbase | 242,126 retained coinbases |
+| Coinbase scenario | Bytes per coinbase | 242,174 retained coinbases |
 |---|---|---|
 | 10 direct P2PKH payees | at most 707 | 0.17 GB |
 | 100 direct P2PKH payees | at most 3,767 | 0.91 GB |

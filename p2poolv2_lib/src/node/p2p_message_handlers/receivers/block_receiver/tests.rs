@@ -6,9 +6,10 @@ use crate::pool_difficulty::AsertParent;
 #[mockall_double::double]
 use crate::pool_difficulty::PoolDifficulty;
 use crate::shares::validation::{BLOCK_TXS_SIZE_LIMIT, MockDefaultShareValidator, ValidationError};
+use crate::shares::weak::PrunedWeakShares;
 use crate::store::block_tx_metadata::{BlockMetadata, ChainMembership};
 use crate::store::writer::StoreError;
-use crate::test_utils::TestShareBlockBuilder;
+use crate::test_utils::{TestShareBlockBuilder, test_weak_share_on};
 use bitcoin::CompactTarget;
 use bitcoin::hashes::Hash;
 use p2poolv2_wallet::share_owner::ShareOwner;
@@ -702,6 +703,51 @@ async fn test_process_share_block_below_prune_height_is_dropped() {
         BlockFetcherEvent::BlockRequestCompleted(hash) => assert_eq!(hash, block_hash),
         other => panic!("Expected BlockRequestCompleted, got: {other}"),
     }
+    assert!(validation_rx.try_recv().is_err());
+}
+
+/// A body served with its weak shares pruned is dropped without being
+/// stored when the share is inside this node's payout depth: there it is
+/// checked with its weak shares whole, and the hash stays fetchable.
+#[tokio::test]
+async fn test_process_share_block_with_pruned_weak_shares_inside_the_payout_depth_is_dropped() {
+    let mut mock_store = ChainStoreHandle::default();
+    mock_store
+        .expect_get_candidate_tip_height()
+        .returning(|| Ok(Some(100)));
+    mock_store.expect_get_block_metadata().returning(|_| {
+        Ok(BlockMetadata {
+            expected_height: Some(90),
+            chain_work: bitcoin::Work::from_be_bytes([0u8; 32]),
+            status: Status::HeaderValid,
+            chain: ChainMembership::Candidate,
+        })
+    });
+    mock_store
+        .expect_add_share_block_and_organise_header()
+        .never();
+
+    let (_, event_rx) = create_block_receiver_channel();
+    let (block_fetcher_handle, _block_fetcher_rx) = block_fetcher::create_block_fetcher_channel();
+    let (validation_tx, mut validation_rx) = validation_worker::create_validation_channel();
+    let mut receiver = BlockReceiver::new(
+        event_rx,
+        Arc::new(MockDefaultShareValidator::default()),
+        mock_store,
+        block_fetcher_handle,
+        validation_tx,
+    );
+    let mut block = TestShareBlockBuilder::new()
+        .share_owner(ShareOwner::CashP2pkh([0x22; 20]))
+        .weak_shares(vec![test_weak_share_on(BlockHash::all_zeros(), 1)])
+        .build();
+    block.pruned_weak_shares = Some(PrunedWeakShares::of(&block.weak_shares));
+    block.weak_shares.clear();
+
+    let result = receiver.process_share_block(block).await;
+
+    assert!(result.is_ok(), "Expected Ok, got: {}", result.unwrap_err());
+    assert_eq!(receiver.pending_count(), 0);
     assert!(validation_rx.try_recv().is_err());
 }
 

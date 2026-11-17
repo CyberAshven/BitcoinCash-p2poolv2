@@ -17,7 +17,8 @@ use crate::test_utils::{
     build_test_weak_share_wanting,
 };
 use crate::utils::time_provider::TestTimeProvider;
-use bitcoin::hashes::Hash;
+use bitcoin::consensus::{deserialize, serialize};
+use bitcoin::hashes::{Hash, sha256d};
 use bitcoin::{Address, CompactTarget, Network, PubkeyHash, Work};
 use p2poolv2_wallet::payout_address::PayoutAddress;
 use p2poolv2_wallet::share_owner::ShareOwner;
@@ -125,6 +126,75 @@ fn a_body_carrying_one_proof_of_work_under_two_encodings_is_a_repeat() {
     let error = check_weak_shares_match_header(&share).unwrap_err();
     assert_eq!(error.kind, FailureKind::Consensus);
     assert!(error.message.contains("more than once"), "{error}");
+}
+
+/// A share whose two weak shares pay two payees, with them pruned: their
+/// leaf root and summary in place of the whole weak shares.
+fn pruned_share() -> ShareBlock {
+    let mut first = body_weak_share(1);
+    first.header.miner_bitcoin_address =
+        Address::p2pkh(PubkeyHash::from_byte_array([0x31; 20]), Network::Regtest).into();
+    let mut share = TestShareBlockBuilder::new()
+        .share_owner(ShareOwner::CashP2pkh([0x22; 20]))
+        .weak_shares(vec![first, body_weak_share(2)])
+        .build();
+    share.pruned_weak_shares = Some(PrunedWeakShares::of(&share.weak_shares));
+    share.weak_shares.clear();
+    share
+}
+
+/// A body served with its weak shares pruned matches its header by their
+/// leaf root and summary: the header's weak root commits both.
+#[test]
+fn a_body_with_its_weak_shares_pruned_matches_its_header_by_the_summary() {
+    assert!(check_weak_shares_match_header(&pruned_share()).is_ok());
+}
+
+/// A summary changed by a peer under the same leaf root, here one weak
+/// share's credit moved to the other payee, fails the root: a bad copy.
+#[test]
+fn a_pruned_body_with_a_tampered_summary_is_a_bad_copy() {
+    let mut share = pruned_share();
+    let summary = &mut share.pruned_weak_shares.as_mut().unwrap().summary;
+    summary.groups[0].count += 1;
+    summary.groups[1].count -= 1;
+
+    let error = check_weak_shares_match_header(&share).unwrap_err();
+    assert_eq!(error.kind, FailureKind::Consensus);
+    assert!(error.message.contains("root"), "{error}");
+}
+
+/// A summary whose groups count fewer weak shares than its proof-of-work
+/// hashes is refused before the root is computed.
+#[test]
+fn a_pruned_body_whose_groups_miscount_is_a_bad_copy() {
+    let mut share = pruned_share();
+    share.pruned_weak_shares.as_mut().unwrap().summary.groups[0].count += 1;
+
+    let error = check_weak_shares_match_header(&share).unwrap_err();
+    assert!(error.message.contains("group 3"), "{error}");
+}
+
+/// A changed leaf root, which binds the weak shares' other fields, fails the
+/// root too.
+#[test]
+fn a_pruned_body_with_another_leaf_root_is_a_bad_copy() {
+    let mut share = pruned_share();
+    share.pruned_weak_shares.as_mut().unwrap().leaf_root = sha256d::Hash::all_zeros();
+
+    let error = check_weak_shares_match_header(&share).unwrap_err();
+    assert!(error.message.contains("root"), "{error}");
+}
+
+/// The pruned form round-trips through the share block encoding, where a
+/// zero weak share count is followed by its form byte.
+#[test]
+fn a_pruned_body_round_trips_through_the_share_block_encoding() {
+    let share = pruned_share();
+    let decoded: ShareBlock = deserialize(&serialize(&share)).unwrap();
+
+    assert_eq!(decoded, share);
+    assert!(check_weak_shares_match_header(&decoded).is_ok());
 }
 
 /// Weak shares under the cap in count but past `WEAK_BYTES` in size are
