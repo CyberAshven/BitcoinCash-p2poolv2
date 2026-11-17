@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+A restarted node remembers its peers. The outgoing peer target's book of
+known peers is saved to `p2p_peers.json` beside the store every ten
+minutes and when the node stops, and read on the next start; the peers it
+held over outgoing connections are anchors, dialed first, once, within the
+target's group and limit rules. A broken or missing file is an empty book,
+and a node with `ephemeral_node_key` keeps none. No share-chain rule,
+message or store change.
+
+Nodes find each other through Nostr. A node with an `external_address`
+publishes it on public Nostr relays every hour, as a signed NIP-78 event that
+expires after three hours (NIP-40) and carries a 16-bit proof of work
+(NIP-13). A node with fewer than 8 peers asks every relay for the
+announcements of its own network and share-chain rules (the event's `d` tag
+hashes the network protocol string) and dials up to 8 of the newest. No
+relay is needed once a node has peers, a relay cannot forge an announcement,
+and the libp2p handshake still decides who is on the network. It is the
+first contact Bitcoin Cash lacked without DNS seeds: `dial_peers` is no
+longer required. `[network] nostr_relays` (six public relays by default;
+empty turns Nostr off) and `nostr_announce` (default true) configure it;
+see `docs/p2p-network.md`. No share-chain rule, message or store change.
+
+A node keeps its peer ID across restarts. Its libp2p key is made on the
+first start and kept in `p2p_node_key` beside the store (only its owner may
+read it on Unix), or wherever `[network] node_key_path` says; a file that
+holds no key stops the node instead of being replaced. Before, every start
+made a new key, so a restarted node was a stranger to the peers that knew
+it, and nothing could list or announce it by its peer ID. `ephemeral_node_key
+= true` keeps the old behaviour for a node that wants no identity linking its
+restarts. No share-chain rule, message or store change.
+
 A new share whose coinbase outputs take 50,000 bytes or more is relayed without
 them; peers rebuild them from their PPLNS window or fetch the share whole
 (protocol segment `without-payouts`). No share-chain rule or store change.

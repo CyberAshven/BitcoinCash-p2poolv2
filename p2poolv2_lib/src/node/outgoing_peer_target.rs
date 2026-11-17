@@ -47,6 +47,7 @@
 use super::address_filter::{NetworkGroup, network_group};
 use super::connection_tracker::BlockedIps;
 use super::dial_filter::{is_not_blocked, without_p2p_suffix};
+use super::peer_book::{MAX_ANCHORS, SAVED_BOOK_VERSION, SavedBook, SavedPeer};
 use crate::config::NetworkConfig;
 use bitcoin::secp256k1::rand::seq::{IteratorRandom, SliceRandom};
 use bitcoin::secp256k1::rand::thread_rng;
@@ -90,6 +91,9 @@ struct KnownPeer {
     failures: u32,
     /// The target dials the peer no earlier than this.
     next_attempt_at: Instant,
+    /// A peer this node held over an outgoing connection when it last saved
+    /// its book: dialed before the others, once.
+    anchor: bool,
 }
 
 /// An established outgoing connection.
@@ -329,6 +333,7 @@ impl OutgoingPeerTarget {
         let dial = self.choose_candidate(&is_connected)?;
         if let Some(known_peer) = self.known_peers.get_mut(&dial.peer_id) {
             known_peer.next_attempt_at = Instant::now() + backoff_delay(known_peer.failures);
+            known_peer.anchor = false;
         }
         self.dials_attempted_total += 1;
         Some(dial)
@@ -354,12 +359,21 @@ impl OutgoingPeerTarget {
         let held_groups = self.held_groups();
         let pending_peers: HashSet<PeerId> =
             self.pending.values().map(|dial| dial.peer_id).collect();
-        let ready_peers = self.known_peers.iter().filter(|(peer_id, known_peer)| {
+        let is_ready = |(peer_id, known_peer): &(&PeerId, &KnownPeer)| {
             known_peer.next_attempt_at <= now
                 && !self.dial_peer_ids.contains(peer_id)
                 && !pending_peers.contains(peer_id)
                 && !is_connected(peer_id)
-        });
+        };
+        // Anchors from the saved book go first, while any is ready.
+        let anchors_ready = self
+            .known_peers
+            .iter()
+            .any(|entry| entry.1.anchor && is_ready(&entry));
+        let ready_peers = self
+            .known_peers
+            .iter()
+            .filter(|entry| is_ready(entry) && (!anchors_ready || entry.1.anchor));
         let mut candidates: HashMap<NetworkGroup, Vec<(PeerId, &Multiaddr)>> =
             HashMap::with_capacity(self.known_peers.len());
         for (peer_id, known_peer) in ready_peers {
@@ -413,6 +427,7 @@ impl OutgoingPeerTarget {
                 verified: false,
                 failures: 0,
                 next_attempt_at: Instant::now(),
+                anchor: false,
             },
         );
     }
@@ -454,6 +469,96 @@ impl OutgoingPeerTarget {
     fn reset_backoff(&mut self, peer_id: &PeerId) {
         if let Some(known_peer) = self.known_peers.get_mut(peer_id) {
             known_peer.failures = 0;
+        }
+    }
+
+    /// The book to save: every known peer with its addresses and whether the
+    /// node reached it, verified first, and as anchors the peers the target
+    /// holds over outgoing connections now, at most `MAX_ANCHORS`. Peers
+    /// reached at a dial_peer address are the reconnector's and stay out.
+    pub(crate) fn saved_book(&self) -> SavedBook {
+        let mut peers: Vec<SavedPeer> = self
+            .known_peers
+            .iter()
+            .map(|(peer_id, known_peer)| SavedPeer {
+                peer_id: peer_id.to_string(),
+                addresses: known_peer
+                    .addresses
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect(),
+                verified: known_peer.verified,
+            })
+            .collect();
+        peers.sort_by_key(|peer| !peer.verified);
+        let mut anchors: Vec<String> = self
+            .outgoing
+            .values()
+            .filter(|connection| connection.group.is_some())
+            .map(|connection| connection.peer_id.to_string())
+            .collect();
+        anchors.sort();
+        anchors.dedup();
+        anchors.truncate(MAX_ANCHORS);
+        SavedBook {
+            version: SAVED_BOOK_VERSION,
+            peers,
+            anchors,
+        }
+    }
+
+    /// Add the peers of a saved book, within the book's limit: only peers
+    /// with a dialable address, never a dial_peer, each with the verified
+    /// mark it had and no backoff. Its anchors are dialed before any other
+    /// peer, once. Entries that do not parse are skipped.
+    pub(crate) fn load_book(&mut self, book: SavedBook) {
+        if book.version != SAVED_BOOK_VERSION {
+            warn!(
+                "Ignoring a saved peer book of version {}, this node writes {SAVED_BOOK_VERSION}",
+                book.version
+            );
+            return;
+        }
+        let anchors: HashSet<PeerId> = book
+            .anchors
+            .iter()
+            .filter_map(|peer_id| peer_id.parse().ok())
+            .take(MAX_ANCHORS)
+            .collect();
+        let mut loaded = 0;
+        for saved in book.peers {
+            if self.known_peers.len() >= self.known_peer_limit {
+                break;
+            }
+            let Ok(peer_id) = saved.peer_id.parse::<PeerId>() else {
+                continue;
+            };
+            let parsed: Vec<Multiaddr> = saved
+                .addresses
+                .iter()
+                .filter_map(|address| address.parse().ok())
+                .collect();
+            let addresses = dialable_addresses(&parsed);
+            if addresses.is_empty() || self.dial_peer_ids.contains(&peer_id) {
+                continue;
+            }
+            self.known_peers.insert(
+                peer_id,
+                KnownPeer {
+                    addresses,
+                    verified: saved.verified,
+                    failures: 0,
+                    next_attempt_at: Instant::now(),
+                    anchor: anchors.contains(&peer_id),
+                },
+            );
+            loaded += 1;
+        }
+        if loaded > 0 {
+            info!(
+                "Loaded {loaded} known peers from the saved peer book, {} anchors",
+                self.known_peers.values().filter(|peer| peer.anchor).count()
+            );
         }
     }
 
@@ -944,5 +1049,115 @@ mod tests {
 
         assert!(target.knows(&verified));
         assert!(!target.knows(&newcomer));
+    }
+
+    /// A saved book brings back every known peer with its verified mark, and
+    /// the peers held over outgoing connections as anchors; dial_peers and
+    /// addresses that are not dialable stay out.
+    #[tokio::test(start_paused = true)]
+    async fn test_a_saved_book_brings_back_peers_and_anchors() {
+        let config = NetworkConfig {
+            target_outgoing_peers: 4,
+            ..NetworkConfig::default()
+        };
+        let mut target = OutgoingPeerTarget::new(&config, BlockedIps::default());
+        let held = PeerId::random();
+        let heard = PeerId::random();
+        target.learn_addresses(held, [&"/ip4/1.2.3.4/tcp/6884".parse().unwrap()]);
+        target.learn_addresses(heard, [&"/ip4/5.6.7.8/tcp/6884".parse().unwrap()]);
+        target.record_connection_established(
+            held,
+            ConnectionId::new_unchecked(1),
+            &dialer("/ip4/1.2.3.4/tcp/6884"),
+        );
+
+        let mut book = target.saved_book();
+        assert_eq!(book.anchors, vec![held.to_string()]);
+        assert_eq!(book.peers[0].peer_id, held.to_string(), "verified first");
+        assert!(book.peers[0].verified);
+        assert!(!book.peers[1].verified);
+        book.peers.push(SavedPeer {
+            peer_id: PeerId::random().to_string(),
+            addresses: vec!["/ip4/192.168.1.9/tcp/6884".into()],
+            verified: true,
+        });
+        book.peers.push(SavedPeer {
+            peer_id: "not a peer id".into(),
+            addresses: vec!["/ip4/9.9.9.9/tcp/6884".into()],
+            verified: false,
+        });
+
+        let mut restarted = OutgoingPeerTarget::new(&config, BlockedIps::default());
+        restarted.load_book(book);
+
+        assert!(restarted.knows(&held) && restarted.knows(&heard));
+        assert_eq!(restarted.known_peers.len(), 2);
+        assert!(restarted.known_peers[&held].verified);
+        assert!(restarted.known_peers[&held].anchor);
+        assert!(!restarted.known_peers[&heard].anchor);
+    }
+
+    /// On the next start the anchors are dialed before any other known peer,
+    /// once each.
+    #[tokio::test(start_paused = true)]
+    async fn test_anchors_are_dialed_first_once() {
+        let config = NetworkConfig {
+            target_outgoing_peers: 8,
+            ..NetworkConfig::default()
+        };
+        let anchor = PeerId::random();
+        let mut peers: Vec<SavedPeer> = (0..20)
+            .map(|index| SavedPeer {
+                peer_id: PeerId::random().to_string(),
+                addresses: vec![format!("/ip4/{}.1.1.1/tcp/6884", index + 1)],
+                verified: true,
+            })
+            .collect();
+        peers.push(SavedPeer {
+            peer_id: anchor.to_string(),
+            addresses: vec!["/ip4/100.1.1.1/tcp/6884".into()],
+            verified: true,
+        });
+        let mut target = OutgoingPeerTarget::new(&config, BlockedIps::default());
+        target.load_book(SavedBook {
+            version: SAVED_BOOK_VERSION,
+            peers,
+            anchors: vec![anchor.to_string()],
+        });
+
+        let first = target
+            .next_dial(OutgoingCounts::default(), |_| false)
+            .unwrap();
+        assert_eq!(first.peer_id, anchor);
+        assert!(
+            !target.known_peers[&anchor].anchor,
+            "an anchor goes first once"
+        );
+        let second = target
+            .next_dial(
+                OutgoingCounts {
+                    pending: 1,
+                    established: 0,
+                },
+                |_| false,
+            )
+            .unwrap();
+        assert_ne!(second.peer_id, anchor);
+    }
+
+    /// A book from another format version is ignored, not misread.
+    #[tokio::test(start_paused = true)]
+    async fn test_a_book_of_another_version_is_ignored() {
+        let mut target = OutgoingPeerTarget::new(&NetworkConfig::default(), BlockedIps::default());
+        target.load_book(SavedBook {
+            version: SAVED_BOOK_VERSION + 1,
+            peers: vec![SavedPeer {
+                peer_id: PeerId::random().to_string(),
+                addresses: vec!["/ip4/1.2.3.4/tcp/6884".into()],
+                verified: true,
+            }],
+            anchors: vec![],
+        });
+        assert!(target.known_peers.is_empty());
     }
 }
