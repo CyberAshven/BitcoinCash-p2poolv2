@@ -73,6 +73,8 @@ mod tests {
         KnownBchHeader {
             height: MAINNET_PAIRS[0].0,
             header: header(MAINNET_PAIRS[0].1),
+            ticks: i64::from(MAINNET_PAIRS[0].0) * 600,
+            next_interval: 600,
         }
     }
 

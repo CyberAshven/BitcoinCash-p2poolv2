@@ -1389,10 +1389,21 @@ pub struct NetworkConfig {
     // (`Config::with_bitcoin_cash_dns_seed_off`).
     #[serde(default = "default_dns_seed")]
     pub dns_seed: bool,
+    /// Outgoing peers the node keeps. While it has fewer, it dials a peer it
+    /// learned of through Kademlia or Identify at a public IP address, one a
+    /// second, never past `max_established_outgoing` and never in an IPv4
+    /// /16 or IPv6 /32 where it already has an outgoing peer (`dial_peers`
+    /// do not count). 0 turns this off.
+    #[serde(default = "default_target_outgoing_peers")]
+    pub target_outgoing_peers: u32,
 }
 
 fn default_dns_seed() -> bool {
     true
+}
+
+fn default_target_outgoing_peers() -> u32 {
+    16
 }
 
 impl Default for NetworkConfig {
@@ -1402,7 +1413,10 @@ impl Default for NetworkConfig {
             dial_peers: vec![],
             max_pending_incoming: 10,
             max_pending_outgoing: 10,
-            max_established_incoming: 50,
+            // Each outgoing peer is another node's inbound one: with 16
+            // outgoing a node takes 16 on average, and 128 is room for that
+            // while one node in four accepts inbound connections.
+            max_established_incoming: 128,
             max_established_outgoing: 50,
             // Two, not one: when two nodes dial each other at the same moment
             // each can keep its own outbound connection and refuse the other's
@@ -1420,6 +1434,7 @@ impl Default for NetworkConfig {
             blocked_ips: vec![],
             external_address: None,
             dns_seed: true,
+            target_outgoing_peers: default_target_outgoing_peers(),
         }
     }
 }
@@ -2182,6 +2197,14 @@ mod tests {
     fn dns_seed_defaults_to_true_when_absent() {
         let config = Config::load("../config-bitcoin.sample.toml").unwrap();
         assert!(config.network.dns_seed);
+    }
+
+    /// The sample configs leave target_outgoing_peers commented out, so a
+    /// node keeps 16 outgoing peers unless its operator says otherwise.
+    #[test]
+    fn target_outgoing_peers_defaults_to_16_when_absent() {
+        let config = Config::load("../config.sample.toml").unwrap();
+        assert_eq!(config.network.target_outgoing_peers, 16);
     }
 
     /// The sample config leaves `[electrum]` commented out, so the server is

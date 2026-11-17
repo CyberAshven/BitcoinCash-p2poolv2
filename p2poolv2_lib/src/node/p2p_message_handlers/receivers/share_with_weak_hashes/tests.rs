@@ -426,9 +426,11 @@ async fn the_sender_answers_with_the_weak_shares_asked_for() {
 }
 
 /// Sync is unchanged: a share asked for by hash, as a peer catching up asks
-/// for it, is sent with its weak shares whole.
+/// for it, is sent whole, its weak shares and every output of its Bitcoin
+/// Cash coinbase in it. A node catching up checks the body against its
+/// coinbase txid and cannot rebuild payouts that deep.
 #[tokio::test]
-async fn a_share_asked_for_in_sync_is_sent_with_its_weak_shares_whole() {
+async fn a_share_asked_for_in_sync_is_sent_with_its_weak_shares_and_payouts_whole() {
     let honest = honest_share();
     let block_hash = honest.block_hash();
     let mut store = ChainStoreHandle::default();
@@ -446,6 +448,7 @@ async fn a_share_asked_for_in_sync_is_sent_with_its_weak_shares_whole() {
     match swarm_rx.recv().await {
         Some(SwarmSend::Response(_, Message::ShareBlock(share_block, _))) => {
             assert_eq!(share_block.weak_shares.len(), 2);
+            assert!(!share_block.bitcoin_coinbase.output.is_empty());
             assert_eq!(share_block, honest);
         }
         other => panic!("Expected the share whole, got {other:?}"),

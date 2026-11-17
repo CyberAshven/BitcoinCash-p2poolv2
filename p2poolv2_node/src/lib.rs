@@ -347,6 +347,7 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
         tokio::spawn(relay_templates_learning_prevs(
             client,
             chain_store_handle.clone(),
+            bitcoin_cash_network,
             learning_rx,
             notify_tx.clone(),
         ));

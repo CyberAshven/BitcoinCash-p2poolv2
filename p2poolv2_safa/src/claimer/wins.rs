@@ -11,10 +11,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use super::config::VaultPoint;
-use crate::cli::run;
+use crate::cli::{claim, leaf};
 use crate::{
-    Vault, coinbase_height, coinbase_merkle_root, commitment_output, decode_proof, fold_aux,
-    from_hex, hash256, parse_split, slot,
+    Covenant, Vault, coinbase_height, coinbase_merkle_root, commitment_output, decode_proof,
+    fold_aux, from_hex, hash256, parse_split, slot,
 };
 
 /// One public AuxPoW win. Hashes use the pool's hashed (wire) byte order.
@@ -67,12 +67,15 @@ pub fn parse_win(line: &[u8], category_wire: &str) -> Result<Option<Win>, String
     Ok(Some(win))
 }
 
-/// Select distinct, unattempted wins above the vault state and at the tip or below.
+/// Select distinct, unattempted wins above the vault state and at `claimable`
+/// or below: the highest coinbase height whose claim's lock is final in the
+/// next block (`NetworkParameters::last_claimable_height`), which is the tip
+/// while blocks are ten minutes.
 /// Height is the primary ordering, with time and identity breaking ties.
 pub fn candidates(
     wins: &[Win],
     state_height: u32,
-    tip: u32,
+    claimable: u32,
     claimed: &[String],
     dropped: &[String],
 ) -> Vec<Win> {
@@ -83,7 +86,7 @@ pub fn candidates(
         .filter(|(height, win)| {
             let identity = win.id();
             *height > state_height
-                && *height <= tip
+                && *height <= claimable
                 && !claimed.contains(&identity)
                 && !dropped.contains(&identity)
                 && distinct.insert(identity)
@@ -152,9 +155,11 @@ pub fn resolve_split(preimage: &str, scripts: &[String]) -> Result<Value, ClaimE
     }
 }
 
-/// Build and verify through the same BCH 2026 VM path as `safa claim`.
+/// Build and verify through the same BCH 2026 VM path as `safa claim`, for
+/// the deployment's `covenant`.
 #[allow(clippy::too_many_arguments)]
 pub fn build_win_claim(
+    covenant: &Covenant,
     deployment: &Value,
     win: &Win,
     outpoint: &VaultPoint,
@@ -184,16 +189,15 @@ pub fn build_win_claim(
         "split": split,
         "proof": win.proof,
         "fee_rate": fee_rate,
-        "locktime": win.height().map_err(ClaimError::Invalid)?,
     });
-    let inputs = [deployment.clone(), input];
-    match run("claim", &inputs) {
+    match claim(covenant, deployment, &input) {
         Ok(claim) => Ok(claim),
         Err(message) => {
             if message == "the vault cannot pay the claim fee and outputs and keep 800 satoshis"
                 || message == "the vault has too few tokens for a reward"
             {
-                verify_state_commitment(deployment, &inputs[1]).map_err(ClaimError::Invalid)?;
+                verify_state_commitment(covenant, deployment, &input)
+                    .map_err(ClaimError::Invalid)?;
                 Err(ClaimError::Deferred(message))
             } else {
                 Err(ClaimError::Invalid(message))
@@ -204,7 +208,11 @@ pub fn build_win_claim(
 
 /// A temporary funding failure must not hide work committed to another state.
 /// This is only a deferral check; broadcast still requires the complete claim VM.
-fn verify_state_commitment(deployment: &Value, input: &Value) -> Result<(), String> {
+fn verify_state_commitment(
+    covenant: &Covenant,
+    deployment: &Value,
+    input: &Value,
+) -> Result<(), String> {
     let proof = decode_proof(&from_hex(
         input["proof"].as_str().ok_or("claim has no proof")?,
         None,
@@ -216,7 +224,7 @@ fn verify_state_commitment(deployment: &Value, input: &Value) -> Result<(), Stri
         "payout_script":input["payout_script"],
         "split":input["split"],
     });
-    let leaf = run("leaf", &[deployment.clone(), job])?;
+    let leaf = leaf(covenant, deployment, &job)?;
     let leaf_hash = from_hex(
         leaf["leaf_hash"].as_str().ok_or("leaf has no hash")?,
         Some(32),

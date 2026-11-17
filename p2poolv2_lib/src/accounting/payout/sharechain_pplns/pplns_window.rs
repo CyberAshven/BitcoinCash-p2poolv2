@@ -6360,6 +6360,8 @@ mod tests {
                 bits: CompactTarget::from_consensus(0x207f_ffff),
                 nonce: tag,
             },
+            ticks: i64::from(height) * 600,
+            next_interval: 600,
         }
     }
 

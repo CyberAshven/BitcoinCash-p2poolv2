@@ -35,6 +35,39 @@ pub fn p2pkh(byte: u8) -> Vec<u8> {
 pub fn covenant() -> Covenant {
     safa::create_covenant("chipnet", 4, 42_000_000_000).unwrap()
 }
+/// The covenant the chipnet tSAFA vaults were created with on 2026-10-29,
+/// read back from its recorded redeem script. It counts every block as ten
+/// minutes; the live wins were mined for its `lock_hash`.
+pub fn deployed_covenant() -> Covenant {
+    let record = cli::fixture("tsafa-chipnet-deployed-2026-10-29.json");
+    let deployment = &record["deployment"];
+    safa::covenant_from_redeem_script(
+        deployment["network"].as_str().unwrap(),
+        deployment["threads"].as_u64().unwrap() as u32,
+        deployment["virtual_sats"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap(),
+        hex::decode(record["params"]["redeem_script"].as_str().unwrap()).unwrap(),
+    )
+}
+/// The deployed covenant's functions: its redeem script up to its main body,
+/// which starts after the last function's `<20> OP_DEFINE` with
+/// `OP_INPUTINDEX OP_OUTPUTBYTECODE OP_INPUTINDEX OP_UTXOBYTECODE
+/// OP_EQUALVERIFY`.
+pub fn deployed_library() -> Vec<u8> {
+    let script = deployed_covenant().redeem_script;
+    let boundary = [0x01, 0x14, 0x89, 0xc0, 0xcd, 0xc0, 0xc7, 0x88];
+    let starts: Vec<usize> = script
+        .windows(boundary.len())
+        .enumerate()
+        .filter(|(_, window)| *window == boundary)
+        .map(|(index, _)| index)
+        .collect();
+    assert_eq!(starts.len(), 1, "one main body");
+    script[..starts[0] + 3].to_vec()
+}
 pub fn one_sat() -> Covenant {
     safa::create_covenant("chipnet", 4, 419_998_000_000).unwrap()
 }
@@ -89,8 +122,17 @@ pub struct FunctionCaller {
 }
 impl FunctionCaller {
     pub fn new(network: &str) -> Self {
+        Self::with_library(safa::compile_library(network, "").unwrap())
+    }
+    /// The covenant's functions compiled for `parameters`, such as a
+    /// network's with another pinned switch.
+    pub fn for_parameters(parameters: &safa::NetworkParameters) -> Self {
+        Self::with_library(safa::compile_library_for(parameters, "").unwrap())
+    }
+    /// Functions already compiled, such as a deployed covenant's.
+    pub fn with_library(library: Vec<u8>) -> Self {
         Self {
-            library: safa::compile_library(network, "").unwrap(),
+            library,
             machine: create_virtual_machine_bch_2026(Some(false)),
         }
     }
@@ -174,9 +216,10 @@ pub fn nonstandard(claim: &BuiltClaim) -> Result<(), String> {
         source_outputs: claim.source_outputs.clone(),
     })
 }
-/// Check a claim's VM metrics against the values the Node tool measured with
-/// JavaScript Libauth: unlocking bytes, operation cost and its limit, hash
-/// iterations and their limit.
+/// Check a claim's VM metrics against the recorded values: unlocking bytes,
+/// operation cost and its limit, hash iterations and their limit. They are
+/// measured in this VM. Before the covenant counted CHIP-2025-03's ticks the
+/// Node tool had measured the same values with JavaScript Libauth.
 pub fn metrics(claim: &BuiltClaim, expected: (usize, u64, u64, u64, u64)) {
     accepts(claim);
     let state = create_virtual_machine_bch_2026(Some(true)).evaluate(
@@ -497,9 +540,11 @@ pub fn raw_claim(
         ref_bits: block_bits(),
     })
     .unwrap();
-    let target_bits =
-        safa::claim_target_bits(0x2000_ffff, height.saturating_sub(state_height).max(1), 4)
-            .unwrap();
+    // The ticks the covenant eases by; a refused height above or at the
+    // state's gets one ten-minute block's.
+    let chipnet = safa::network_parameters("chipnet").unwrap();
+    let tick_delta = chipnet.tick_delta(state_height, height).unwrap_or(600);
+    let target_bits = safa::claim_target_bits(0x2000_ffff, tick_delta, 4).unwrap();
     let mut wire_category = category();
     wire_category.reverse();
     let leaf = Leaf {
@@ -629,26 +674,58 @@ pub fn check_asert_run(run: &str) -> usize {
         let height_diff = i64::try_from(height - anchor_height).unwrap();
         let time: i64 = fields[2].parse().unwrap();
         let bits = u32::from_str_radix(fields[3].trim_start_matches("0x"), 16).unwrap();
-        let result = ok(caller.call(
-            6,
-            &[
-                big_numeric(&reference),
-                numeric(time - anchor_time),
-                numeric(height_diff),
-                numeric(172800),
-            ],
-        ));
-        let target = stack_number(&result[0]);
-        assert_eq!(safa::get_compact(&target), bits, "{line}");
-        assert_eq!(
-            target,
-            safa::calculate_asert(&reference, time - anchor_time, height_diff, 172800),
-            "{line}"
+        // Every block of the specification's runs is a ten-minute block.
+        let target = asert_in_vm(
+            &caller,
+            &reference,
+            time - anchor_time,
+            height_diff * 600,
+            600,
+            600,
+            172800,
         );
+        assert_eq!(safa::get_compact(&target), bits, "{line}");
         count += 1;
     }
     assert_eq!(count, iterations);
     count
+}
+/// The covenant's Function 6 on these arguments, checked against the Rust
+/// model.
+pub fn asert_in_vm(
+    caller: &FunctionCaller,
+    reference: &BigInt,
+    time_diff: i64,
+    tick_delta: i64,
+    anchor_interval: i64,
+    next_interval: i64,
+    half_life: i64,
+) -> BigInt {
+    let result = ok(caller.call(
+        6,
+        &[
+            big_numeric(reference),
+            numeric(time_diff),
+            numeric(tick_delta),
+            numeric(half_life),
+            numeric(anchor_interval),
+            numeric(next_interval),
+        ],
+    ));
+    let target = stack_number(&result[0]);
+    assert_eq!(
+        target,
+        safa::calculate_asert(
+            reference,
+            time_diff,
+            tick_delta,
+            anchor_interval,
+            next_interval,
+            half_life
+        ),
+        "time {time_diff}, ticks {tick_delta}, intervals {anchor_interval} and {next_interval}"
+    );
+    target
 }
 pub fn check_header_pairs(network: &str, pairs: &[(u32, &str, &str)]) {
     assert_eq!(pairs.len(), 9);
@@ -669,15 +746,36 @@ pub fn check_header_pairs(network: &str, pairs: &[(u32, &str, &str)]) {
     }
 }
 pub fn band(network: &str, bits: u32, time: u32, height: u32) -> bool {
-    let result =
-        ok(FunctionCaller::new(network)
-            .call(7, &[uint32(bits), uint32(time), numeric(height as i64)]));
-    let accepted = stack_number(&result[0]) == number(1);
+    let parameters = safa::network_parameters(network).unwrap();
+    band_with(
+        &FunctionCaller::for_parameters(&parameters),
+        &parameters,
+        bits,
+        time,
+        height,
+    )
+}
+/// The verdict of Function 7 as `caller` holds it compiled for `parameters`,
+/// checked against the Rust model. A test with many headers compiles once.
+pub fn band_with(
+    caller: &FunctionCaller,
+    parameters: &safa::NetworkParameters,
+    bits: u32,
+    time: u32,
+    height: u32,
+) -> bool {
+    let accepted = band_in_vm(caller, bits, time, height);
     assert_eq!(
         accepted,
-        safa::asert_band_ok(network, bits, time, height).unwrap()
+        safa::asert_band_ok_for(parameters, bits, time, height).unwrap(),
+        "{bits:#010x} at height {height}, time {time}"
     );
     accepted
+}
+/// Function 7's verdict from compiled functions alone.
+pub fn band_in_vm(caller: &FunctionCaller, bits: u32, time: u32, height: u32) -> bool {
+    let result = ok(caller.call(7, &[uint32(bits), uint32(time), numeric(height as i64)]));
+    stack_number(&result[0]) == number(1)
 }
 pub fn check_band_matrix() {
     let pair = headers::MAINNET_PAIRS[8];

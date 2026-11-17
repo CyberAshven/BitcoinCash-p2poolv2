@@ -198,6 +198,16 @@ fn genesis_tag(genesis_hash: BlockHash) -> String {
 /// a syncing peer checks those against the header. Every share carrying
 /// weak shares has another root under the two, and a node without it cannot
 /// read a body served that way.
+///
+/// The current-chain and merge-mining segments gained `-ticks` on
+/// 2026-11-15, another flag day (`bch-prev-1off-ticks`,
+/// `mm2-roots-asert8-ticks`): each known Bitcoin Cash header carries its
+/// CHIP-2025-03 ticks and next block interval, worked out from its own
+/// branch's median time past as BCHN does, and the nBits a peer's header
+/// must carry, the nBits that size a payout window and a token share's
+/// ASERT band follow them. Before, each node learned one-minute blocks
+/// while running from its own Bitcoin Cash node, so two nodes could require
+/// different nBits of one header; the two rules cannot share a chain.
 fn share_chain_rule_tag(chain: Chain) -> Option<String> {
     match chain {
         Chain::Bitcoin => None,
@@ -229,7 +239,15 @@ fn share_chain_rule_tag(chain: Chain) -> Option<String> {
 /// (`GetCarriedWeakShares`, answered with `CarriedWeakShares`). A node
 /// before it cannot read any of the three. Sync still sends weak shares
 /// whole.
-const BCH_MESSAGES_TAG: &str = "weak-by-hash";
+///
+/// `without-payouts` since 2026-11-16: a new share whose coinbase outputs
+/// are large (`RELAY_WITHOUT_PAYOUTS_MIN_BYTES`) is relayed without them
+/// (`ShareWithoutPayouts`, which also lists the weak shares by hash), and the
+/// receiver rebuilds them from its PPLNS window as validation does. A
+/// smaller share still goes whole, as `ShareWithWeakHashes` or `ShareBlock`.
+/// A node before it cannot read the new message. Sync still sends shares
+/// whole.
+const BCH_MESSAGES_TAG: &str = "weak-by-hash/without-payouts";
 
 /// The share chain part of every protocol string: the genesis tag, followed
 /// on Bitcoin Cash by the rule tag and the message tag.
@@ -504,7 +522,7 @@ mod tests {
         assert_eq!(
             protocol_string(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash),
             format!(
-                "/p2pool/test/{expected_tag}/pplns-k3-m100/asert-parent/trade-htlc/payout-holder/payout-hybrid-t3072-f500-r1to3-z8-cov1/cuts-per-share/uncle-once/body-1000000-204800/payee-p2pkh-p2sh20-p2sh32/merkle32/depths-m100/sigchecks3000-1452/no-segwit/weight-work/mm2-roots-asert8/version-vote/bch-prev-1off/genesis-last-resort/band-c64/levels-546x2-k1/weak4-640-100-48-256-320-64-4096-64-32-summary/weak-by-hash/1.0.0"
+                "/p2pool/test/{expected_tag}/pplns-k3-m100/asert-parent/trade-htlc/payout-holder/payout-hybrid-t3072-f500-r1to3-z8-cov1/cuts-per-share/uncle-once/body-1000000-204800/payee-p2pkh-p2sh20-p2sh32/merkle32/depths-m100/sigchecks3000-1452/no-segwit/weight-work/mm2-roots-asert8-ticks/version-vote/bch-prev-1off-ticks/genesis-last-resort/band-c64/levels-546x2-k1/weak4-640-100-48-256-320-64-4096-64-32-summary/weak-by-hash/without-payouts/1.0.0"
             )
         );
     }
@@ -525,7 +543,9 @@ mod tests {
 
         assert_ne!(current, before, "weak shares by hash change the messages");
         assert!(
-            current.ends_with("/weak4-640-100-48-256-320-64-4096-64-32-summary/weak-by-hash/1.0.0"),
+            current.ends_with(
+                "/weak4-640-100-48-256-320-64-4096-64-32-summary/weak-by-hash/without-payouts/1.0.0"
+            ),
             "{current}"
         );
         assert!(
@@ -533,7 +553,32 @@ mod tests {
             "{before}"
         );
         let kad = kad_protocol_string(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash);
-        assert!(kad.ends_with("/weak-by-hash/kad/1.0.0"), "{kad}");
+        assert!(
+            kad.ends_with("/weak-by-hash/without-payouts/kad/1.0.0"),
+            "{kad}"
+        );
+    }
+
+    /// From 2026-11-16 a new share with large coinbase outputs is relayed
+    /// without them (`ShareWithoutPayouts`). A node on `weak-by-hash` alone
+    /// derived the string without `/without-payouts`: it cannot read the new
+    /// share message, so the two fail the handshake rather than drop large
+    /// shares as malformed.
+    #[test]
+    fn test_bitcoin_cash_protocol_string_carries_the_without_payouts_message() {
+        let genesis_hash = bch_genesis::build(BchShareNetwork::Chipnet)
+            .unwrap()
+            .block_hash();
+        let current = protocol_string(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash);
+        let weak_by_hash_only = current.replace("/without-payouts/", "/");
+
+        assert_ne!(current, weak_by_hash_only);
+        assert!(
+            weak_by_hash_only.ends_with("/weak-by-hash/1.0.0"),
+            "{weak_by_hash_only}"
+        );
+        let kad = kad_protocol_string(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash);
+        assert_ne!(kad, kad.replace("/without-payouts/", "/"));
     }
 
     /// Bitcoin shares carry no weak shares, so a Bitcoin node's messages did
@@ -626,7 +671,7 @@ mod tests {
             genesis_hash,
         ));
         let before = current.replace(
-            "/bch-prev-1off/genesis-last-resort/band-c64/levels-546x2-k1/weak4-640-100-48-256-320-64-4096-64-32-summary/",
+            "/bch-prev-1off-ticks/genesis-last-resort/band-c64/levels-546x2-k1/weak4-640-100-48-256-320-64-4096-64-32-summary/",
             "/",
         );
 
@@ -654,7 +699,7 @@ mod tests {
         );
 
         assert_ne!(current, before);
-        assert!(before.ends_with("/bch-prev-1off/1.0.0"), "{before}");
+        assert!(before.ends_with("/bch-prev-1off-ticks/1.0.0"), "{before}");
     }
 
     /// A chipnet node from before the difficulty band derived the string
@@ -778,6 +823,28 @@ mod tests {
         assert!(
             before.ends_with("/levels-546x2/weak2-64-500-6/1.0.0"),
             "{before}"
+        );
+    }
+
+    /// From 2026-11-15 each known Bitcoin Cash header carries its ticks and
+    /// next interval from its own branch, and token shares' ASERT band
+    /// follows them. A node on `bch-prev-1off` and `mm2-roots-asert8` learned
+    /// one-minute blocks while running and could require other nBits, so the
+    /// new string differs and the two cannot negotiate.
+    #[test]
+    fn test_bitcoin_cash_protocol_string_carries_the_tick_rules() {
+        let genesis_hash = bch_genesis::build(BchShareNetwork::Chipnet)
+            .unwrap()
+            .block_hash();
+        let current = protocol_string(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash);
+        let before = current
+            .replace("/bch-prev-1off-ticks/", "/bch-prev-1off/")
+            .replace("/mm2-roots-asert8-ticks/", "/mm2-roots-asert8/");
+
+        assert_ne!(current, before, "tick rules flag day");
+        assert!(
+            current.contains("/mm2-roots-asert8-ticks/version-vote/bch-prev-1off-ticks/"),
+            "{current}"
         );
     }
 
@@ -943,7 +1010,7 @@ mod tests {
         let string = protocol_string(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash);
         assert_ne!(string, before_fixes_string);
         assert!(string.contains("/cuts-per-share/"));
-        assert!(string.contains("/mm2-roots-asert8/"));
+        assert!(string.contains("/mm2-roots-asert8-ticks/"));
     }
 
     /// The isolation the window rule relies on: a chipnet node from before
@@ -976,7 +1043,7 @@ mod tests {
         assert_eq!(
             kad_protocol_string(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash),
             format!(
-                "/p2pool/test/{expected_tag}/pplns-k3-m100/asert-parent/trade-htlc/payout-holder/payout-hybrid-t3072-f500-r1to3-z8-cov1/cuts-per-share/uncle-once/body-1000000-204800/payee-p2pkh-p2sh20-p2sh32/merkle32/depths-m100/sigchecks3000-1452/no-segwit/weight-work/mm2-roots-asert8/version-vote/bch-prev-1off/genesis-last-resort/band-c64/levels-546x2-k1/weak4-640-100-48-256-320-64-4096-64-32-summary/weak-by-hash/kad/1.0.0"
+                "/p2pool/test/{expected_tag}/pplns-k3-m100/asert-parent/trade-htlc/payout-holder/payout-hybrid-t3072-f500-r1to3-z8-cov1/cuts-per-share/uncle-once/body-1000000-204800/payee-p2pkh-p2sh20-p2sh32/merkle32/depths-m100/sigchecks3000-1452/no-segwit/weight-work/mm2-roots-asert8-ticks/version-vote/bch-prev-1off-ticks/genesis-last-resort/band-c64/levels-546x2-k1/weak4-640-100-48-256-320-64-4096-64-32-summary/weak-by-hash/without-payouts/kad/1.0.0"
             )
         );
     }

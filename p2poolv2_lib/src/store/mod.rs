@@ -78,7 +78,14 @@ const STORE_FORMAT_KEY: &[u8] = b"store_format";
 ///   pruned one payout depth below the confirmed tip. A stored share
 ///   carrying weak shares commits the old root, which every node now
 ///   refuses, and a stored summary has no leaf root; the chain starts again.
-pub const STORE_FORMAT_VERSION: u32 = 11;
+/// - 12 (2026-11-16): each known Bitcoin Cash header carries its
+///   CHIP-2025-03 ticks and next interval, worked out from its own branch's
+///   median time past (`BCH_CURRENT_CHAIN_RULE_TAG`, `bch-prev-1off-ticks`,
+///   and `BCH_MERGE_MINING_RULE_TAG`, `mm2-roots-asert8-ticks`). A stored
+///   header has neither and would not decode, and a stored chain was
+///   validated with intervals each node learned while running; the chain
+///   starts again.
+pub const STORE_FORMAT_VERSION: u32 = 12;
 
 pub mod bch_headers;
 pub mod block_tx_metadata;
@@ -650,9 +657,10 @@ impl Store {
              (the main and mini chains merged) whose headers carry a difficulty band, a \
              payout level and weak shares, with payees below their level paid by a draw and \
              every proof from a job at the minimum paid at the weak work, whose weak root \
-             commits each carried weak share's whole encoding and their summary, and whose weak \
-             ratio follows the weak shares that ask for an easier weak target. Delete the store directory and \
-             restart to resync the share chain from peers.",
+             commits each carried weak share's whole encoding and their summary, whose weak \
+             ratio follows the weak shares that ask for an easier weak target, and where each \
+             known Bitcoin Cash header carries its ticks and next block interval (CHIP-2025-03). \
+             Delete the store directory and restart to resync the share chain from peers.",
             self.path
         )))
     }

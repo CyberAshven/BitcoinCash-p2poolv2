@@ -889,9 +889,8 @@ shares a second as its 1-second rows. Taking out what the shares themselves
 cost there, with a template a node, checking weak shares keeps a node about
 1% busy with 1,000 miners and 12% with 10,000; with 100,000 it takes 1.3
 times what a node can do, so the node falls behind, unless the pool's nodes
-build one template (16%). Until 2026-11-16 a node checked one share or weak
-share at a time; it now checks the weak shares a share carries on several
-cores (item 2 below), while a relayed weak share is still checked on one.
+build one template (16%). A node checks the header rules of the weak shares
+a share carries on several cores (item 2 below), and the rest on one.
 These costs were measured with ten-minute blocks. A one-minute block's
 coinbase pays at most about 1,790 outputs at the default level, a tenth of
 the 17,885 measured with 100,000 miners, and the window of any pool above
@@ -924,13 +923,10 @@ Neither is a share-chain rule, and each helps under today's rule too.
 2. **Weak share checks leave the single validation queue**, so a node with
    several cores checks several at once, or the check gets cheap enough
    that 35 a second fit one core with 100,000 miners in the window. Built
-   for the weak shares a share carries (PR #127): a node checks them on
-   its own thread and on helper threads, one fewer than its CPUs across the
-   node (`utils/parallel.rs`), and holds the PPLNS window only while their
-   payouts are taken, not while their coinbases are rebuilt and hashed. The
-   verdict is the first failing weak share's in carried order, as before. A
-   relayed weak share is still checked by the weak share worker alone,
-   though no longer under the window. Until a node is measured keeping up
+   for the header rules of the weak shares a share carries (PR #127), on
+   helper threads one fewer than the node's CPUs (`utils/parallel.rs`);
+   their coinbases stay on one thread, where batches on several measured
+   about 15% slower at 1,200 payees. Until a node is measured keeping up
    with 100,000 miners in the window, `WEAK_FILL_MAX` 320 is safe for pools
    paying tens of thousands of miners, not 100,000.
 
@@ -1109,6 +1105,26 @@ Still open:
   moves `C` to 48 to 61 with 2% of the pool and to its maximum with 10%, and
   changes nothing home miners are paid: the cap only bounds how heavy a job
   a node may give.
+
+### Study #85: weak work in fork choice
+
+The idea: count each carried weak share's work in fork choice, as uncle work
+counts, so a node that drops other miners' weak shares loses races and the
+includer cut can shrink. The payout simulator's "Study #85" tables tested it
+against nodes refusing to carry others' weak shares.
+
+| Finding | Result |
+|---|---|
+| Weak work in races alone | Races are about 2% of shares: honest weak shares lost move from 4.92% to 4.65% with half the hashrate refusing, and a 90% coalition still gains 2.6 to 4.3% at every cut |
+| What stops a 90% coalition | `WEAK_DEPTH` 48: its gain falls from +2.7 to +4.2% at depth 6 to +0.03 to +0.04%, honest losses from 56% to 1.2%, and the Bitaxe keeps 0.99 of its fair pay |
+| Includer cut | 1% at depth 48: a 90% coalition gains at most 0.04%, a lone refuser loses 0.2 to 0.9% |
+
+Decided: `WEAK_DEPTH` 48, a 1% cut and `R_MAX` 256 became the rules on
+2026-11-12 (`weak2-64-100-48-256`), and weak work stays out of fork choice:
+through races alone it moves a coalition's gain by 0.12 points at most, not
+worth its header-sync work. The study's scaling ideas were built as #121
+(weak shares by hash), #128 (relay after the header check), #131 (shares
+relayed without payouts) and #122 (16 outgoing peers).
 
 ## References
 

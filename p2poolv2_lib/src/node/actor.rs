@@ -25,6 +25,7 @@ use crate::node::p2p_health::P2pHealth;
 use crate::node::p2p_message_handlers::receivers::block_receiver::{
     BlockReceiver, create_block_receiver_channel,
 };
+use crate::node::p2p_message_handlers::receivers::share_without_payouts::CoinbaseRebuilder;
 use crate::node::p2p_message_handlers::senders::build_getheaders_message;
 use crate::node::p2p_message_handlers::senders::send_share_block_broadcast;
 use crate::node::p2p_message_handlers::senders::share_block::weak_shares_to_prefill;
@@ -43,6 +44,7 @@ use crate::node::weak_share_worker::{WeakShareNetwork, WeakShareWorker};
 use crate::pool_difficulty::PoolDifficulty;
 #[cfg(not(test))]
 use crate::pool_difficulty::PoolDifficulty;
+use crate::shares::bch_asert::TickSchedule;
 #[cfg(test)]
 #[mockall_double::double]
 use crate::shares::chain::chain_store_handle::ChainStoreHandle;
@@ -132,9 +134,13 @@ impl NodeHandle {
                 &config.bitcoinrpc.username,
                 &config.bitcoinrpc.password,
             )?;
-            BchHeaderFeeder::new(client, chain_store_handle.clone())
-                .first_sync(FIRST_SYNC_LIMIT)
-                .await;
+            BchHeaderFeeder::new(
+                client,
+                chain_store_handle.clone(),
+                config.stratum.bitcoin_cash_network,
+            )
+            .first_sync(FIRST_SYNC_LIMIT)
+            .await;
         }
         let (node_actor, stopping_rx) = NodeActor::new(
             config,
@@ -609,7 +615,8 @@ fn start_payout_tree_executor(
         }
     };
     let (sink, found) = payout_tree_channel();
-    let executor = PayoutTreeExecutor::new(client, chain_store_handle.clone(), found);
+    let executor = PayoutTreeExecutor::new(client, chain_store_handle.clone(), found)
+        .with_tick_schedule(bitcoin_cash_tick_schedule(config));
     tokio::spawn(executor.run());
     Some(sink)
 }
@@ -694,13 +701,20 @@ impl NodeActor {
                 &config.bitcoinrpc.password,
             )?;
             (
-                Some(FoundBlockVerifier::new(
-                    client.clone(),
-                    chain_store_handle.clone(),
-                    metrics.clone(),
-                )),
+                Some(
+                    FoundBlockVerifier::new(
+                        client.clone(),
+                        chain_store_handle.clone(),
+                        metrics.clone(),
+                    )
+                    .with_tick_schedule(bitcoin_cash_tick_schedule(&config)),
+                ),
                 // Follows BCHN's headers for mining on the current chain.
-                Some(BchHeaderFeeder::new(client, chain_store_handle.clone())),
+                Some(BchHeaderFeeder::new(
+                    client,
+                    chain_store_handle.clone(),
+                    config.stratum.bitcoin_cash_network,
+                )),
             )
         } else {
             (None, None)
@@ -843,9 +857,16 @@ impl NodeActor {
             .id();
         worker_names.insert(emission_worker_id, "Emission worker");
 
+        // Bitcoin Cash: rebuild the coinbases of the shares peers relay
+        // without their payouts from the window validation reads.
+        let mut node = node;
+        if chain == Chain::BitcoinCash {
+            node.request_response_handler
+                .set_coinbase_rebuilder(CoinbaseRebuilder::new(pplns_window.clone()));
+        }
+
         // Bitcoin Cash P2Pool: check weak shares from stratum and peers, pool
         // the ones that pass and relay them (`node::weak_share_worker`).
-        let mut node = node;
         let weak_share_relay = weak_shares.map(|network| {
             node.request_response_handler
                 .set_weak_share_sender(network.events_tx);
@@ -888,6 +909,11 @@ impl NodeActor {
         reconnect_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         // Skip the immediate first tick so we don't reconnect while initial dials are in progress
         reconnect_interval.tick().await;
+
+        let mut outgoing_target_interval = tokio::time::interval(
+            crate::node::outgoing_peer_target::OutgoingPeerTarget::check_interval(),
+        );
+        outgoing_target_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         const SYNC_RETRY_INTERVAL: u64 = 60;
         let mut sync_retry_interval =
@@ -958,6 +984,9 @@ impl NodeActor {
                 }
                 _ = reconnect_interval.tick(), if self.node.peer_reconnector.has_peers() => {
                     self.node.attempt_reconnections();
+                }
+                _ = outgoing_target_interval.tick(), if self.node.outgoing_peer_target.has_target() => {
+                    self.node.dial_toward_outgoing_target();
                 }
                 _ = sync_retry_interval.tick(), if !self.chain_store_handle.is_current() => {
                     self.on_sync_retry_tick();
@@ -1285,6 +1314,16 @@ impl NodeActor {
 /// to compare against, so it is not progress and the sync retry still fires.
 fn confirmed_tip_progressed(last_seen: Option<BlockHash>, current: BlockHash) -> bool {
     last_seen.is_some_and(|seen| seen != current)
+}
+
+/// The configured Bitcoin Cash network's block intervals (its timed
+/// switches and pins), or ten-minute blocks when the node runs no Bitcoin
+/// Cash network.
+pub(crate) fn bitcoin_cash_tick_schedule(config: &Config) -> TickSchedule {
+    config
+        .stratum
+        .bitcoin_cash_network
+        .map_or(TickSchedule::TEN_MINUTES, TickSchedule::for_network)
 }
 
 #[cfg(test)]

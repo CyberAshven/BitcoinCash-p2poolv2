@@ -278,6 +278,16 @@ struct VerboseBlockHeader {
     /// from Bitcoin Core, and from BCHN for a block it keeps no state for.
     #[serde(default)]
     ablastate: Option<AblaState>,
+    /// CHIP-2025-03's ticks of the block: the sum of the target intervals
+    /// up to it. Absent from a node without the CHIP.
+    #[serde(default)]
+    ticks: Option<i64>,
+    /// The block's own target interval, in ticks.
+    #[serde(default)]
+    target_time: Option<i64>,
+    /// The target interval of a block built on this one.
+    #[serde(default)]
+    next_target_time: Option<i64>,
 }
 
 /// The field of BCHN's `ablastate` that is read.
@@ -295,6 +305,14 @@ pub struct BlockHeaderSummary {
     /// `ablastate.nextblocksizelimit`, the larger of the node's floor and its
     /// ABLA limit. `None` when the node reports no ABLA state for the block.
     pub next_block_size_limit: Option<u64>,
+    /// CHIP-2025-03's `ticks` of the block, the sum of the target
+    /// intervals up to it. `None` when the node does not report them.
+    pub ticks: Option<i64>,
+    /// The block's own target interval in ticks (`target_time`).
+    pub target_time: Option<i64>,
+    /// The target interval of a block built on this one
+    /// (`next_target_time`).
+    pub next_target_time: Option<i64>,
 }
 
 #[derive(Debug, Clone)]
@@ -541,6 +559,9 @@ impl BitcoindRpcClient {
         Ok(BlockHeaderSummary {
             height: header.height,
             next_block_size_limit: header.ablastate.map(|state| state.nextblocksizelimit),
+            ticks: header.ticks,
+            target_time: header.target_time,
+            next_target_time: header.next_target_time,
         })
     }
 

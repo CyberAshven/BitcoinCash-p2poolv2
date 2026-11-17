@@ -68,19 +68,12 @@ use std::sync::{Arc, RwLock};
 /// may build on.
 const WEAK_PAYOUT_CACHE_CAPACITY: usize = 4 * WEAK_DEPTH as usize;
 
-/// The most carried weak shares whose payouts are taken under one hold of
-/// the PPLNS window, before the window is let go and their coinbases are
-/// checked on several threads
-/// ([`DefaultShareValidator::validate_carried_weak_coinbases`]). It bounds
-/// the payouts kept besides the cache's, however many weak shares a share
-/// carries.
-const WEAK_COINBASE_BATCH: usize = 64;
-
 /// What a weak share's expected payouts depend on besides the window's
 /// distribution: its parent (the window's anchor), the paying header's bits
 /// and Bitcoin Cash prev, the coinbase's total value, its merge-mining output
 /// and its own donation and fee. Weak shares on the same template share all
-/// of them, so they share one rebuild of the window's payouts.
+/// of them, so they share one rebuild of the window's payouts. A share
+/// relayed without its payouts depends on the same fields of its header.
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct WeakPayoutKey {
     parent: BlockHash,
@@ -92,8 +85,7 @@ struct WeakPayoutKey {
 }
 
 impl WeakPayoutKey {
-    fn of(weak_share: &WeakShare) -> Self {
-        let header = &weak_share.header;
+    fn of(header: &ShareHeader, coinbase_value: u64) -> Self {
         let mut merge_mining = Vec::with_capacity(64);
         header
             .merge_mining_commitment()
@@ -124,7 +116,7 @@ impl WeakPayoutKey {
             parent: header.prev_share_blockhash,
             bitcoin_bits: header.bitcoin_header.bits.to_consensus(),
             bch_prev: header.bitcoin_header.prev_blockhash,
-            coinbase_value: weak_share.coinbase_value,
+            coinbase_value,
             merge_mining,
             cuts,
         }
@@ -165,7 +157,6 @@ struct WeakWeightsKey {
 /// template ([`WeakPayoutKey`]): weak shares on many templates of one block
 /// cost one walk of the window, and each weak share one coinbase rebuild and
 /// hash.
-#[derive(Default)]
 pub struct WeakPayoutCache {
     weights: HashMap<WeakWeightsKey, Arc<PplnsWeights>>,
     payouts: HashMap<WeakPayoutKey, Arc<CoinbasePayouts>>,
@@ -173,15 +164,33 @@ pub struct WeakPayoutCache {
     weights_order: VecDeque<WeakWeightsKey>,
     /// The payout keys in the order they were cached, oldest first.
     payouts_order: VecDeque<WeakPayoutKey>,
+    /// The most window weights kept.
+    weights_capacity: usize,
+    /// The most expected payouts kept.
+    payouts_capacity: usize,
+}
+
+impl Default for WeakPayoutCache {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl WeakPayoutCache {
     pub fn new() -> Self {
+        Self::with_capacities(WEAK_WEIGHTS_CACHE_CAPACITY, WEAK_PAYOUT_CACHE_CAPACITY)
+    }
+
+    /// A cache keeping at most `weights_capacity` window weights and
+    /// `payouts_capacity` expected payouts, each dropping its oldest first.
+    pub fn with_capacities(weights_capacity: usize, payouts_capacity: usize) -> Self {
         Self {
-            weights: HashMap::with_capacity(WEAK_WEIGHTS_CACHE_CAPACITY),
-            payouts: HashMap::with_capacity(WEAK_PAYOUT_CACHE_CAPACITY),
-            weights_order: VecDeque::with_capacity(WEAK_WEIGHTS_CACHE_CAPACITY),
-            payouts_order: VecDeque::with_capacity(WEAK_PAYOUT_CACHE_CAPACITY),
+            weights: HashMap::with_capacity(weights_capacity),
+            payouts: HashMap::with_capacity(payouts_capacity),
+            weights_order: VecDeque::with_capacity(weights_capacity),
+            payouts_order: VecDeque::with_capacity(payouts_capacity),
+            weights_capacity,
+            payouts_capacity,
         }
     }
 
@@ -201,7 +210,7 @@ impl WeakPayoutCache {
         }
         let weights = self.weights_or_walk(key.weights_key(), walk_window)?;
         let payouts = Arc::new(build_outputs(&weights)?);
-        if self.payouts.len() >= WEAK_PAYOUT_CACHE_CAPACITY
+        if self.payouts.len() >= self.payouts_capacity
             && let Some(oldest) = self.payouts_order.pop_front()
         {
             self.payouts.remove(&oldest);
@@ -222,7 +231,7 @@ impl WeakPayoutCache {
             return Ok(Arc::clone(weights));
         }
         let weights = Arc::new(walk_window()?);
-        if self.weights.len() >= WEAK_WEIGHTS_CACHE_CAPACITY
+        if self.weights.len() >= self.weights_capacity
             && let Some(oldest) = self.weights_order.pop_front()
         {
             self.weights.remove(&oldest);
@@ -494,7 +503,10 @@ impl DefaultShareValidator {
         let weak_target = self.validate_weak_share_proof_of_work(weak_share, &parent)?;
 
         self.validate_share_version(header, chain_store_handle)?;
-        self.validate_bch_prev_known(header, chain_store_handle)?;
+        // As for a full share: with the BCH prev known, the token band
+        // follows its own ticks and next interval.
+        let bch_prev = self.validate_bch_prev_known(header, chain_store_handle)?;
+        self.validate_token_share_asert(header, bch_prev)?;
         let ancestor_times = stored_ancestor_times(parent_hash, chain_store_handle)?;
         check_median_time_past(header.time, &ancestor_times)?;
         Ok(weak_target)
@@ -529,7 +541,8 @@ impl DefaultShareValidator {
         check_share_version_alone(header.share_version).map_err(|error| {
             ValidationError::consensus(format!("Invalid share version: {error}"))
         })?;
-        self.validate_token_share_asert(header)?;
+        // No store here: the pins give the BCH prev's ticks by height.
+        self.validate_token_share_asert(header, None)?;
         super::ShareValidator::validate_coinbase_proof(self, header, &weak_share.merkle_branch)
     }
 
@@ -576,25 +589,52 @@ impl DefaultShareValidator {
         window: &mut PplnsWindow,
         cache: &mut WeakPayoutCache,
     ) -> Result<(), ValidationError> {
-        let payouts = self.weak_share_payouts(weak_share, chain_store_handle, window, cache)?;
-        self.check_weak_share_pays(weak_share, &payouts)
+        let header = &weak_share.header;
+        let coinbase = self.rebuild_coinbase_paying_window(
+            header,
+            &carried_script_sig(weak_share),
+            weak_share.coinbase_value,
+            chain_store_handle,
+            window,
+            cache,
+        )?;
+        let root =
+            compute_merkle_root_from_branches(coinbase.compute_txid(), &weak_share.merkle_branch);
+        if root != header.bitcoin_header.merkle_root {
+            return Err(ValidationError::consensus(format!(
+                "Weak share {} does not pay its PPLNS window: its rebuilt coinbase gives merkle root {root}, not its header's",
+                weak_share.pow_hash()
+            )));
+        }
+        Ok(())
     }
 
-    /// The payouts rule 3 rebuilds a weak share's coinbase with: the PPLNS
-    /// window's anchored at its parent, for its total value, cuts and
-    /// merge-mining output, from `cache` or a walk of `window`. The only part
-    /// of rule 3 that needs the window.
-    fn weak_share_payouts(
+    /// The Bitcoin Cash coinbase `header` implies when it pays the PPLNS
+    /// window anchored at its parent: the scriptSig of `carried_coinbase`,
+    /// which needs no outputs, the window's payouts for
+    /// `coinbase_value`, the header's merge-mining output, payout tree,
+    /// padding and commitment, and the locktime from its height, within the
+    /// coinbase limit of its split. Rule 3 of a weak share checks this
+    /// coinbase's txid against its header's merkle root, and a share relayed
+    /// without its payouts (`ShareWithoutPayouts`) gets its coinbase back
+    /// from it.
+    ///
+    /// The window's weights come from `cache` when another share or weak
+    /// share on the same parent and Bitcoin Cash block already walked the
+    /// window, and its payouts when one on the same template already built
+    /// them.
+    pub(crate) fn rebuild_coinbase_paying_window(
         &self,
-        weak_share: &WeakShare,
+        header: &ShareHeader,
+        carried_coinbase: &Transaction,
+        coinbase_value: u64,
         chain_store_handle: &ChainStoreHandle,
         window: &mut PplnsWindow,
         cache: &mut WeakPayoutCache,
-    ) -> Result<Arc<CoinbasePayouts>, ValidationError> {
-        let header = &weak_share.header;
+    ) -> Result<Transaction, ValidationError> {
         let split = split_for_share(self.chain, header);
-        cache.get_or_build(
-            WeakPayoutKey::of(weak_share),
+        let payouts = cache.get_or_build(
+            WeakPayoutKey::of(header, coinbase_value),
             || {
                 let paying_block = PayingBlock::new(
                     bitcoin_block_difficulty(header.bitcoin_header.bits, window.network()),
@@ -608,46 +648,18 @@ impl DefaultShareValidator {
                     )
                     .map_err(window_error_verdict)
             },
-            |weights| {
-                Self::build_expected_outputs(header, weights, weak_share.coinbase_value, split)
-            },
-        )
-    }
-
-    /// The rest of rule 3, against the window's `payouts`
-    /// ([`Self::weak_share_payouts`]): the coinbase rebuilt from them and the
-    /// weak share's scriptSig, within Bitcoin Cash's coinbase limit, folds up
-    /// its branch to its header's merkle root. Reads neither the window nor
-    /// the store, so it runs with the window let go, on any thread.
-    fn check_weak_share_pays(
-        &self,
-        weak_share: &WeakShare,
-        payouts: &CoinbasePayouts,
-    ) -> Result<(), ValidationError> {
-        let header = &weak_share.header;
-        let split = split_for_share(self.chain, header);
+            |weights| Self::build_expected_outputs(header, weights, coinbase_value, split),
+        )?;
         let commitment_hash = ShareCommitment::from_share_header_and_root(
             header,
             header.coinbase_proof.share_witness_root,
         )
         .hash();
-        let coinbase = self.rebuild_bitcoin_coinbase(
-            header,
-            &carried_script_sig(weak_share),
-            payouts,
-            commitment_hash,
-        )?;
+        let coinbase =
+            self.rebuild_bitcoin_coinbase(header, carried_coinbase, &payouts, commitment_hash)?;
         check_bch_coinbase_limit(&coinbase, split)
             .map_err(|error| ValidationError::consensus(error.to_string()))?;
-        let root =
-            compute_merkle_root_from_branches(coinbase.compute_txid(), &weak_share.merkle_branch);
-        if root != header.bitcoin_header.merkle_root {
-            return Err(ValidationError::consensus(format!(
-                "Weak share {} does not pay its PPLNS window: its rebuilt coinbase gives merkle root {root}, not its header's",
-                weak_share.pow_hash()
-            )));
-        }
-        Ok(())
+        Ok(coinbase)
     }
 
     /// Every check of a relayed weak share that does not depend on a
@@ -655,9 +667,6 @@ impl DefaultShareValidator {
     /// [`Self::validate_weak_share_coinbase`]). Rule 5 and the depth rule are
     /// the carrier's ([`Self::validate_carried_weak_positions`]); the weak
     /// pool applies them against the best chain.
-    ///
-    /// The window is held only while the weak share's payouts are taken; its
-    /// coinbase is rebuilt and hashed after the window is let go.
     pub fn validate_relayed_weak_share(
         &self,
         weak_share: &WeakShare,
@@ -670,15 +679,10 @@ impl DefaultShareValidator {
             weak_share.header.time,
             self.time_provider.seconds_since_epoch(),
         )?;
-        let payouts = self.weak_share_payouts(
-            weak_share,
-            chain_store_handle,
-            &mut pplns_window
-                .write()
-                .expect("PPLNS window lock poisoned on write"),
-            cache,
-        )?;
-        self.check_weak_share_pays(weak_share, &payouts)
+        let mut window = pplns_window
+            .write()
+            .expect("PPLNS window lock poisoned on write");
+        self.validate_weak_share_coinbase(weak_share, chain_store_handle, &mut window, cache)
     }
 
     /// Where a share may carry its weak shares: each one's parent at most
@@ -829,18 +833,12 @@ impl DefaultShareValidator {
 
     /// The coinbase check of every weak share a share carries
     /// ([`Self::validate_weak_share_coinbase`]), with one payout cache for
-    /// the share.
+    /// the share, under one hold of the window.
     ///
     /// Runs on a stored body, which passed [`check_weak_shares_match_header`]:
     /// the scriptSig, total value, branch and header each weak share's
     /// coinbase is rebuilt from are all fixed by the carrier's weak root, so a
     /// `Consensus` failure here is a verdict on what the miner carried.
-    ///
-    /// The weak shares go in batches of [`WEAK_COINBASE_BATCH`]: the window is
-    /// held while a batch's payouts are taken ([`Self::batch_payouts`]), then
-    /// let go while their coinbases are rebuilt and hashed on several threads
-    /// ([`try_map_in_parallel`]). The verdict is the first failing weak
-    /// share's, in carried order, as checking them one by one gives.
     pub(crate) fn validate_carried_weak_coinbases(
         &self,
         share: &ShareBlock,
@@ -851,45 +849,17 @@ impl DefaultShareValidator {
             return Ok(());
         }
         let mut cache = WeakPayoutCache::new();
-        for batch in share.weak_shares.chunks(WEAK_COINBASE_BATCH) {
-            let (payouts, payouts_outcome) =
-                self.batch_payouts(batch, chain_store_handle, pplns_window, &mut cache);
-            let paid: Vec<(&WeakShare, Arc<CoinbasePayouts>)> = batch.iter().zip(payouts).collect();
-            try_map_in_parallel(&paid, |(weak_share, payouts)| {
-                self.check_weak_share_pays(weak_share, payouts)
-            })?;
-            payouts_outcome?;
-        }
-        Ok(())
-    }
-
-    /// The payouts of `batch`'s weak shares in order, from `cache` or the
-    /// window, held once for the whole batch, up to the first weak share whose
-    /// payouts cannot be had, and that one's failure.
-    ///
-    /// The window is the only lock taken here, and it is let go before any
-    /// coinbase of the batch is checked, so no thread checking a coinbase ever
-    /// waits for it.
-    fn batch_payouts(
-        &self,
-        batch: &[WeakShare],
-        chain_store_handle: &ChainStoreHandle,
-        pplns_window: &RwLock<PplnsWindow>,
-        cache: &mut WeakPayoutCache,
-    ) -> (Vec<Arc<CoinbasePayouts>>, Result<(), ValidationError>) {
         let mut window = pplns_window
             .write()
             .expect("PPLNS window lock poisoned on write");
-        let mut payouts = Vec::with_capacity(batch.len());
-        let outcome = batch.iter().try_for_each(|weak_share| {
-            payouts.push(self.weak_share_payouts(
+        for weak_share in &share.weak_shares {
+            self.validate_weak_share_coinbase(
                 weak_share,
                 chain_store_handle,
                 &mut window,
-                cache,
-            )?);
-            Ok(())
-        });
-        (payouts, outcome)
+                &mut cache,
+            )?;
+        }
+        Ok(())
     }
 }

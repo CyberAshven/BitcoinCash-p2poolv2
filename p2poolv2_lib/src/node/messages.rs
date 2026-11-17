@@ -12,7 +12,7 @@ use bitcoin::block::Header;
 use bitcoin::consensus::{Decodable, Encodable, encode};
 use bitcoin::hashes::{Hash, sha256d};
 use bitcoin::io::{Read, Write};
-use bitcoin::{BlockHash, TxMerkleNode, Txid, VarInt};
+use bitcoin::{BlockHash, Transaction, TxMerkleNode, Txid, VarInt};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt::Display;
@@ -73,6 +73,11 @@ mod message_discriminants {
     pub const GET_CARRIED_WEAK_SHARES: u8 = 14;
     /// The weak shares a `GET_CARRIED_WEAK_SHARES` asked for.
     pub const CARRIED_WEAK_SHARES: u8 = 15;
+    /// A new Bitcoin Cash share relayed without the outputs of its Bitcoin
+    /// Cash coinbase and with the weak shares it carries listed by
+    /// proof-of-work hash (`ShareWithoutPayouts`), preceded by the Bitcoin
+    /// Cash headers it carries, which may be none.
+    pub const SHARE_WITHOUT_PAYOUTS: u8 = 16;
 }
 
 /// InventoryMessage discriminants to determine the type of inventory message
@@ -117,6 +122,12 @@ pub enum Message {
     /// The peer fills the weak shares from its weak pool and the whole ones,
     /// and asks for the rest with `GetCarriedWeakShares`.
     ShareWithWeakHashes(ShareWithWeakHashes, Vec<Header>),
+    /// `ShareWithWeakHashes` with no outputs in the share's Bitcoin Cash
+    /// coinbase, for a share whose outputs are large enough that leaving
+    /// them out pays for a rebuild (`RELAY_WITHOUT_PAYOUTS_MIN_BYTES`);
+    /// answered with `Ack`. The peer rebuilds the outputs from its PPLNS
+    /// window, then fills the weak shares as for `ShareWithWeakHashes`.
+    ShareWithoutPayouts(ShareWithoutPayouts, Vec<Header>),
     /// Ask the peer that relayed the share with this hash for the weak
     /// shares it carries with these proof-of-work hashes.
     GetCarriedWeakShares(BlockHash, Vec<BlockHash>),
@@ -210,6 +221,7 @@ impl Message {
             Message::Handshake(_) => "Handshake",
             Message::WeakShare(_) => "WeakShare",
             Message::ShareWithWeakHashes(..) => "ShareWithWeakHashes",
+            Message::ShareWithoutPayouts(..) => "ShareWithoutPayouts",
             Message::GetCarriedWeakShares(..) => "GetCarriedWeakShares",
             Message::CarriedWeakShares(..) => "CarriedWeakShares",
             Message::Ack => "Ack",
@@ -425,8 +437,9 @@ impl Decodable for ShareHeaderBatch {
 }
 
 /// A share block whose carried weak shares are listed by proof-of-work hash
-/// instead of sent whole: how a node relays a new share that carries weak
-/// shares (`Message::ShareWithWeakHashes`).
+/// instead of sent whole: how a node relays a new Bitcoin Cash share's weak
+/// shares (`Message::ShareWithWeakHashes`, and inside
+/// [`ShareWithoutPayouts`] for a share with large payouts).
 ///
 /// Its peers have most of those weak shares already, from the weak share
 /// gossip, so the share message no longer grows with every weak share it
@@ -534,6 +547,118 @@ impl Decodable for ShareWithWeakHashes {
     }
 }
 
+/// A Bitcoin Cash share relayed without the outputs of its Bitcoin Cash
+/// coinbase: how a node relays a new share whose outputs take at least
+/// `RELAY_WITHOUT_PAYOUTS_MIN_BYTES` (`Message::ShareWithoutPayouts`).
+///
+/// Every node rebuilds a share's coinbase from its own PPLNS window to
+/// validate it, so a relayed share can leave the outputs out: output 0 comes
+/// from the header's merge-mining fields, the payouts and the payout tree
+/// from the window anchored at the share's parent, and the commitment and
+/// locktime from the header. The payouts are one output per payee and most
+/// of a large share's bytes, so the message no longer grows with them. The
+/// coinbase keeps its input, whose scriptSig holds what the header cannot
+/// give (aux flags, extranonce, nanosecond timestamp and pool signature),
+/// and the message keeps the outputs' total, which the payouts divide: what
+/// a weak share carries of its coinbase, and what a P2Pool v1 share carried
+/// in place of its generation transaction. Its weak shares are listed by
+/// hash as in [`ShareWithWeakHashes`].
+///
+/// A P2P message, not a share-chain rule: the share, its header and its
+/// coinbase are the same, and the receiver goes on only with a rebuilt
+/// coinbase whose txid is the one the header's coinbase proof gives.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShareWithoutPayouts {
+    /// The share with its weak shares listed by hash and no outputs in its
+    /// Bitcoin Cash coinbase.
+    share: ShareWithWeakHashes,
+    /// The total of the coinbase's outputs in satoshis.
+    coinbase_value: u64,
+}
+
+impl ShareWithoutPayouts {
+    /// `share` with the outputs of its Bitcoin Cash coinbase left out and
+    /// their total kept. A total past `u64::MAX` is kept as `u64::MAX`: no
+    /// coinbase paying that much is valid, and its rebuild fails, so the
+    /// receiver asks for the share whole.
+    pub fn new(mut share: ShareWithWeakHashes) -> Self {
+        let coinbase = &mut share.share_block.bitcoin_coinbase;
+        let coinbase_value = coinbase
+            .output
+            .iter()
+            .map(|output| output.value.to_sat())
+            .fold(0, u64::saturating_add);
+        coinbase.output = Vec::new();
+        Self {
+            share,
+            coinbase_value,
+        }
+    }
+
+    /// The share's hash, its header's.
+    pub fn block_hash(&self) -> BlockHash {
+        self.share.block_hash()
+    }
+
+    /// The share as sent: no weak shares in its body and no outputs in its
+    /// Bitcoin Cash coinbase.
+    pub fn share_block(&self) -> &ShareBlock {
+        self.share.share_block()
+    }
+
+    /// The total of the coinbase's outputs in satoshis.
+    pub fn coinbase_value(&self) -> u64 {
+        self.coinbase_value
+    }
+
+    /// The weak shares sent whole beside the list of hashes.
+    pub fn prefilled(&self) -> &[WeakShare] {
+        self.share.prefilled()
+    }
+
+    /// The share with `coinbase`, its rebuilt Bitcoin Cash coinbase, in its
+    /// body, and its weak shares still listed by hash.
+    pub fn with_coinbase(mut self, coinbase: Transaction) -> ShareWithWeakHashes {
+        self.share.share_block.bitcoin_coinbase = coinbase;
+        self.share
+    }
+
+    /// The share as sent, with no weak shares and no coinbase outputs in its
+    /// body.
+    pub fn into_share_block(self) -> ShareBlock {
+        self.share.into_unfilled()
+    }
+}
+
+impl Encodable for ShareWithoutPayouts {
+    fn consensus_encode<W: Write + ?Sized>(&self, w: &mut W) -> Result<usize, bitcoin::io::Error> {
+        let mut len = self.share.consensus_encode(w)?;
+        len += self.coinbase_value.consensus_encode(w)?;
+        Ok(len)
+    }
+}
+
+impl Decodable for ShareWithoutPayouts {
+    fn consensus_decode<R: Read + ?Sized>(r: &mut R) -> Result<Self, encode::Error> {
+        let share = ShareWithWeakHashes::consensus_decode(r)?;
+        let share_block = share.share_block();
+        if !share_block.header.carries_band() {
+            return Err(encode::Error::ParseFailed(
+                "A share without payouts needs a Bitcoin Cash share header",
+            ));
+        }
+        if !share_block.bitcoin_coinbase.output.is_empty() {
+            return Err(encode::Error::ParseFailed(
+                "A share without payouts carries coinbase outputs",
+            ));
+        }
+        Ok(Self {
+            share,
+            coinbase_value: u64::consensus_decode(r)?,
+        })
+    }
+}
+
 /// Write weak share proof-of-work hashes: a count, then each hash.
 fn encode_weak_hashes<W: Write + ?Sized>(
     hashes: &[BlockHash],
@@ -591,8 +716,8 @@ fn decode_bch_headers<R: Read + ?Sized>(r: &mut R) -> Result<Vec<Header>, encode
     Ok(headers)
 }
 
-/// Read carried Bitcoin Cash headers that may be none, as a share with weak
-/// hashes has them, refusing more than `MAX_CARRIED_BCH_HEADERS` before
+/// Read carried Bitcoin Cash headers that may be none, as a share without
+/// payouts has them, refusing more than `MAX_CARRIED_BCH_HEADERS` before
 /// allocating.
 fn decode_optional_bch_headers<R: Read + ?Sized>(r: &mut R) -> Result<Vec<Header>, encode::Error> {
     let count = VarInt::consensus_decode(r)?.0 as usize;
@@ -700,6 +825,12 @@ impl Encodable for Message {
                 len += share.consensus_encode(w)?;
                 Ok(len)
             }
+            Message::ShareWithoutPayouts(share, bch_headers) => {
+                let mut len = SHARE_WITHOUT_PAYOUTS.consensus_encode(w)?;
+                len += encode_bch_headers(bch_headers, w)?;
+                len += share.consensus_encode(w)?;
+                Ok(len)
+            }
             Message::GetCarriedWeakShares(share_hash, weak_hashes) => {
                 let mut len = GET_CARRIED_WEAK_SHARES.consensus_encode(w)?;
                 len += share_hash.consensus_encode(w)?;
@@ -771,6 +902,13 @@ impl Decodable for Message {
                 let bch_headers = decode_optional_bch_headers(r)?;
                 Ok(Message::ShareWithWeakHashes(
                     ShareWithWeakHashes::consensus_decode(r)?,
+                    bch_headers,
+                ))
+            }
+            SHARE_WITHOUT_PAYOUTS => {
+                let bch_headers = decode_optional_bch_headers(r)?;
+                Ok(Message::ShareWithoutPayouts(
+                    ShareWithoutPayouts::consensus_decode(r)?,
                     bch_headers,
                 ))
             }

@@ -15,7 +15,7 @@ use crate::accounting::payout::sharechain_pplns::pplns_window::{
 use crate::config::StratumConfig;
 use crate::pool_difficulty;
 use crate::shares::band::{BAND_CAP_UNIT, ParentBand, next_band_cap};
-use crate::shares::bch_asert::BchAsert;
+use crate::shares::bch_asert::{BchAsert, TickSchedule};
 #[cfg(test)]
 #[mockall_double::double]
 use crate::shares::chain::chain_store_handle::ChainStoreHandle;
@@ -370,14 +370,22 @@ fn merge_token_payouts(
     let Some(merge_tokens) = merge_tokens else {
         return Ok((output_distribution, None));
     };
-    if let Err(reason) = template_meets_token_asert(template, &context.config) {
+    if let Err(reason) =
+        template_meets_token_asert(template, &context.config, &context.chain_store_handle)
+    {
         warn!(
             "Template at height {} fails the ASERT band token shares must meet ({reason}); it is mined without merge-mined tokens",
             template.height
         );
         return Ok((output_distribution, None));
     }
-    let merge_tokens = match merge_tokens.at_height(template.height) {
+    // A SAFA vault's claim target eases by the ticks since its state, by
+    // the network's pins, as its covenant counts them.
+    let schedule = context
+        .config
+        .bitcoin_cash_network
+        .map_or(TickSchedule::TEN_MINUTES, TickSchedule::for_network);
+    let merge_tokens = match merge_tokens.at_height(template.height, &schedule) {
         Ok(merge_tokens) => merge_tokens,
         Err(reason) => {
             warn!(
@@ -406,20 +414,38 @@ fn merge_token_payouts(
     Ok((payouts, Some(merge_tokens)))
 }
 
-/// Whether a token share mined on `template` would pass the ASERT check
-/// peers run on token shares (`validate_token_share_asert`): its nBits at
-/// its height, with its `curtime` standing in for the header's time. A
-/// network without an ASERT anchor (regtest, scalenet) always passes.
+/// Whether a token share mined on `template` would pass the ASERT checks
+/// peers run on token shares (`validate_token_share_asert`): its nBits after
+/// its previous block, with its `curtime` standing in for the header's time.
+/// Peers check it at the header gate with the network's pins by height, and
+/// in block validation with the previous block's own ticks and interval, so
+/// it must pass both: the second where this node knows that block's header.
+/// A network without an ASERT anchor (regtest, scalenet) always passes.
 fn template_meets_token_asert(
     template: &BlockTemplate,
     config: &StratumConfig<crate::config::Parsed>,
+    chain_store_handle: &ChainStoreHandle,
 ) -> Result<(), String> {
     let Some(asert) = config.bitcoin_cash_network.and_then(BchAsert::for_network) else {
         return Ok(());
     };
     let bits = bitcoin::pow::CompactTarget::from_unprefixed_hex(&template.bits)
         .map_err(|error| format!("template bits {}: {error}", template.bits))?;
-    asert.check_header_bits(bits, template.curtime, u64::from(template.height))
+    let height = u64::from(template.height);
+    asert.check_header_bits(bits, template.curtime, height, None)?;
+    let prev = template
+        .previousblockhash
+        .parse::<bitcoin::BlockHash>()
+        .map_err(|error| format!("template previous block: {error}"))?;
+    let known_prev = chain_store_handle
+        .get_bch_header(&prev)
+        .map_err(|error| format!("reading header {prev}: {error}"))?;
+    match known_prev {
+        Some(known) => {
+            asert.check_header_bits(bits, template.curtime, height, Some(known.tick_info()))
+        }
+        None => Ok(()),
+    }
 }
 
 /// The address a miner's own `donation=` choice pays: the network's built-in
@@ -637,6 +663,7 @@ mod tests {
     use crate::config::BitcoinCashNetwork;
     use crate::pool_difficulty::AsertParent;
     use crate::shares::bch_asert::{U256, get_compact};
+    use crate::shares::bch_headers::KnownBchHeader;
     use crate::stratum::messages::Notify;
     use crate::stratum::work::block_template::{BlockTemplate, TemplateTransaction};
     use crate::stratum::work::coinbase::extract_outputs_from_coinbase2;
@@ -646,6 +673,7 @@ mod tests {
     use crate::stratum::work::tracker::{JobId, start_tracker_actor};
     use crate::test_utils::genesis_for_tests;
     use crate::test_utils::make_test_share_address;
+    use bitcoin::CompactTarget;
     use bitcoin::CompressedPublicKey;
     use bitcoin::hashes::Hash;
     use bitcoin::{Address, Amount, Network, ScriptBuf, TxOut};
@@ -1342,6 +1370,15 @@ mod tests {
         assert_eq!(extracted_txouts[4].value, Amount::ZERO);
     }
 
+    /// A store that knows `known` as every block's header.
+    fn store_knowing_bch(known: Option<KnownBchHeader>) -> ChainStoreHandle {
+        let mut chain_store_handle = ChainStoreHandle::default();
+        chain_store_handle
+            .expect_get_bch_header()
+            .returning(move |_| Ok(known));
+        chain_store_handle
+    }
+
     /// A template whose nBits fail the token ASERT band gets no tokens: its
     /// token shares would be refused by every peer. Regtest has no anchor.
     #[test]
@@ -1353,24 +1390,70 @@ mod tests {
         let chipnet = BchAsert::CHIPNET;
         template.height = chipnet.anchor_height + 1 + 120;
         template.curtime = (chipnet.anchor_parent_time + 600) as u32;
-        let computed = chipnet
-            .next_target(template.height - 1, template.curtime)
-            .unwrap();
+        let parent = chipnet.tick_schedule.tick_info(template.height - 1);
+        let computed = chipnet.next_target(parent, template.curtime).unwrap();
         let mut config = StratumConfig::new_for_test_default().parse().unwrap();
         config.bitcoin_cash_network = Some(BitcoinCashNetwork::Chipnet);
+        let unknown = store_knowing_bch(None);
 
         template.bits = format!("{:08x}", get_compact(computed).to_consensus());
-        template_meets_token_asert(&template, &config).unwrap();
+        template_meets_token_asert(&template, &config, &unknown).unwrap();
         template.bits = format!(
             "{:08x}",
             get_compact(computed / U256::from(16)).to_consensus()
         );
         assert!(
-            template_meets_token_asert(&template, &config)
+            template_meets_token_asert(&template, &config, &unknown)
                 .unwrap_err()
                 .contains("harder")
         );
         config.bitcoin_cash_network = Some(BitcoinCashNetwork::Regtest);
-        template_meets_token_asert(&template, &config).unwrap();
+        template_meets_token_asert(&template, &config, &unknown).unwrap();
+    }
+
+    /// Peers check a token share at the header gate by the pins and in block
+    /// validation by its previous block's own ticks: a template must pass
+    /// both. Here the known previous block has a one-minute next block where
+    /// the pins say ten minutes, so the pins' nBits are ten times harder than
+    /// the known block requires, past the band, and the template gets no
+    /// tokens.
+    #[test]
+    fn token_jobs_follow_the_known_previous_blocks_ticks_too() {
+        let data = include_str!(
+            "../../../../p2poolv2_tests/test_data/gbt/regtest/ckpool/one-txn/gbt.json"
+        );
+        let mut template: BlockTemplate = serde_json::from_str(data).unwrap();
+        let chipnet = BchAsert::CHIPNET;
+        template.height = chipnet.anchor_height + 1 + 120;
+        template.curtime = (chipnet.anchor_parent_time + 600) as u32;
+        let pinned = chipnet.tick_schedule.tick_info(template.height - 1);
+        let computed = chipnet.next_target(pinned, template.curtime).unwrap();
+        template.bits = format!("{:08x}", get_compact(computed).to_consensus());
+        let mut config = StratumConfig::new_for_test_default().parse().unwrap();
+        config.bitcoin_cash_network = Some(BitcoinCashNetwork::Chipnet);
+        let prev_header = bitcoin::block::Header {
+            version: bitcoin::block::Version::from_consensus(0x2000_0000),
+            prev_blockhash: bitcoin::BlockHash::all_zeros(),
+            merkle_root: bitcoin::TxMerkleNode::all_zeros(),
+            time: template.curtime,
+            bits: CompactTarget::from_consensus(0x1d00_ffff),
+            nonce: 0,
+        };
+        let same = KnownBchHeader {
+            height: template.height - 1,
+            header: prev_header,
+            ticks: pinned.ticks,
+            next_interval: pinned.next_interval,
+        };
+        template_meets_token_asert(&template, &config, &store_knowing_bch(Some(same))).unwrap();
+        let one_minute = KnownBchHeader {
+            next_interval: 60,
+            ..same
+        };
+        assert!(
+            template_meets_token_asert(&template, &config, &store_knowing_bch(Some(one_minute)))
+                .unwrap_err()
+                .contains("harder")
+        );
     }
 }

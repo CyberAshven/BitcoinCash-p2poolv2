@@ -15,6 +15,7 @@ use crate::node::SwarmSend;
 use crate::node::messages::Message;
 use crate::node::p2p_message_handlers::handle_request;
 use crate::node::p2p_message_handlers::receivers::block_receiver::BlockReceiverHandle;
+use crate::node::p2p_message_handlers::receivers::share_without_payouts::CoinbaseRebuilder;
 use crate::node::request_response_handler::block_fetcher::BlockFetcherHandle;
 use crate::node::validation_worker::ValidationSender;
 use crate::node::weak_share_worker::WeakShareEventSender;
@@ -45,6 +46,10 @@ pub struct RequestContext<C, T> {
     /// Bitcoin Cash P2Pool: where a relayed weak share goes to be checked.
     /// `None` on Bitcoin and in Hydrapool mode.
     pub weak_share_tx: Option<WeakShareEventSender>,
+    /// Bitcoin Cash: what rebuilds the coinbase of a share relayed without
+    /// its payouts. `None` on Bitcoin, and a node without it asks for such a
+    /// share whole.
+    pub coinbase_rebuilder: Option<CoinbaseRebuilder>,
 }
 
 /// The Tower service that processes inbound P2P requests.

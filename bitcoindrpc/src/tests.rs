@@ -246,6 +246,9 @@ async fn next_block_size_limit_comes_from_the_abla_state() {
         BlockHeaderSummary {
             height: 900_000,
             next_block_size_limit: Some(5_000_000_123),
+            ticks: None,
+            target_time: None,
+            next_target_time: None,
         }
     );
 }
@@ -280,6 +283,9 @@ async fn block_height_comes_from_the_verbose_block_header() {
         BlockHeaderSummary {
             height: 1234,
             next_block_size_limit: None,
+            ticks: None,
+            target_time: None,
+            next_target_time: None,
         }
     );
 }
