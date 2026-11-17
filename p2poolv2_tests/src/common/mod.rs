@@ -33,6 +33,8 @@ pub fn default_test_config() -> Config {
             dns_seed: false,
             node_key_path: None,
             ephemeral_node_key: true,
+            nostr_relays: vec![],
+            nostr_announce: false,
         },
         bitcoinrpc: BitcoinRpcConfig {
             url: "http://localhost:8332".to_string(),

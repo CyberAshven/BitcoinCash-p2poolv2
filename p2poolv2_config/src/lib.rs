@@ -1401,9 +1401,41 @@ pub struct NetworkConfig {
     /// restarts, but peers and announcements forget it each time.
     #[serde(default)]
     pub ephemeral_node_key: bool,
+    /// Nostr relays the node announces itself on and, while it has fewer
+    /// than 8 peers, asks for other nodes' announcements. Default
+    /// [`DEFAULT_NOSTR_RELAYS`]; an empty list keeps the node off Nostr.
+    #[serde(default = "default_nostr_relays")]
+    pub nostr_relays: Vec<String>,
+    /// Publish `external_address` on the relays so nodes short of peers can
+    /// dial this one. Only a node with an `external_address`, which its
+    /// operator says is reachable, announces. Default true.
+    #[serde(default = "default_nostr_announce")]
+    pub nostr_announce: bool,
 }
 
 fn default_dns_seed() -> bool {
+    true
+}
+
+/// Public Nostr relays a node uses by default, run by different operators.
+/// Each answered an announcement lookup when they were picked (2026-11-17).
+pub const DEFAULT_NOSTR_RELAYS: [&str; 6] = [
+    "wss://nos.lol",
+    "wss://relay.primal.net",
+    "wss://nostr.mom",
+    "wss://offchain.pub",
+    "wss://nostr.oxtr.dev",
+    "wss://relay.nostr.net",
+];
+
+fn default_nostr_relays() -> Vec<String> {
+    DEFAULT_NOSTR_RELAYS
+        .iter()
+        .map(|relay| relay.to_string())
+        .collect()
+}
+
+fn default_nostr_announce() -> bool {
     true
 }
 
@@ -1455,6 +1487,8 @@ impl Default for NetworkConfig {
             dns_seed: true,
             node_key_path: None,
             ephemeral_node_key: false,
+            nostr_relays: default_nostr_relays(),
+            nostr_announce: true,
         }
     }
 }

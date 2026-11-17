@@ -47,13 +47,56 @@ receives one validates it before relaying it further (see
 Kademlia for peer discovery, Identify, Ping, and a request-response protocol
 for share announcements, headers, blocks and share transactions.
 
-Bitcoin Cash has no P2Poolv2 DNS seeds yet: a new node needs at least one
-peer in `[network] dial_peers`, given by IP address (`/ip4/`, `/ip6/`) or
+Bitcoin Cash has no P2Poolv2 DNS seeds yet. A new node finds its first
+peers in `[network] dial_peers` or through Nostr (below). A peer in
+`dial_peers` is given by IP address (`/ip4/`, `/ip6/`) or
 host name (`/dns4/`, `/dns6/`, `/dns/`), and listens on port 6884 by default
 ([Requirements](requirements.md#ports)). The transport resolves a host name
 through the system's DNS configuration on every dial, reconnects included.
 Only host names listed in `dial_peers` are dialed, never a `/dns` address
 learned from a peer, and `blocked_ips` is checked after a name resolves.
+
+A node keeps its peer ID across restarts: its libp2p key is made on the
+first start and kept in `p2p_node_key` beside the store
+(`[network] node_key_path`). Peers and announcements keep finding it under
+the same peer ID. With `ephemeral_node_key = true` a node gets a new peer
+ID every start instead, which nothing links across restarts.
+
+### Finding peers through Nostr
+
+Nodes that say they are reachable announce themselves on public Nostr
+relays, and a node short of peers asks those relays for them. No single
+party holds this list: the relays are run by different operators, a node
+asks all of its relays at once, and a relay can drop an announcement but
+cannot forge one.
+
+- **Who announces:** a node with an `external_address` (its operator says
+  it is reachable) and `nostr_announce` on, the default. It publishes that
+  address, ending in its peer ID, every hour.
+- **What is published:** one NIP-78 app-data event (kind 30078) per node and
+  network. It is signed with a key derived from the node key, so there is
+  no second key file. Its `d` tag is `p2poolv2/<chain>-<network>/<hash>`,
+  where the hash is of the node's network protocol string; every
+  share-chain rule change alters it, so a node only finds peers on its own
+  rules. It also carries a NIP-40 `expiration` three hours ahead, a NIP-13
+  proof of work of 16 bits on its id, and a NIP-31 `alt` text for Nostr
+  clients that show it.
+- **Who looks:** a node with fewer than 8 peers asks every relay when DNS
+  seeds would be asked (at once without `dial_peers`, otherwise after 10
+  seconds), then every 10 minutes while still short.
+- **What a reader checks:** the id, signature, proof of work, tag and age
+  of every event. It keeps the newest announcement per author, skips itself
+  and the peers it has, and dials at most 8 routable addresses. Announced
+  addresses are only candidates: the noise handshake with the network
+  protocol prologue still decides whether a peer is on our network. On
+  regtest, loopback and private addresses are dialed too.
+- **Relays:** `[network] nostr_relays`, by default six public relays run by
+  different operators. An empty list keeps the node off Nostr.
+
+Announcing publishes the node's address and its being a P2Pool node, which
+`external_address` already offers to anyone who dials it. A node that only
+looks reveals to the relays it asks that it is a P2Pool node on that
+network.
 
 Take seven nodes, A to G, connected in a mesh. Several links carry shares
 at once, because more than one node can find a share at the same time:

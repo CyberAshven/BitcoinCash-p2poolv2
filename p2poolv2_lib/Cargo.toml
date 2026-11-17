@@ -41,6 +41,12 @@ rocksdb = { workspace = true }
 async-trait = { workspace = true }
 thiserror = { workspace = true }
 serde_json = { workspace = true }
+# Nostr relays (node::nostr_seeds), as the terminal UI's live feed connects:
+# rustls with the platform's roots, which the image installs.
+tokio-tungstenite = { version = "0.30", features = ["rustls-tls-native-roots"] }
+# Picks the TLS crypto provider the relay connections use; the workspace
+# enables two, so rustls needs one chosen, as in the terminal UI.
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs"] }
 zmq = { workspace = true }
 bitcoin = { workspace = true }
 p2poolv2_wallet = { workspace = true }

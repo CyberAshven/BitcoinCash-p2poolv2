@@ -39,6 +39,14 @@ dial_timeout_secs = 30
 # true gives a new peer ID on every start instead, which nothing can link.
 # node_key_path = "./p2p_node_key"
 # ephemeral_node_key = false
+# Nostr: a node announces its external_address on these relays (NIP-78
+# events, signed, expiring after 3 hours, with a small proof of work), and a
+# node with fewer than 8 peers asks them for other nodes' announcements on its
+# own network and share-chain rules, and dials a few. Only a node with an
+# external_address announces; set nostr_announce = false to only look. An
+# empty list keeps the node off Nostr. See docs/p2p-network.md.
+# nostr_relays = ["wss://nos.lol", "wss://relay.primal.net", "wss://nostr.mom", "wss://offchain.pub", "wss://nostr.oxtr.dev", "wss://relay.nostr.net"]
+# nostr_announce = true
 
 [store]
 # Compose sets /p2poolv2/data/<NETWORK> instead.

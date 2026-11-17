@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Nodes find each other through Nostr. A node with an `external_address`
+publishes it on public Nostr relays every hour, as a signed NIP-78 event that
+expires after three hours (NIP-40) and carries a 16-bit proof of work
+(NIP-13). A node with fewer than 8 peers asks every relay for the
+announcements of its own network and share-chain rules (the event's `d` tag
+hashes the network protocol string) and dials up to 8 of the newest. No
+relay is needed once a node has peers, a relay cannot forge an announcement,
+and the libp2p handshake still decides who is on the network. It is the
+first contact Bitcoin Cash lacked without DNS seeds: `dial_peers` is no
+longer required. `[network] nostr_relays` (six public relays by default;
+empty turns Nostr off) and `nostr_announce` (default true) configure it;
+see `docs/p2p-network.md`. No share-chain rule, message or store change.
+
 A node keeps its peer ID across restarts. Its libp2p key is made on the
 first start and kept in `p2p_node_key` beside the store (only its owner may
 read it on Unix), or wherever `[network] node_key_path` says; a file that

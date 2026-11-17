@@ -20,6 +20,7 @@ use crate::node::dns_seeds;
 use crate::node::emission_worker::EmissionWorker;
 use crate::node::found_block_verifier::FoundBlockVerifier;
 use crate::node::messages::{InventoryMessage, Message};
+use crate::node::nostr_seeds;
 use crate::node::organise_worker::{OrganiseWorker, create_organise_channel};
 use crate::node::p2p_health::P2pHealth;
 use crate::node::p2p_message_handlers::receivers::block_receiver::{
@@ -928,6 +929,17 @@ impl NodeActor {
         tokio::pin!(dns_seed_timer);
         let mut dns_seed_pending = self.node.dns_seeds.is_some();
 
+        // Nostr: announce this node, and look peers up while short of them,
+        // first when DNS seeds would be asked, then every few minutes.
+        self.node.start_nostr_announcer();
+        let mut nostr_lookup_interval = tokio::time::interval_at(
+            tokio::time::Instant::now()
+                + dns_seeds::dns_seed_delay(self.node.peer_reconnector.has_peers()),
+            nostr_seeds::LOOKUP_EVERY,
+        );
+        nostr_lookup_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let nostr_lookups = self.node.nostr_seeds.is_some();
+
         let stop_reason = loop {
             tokio::select! {
                 buf = self.node.swarm_rx.recv() => {
@@ -981,6 +993,9 @@ impl NodeActor {
                 () = &mut dns_seed_timer, if dns_seed_pending => {
                     dns_seed_pending = false;
                     self.node.query_dns_seeds_if_isolated();
+                }
+                _ = nostr_lookup_interval.tick(), if nostr_lookups => {
+                    self.node.look_up_nostr_peers_if_short();
                 }
                 relay = next_relay_transaction(&mut self.share_transaction_relay),
                     if self.share_transaction_relay.is_some() => {
