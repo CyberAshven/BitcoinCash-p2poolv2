@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Weak shares follow the asks (#118, issue #79 part 6), a flag day: protocol
+segment `weak4-640-100-48-256-320-64-4096-64-32`, store format 10, new
+genesis shares. A share header counts the weak shares it carries that ask
+for an easier target (`weak_asking`); while more than one in 64 ask, the weak
+ratio rises (up to 4096) and a share may carry more than 64 of them (up to
+640). A new chain starts at a weak ratio of 32.
+
 Upstream P2Poolv2 is merged through fdbf85df (its 0.18.0 and two commits
 after it). A node now dials only the host names listed in `dial_peers`, never
 a `/dns` address learned from a peer, and checks `blocked_ips` after it

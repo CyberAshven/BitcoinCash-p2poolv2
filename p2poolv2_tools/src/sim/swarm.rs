@@ -83,6 +83,10 @@ pub struct SwarmSettings {
     /// `WEAK_SHARES=1`: every node's miners send weak shares (`[sim]
     /// weak_shares`).
     pub weak_shares: bool,
+    /// `WEAK_ASKS`: whether each node's weak shares ask for an easier weak
+    /// target (`[sim] weak_asks`), in node order, comma separated `0` or `1`,
+    /// such as `1,0,0`. A node past the list does not ask.
+    pub weak_asks: Vec<bool>,
     /// `VIRTUAL_MINERS`: miners each node models (`[sim] virtual_miners`), so
     /// a small swarm has many payees.
     pub virtual_miners: Option<u32>,
@@ -129,6 +133,24 @@ fn parse_one_payout_level(value: &str, token: &str) -> ToolResult<u8> {
     Ok(level)
 }
 
+/// The nodes of a `WEAK_ASKS` value that ask: comma-separated `0` or `1`,
+/// empty for none.
+pub fn parse_weak_asks(value: &str) -> ToolResult<Vec<bool>> {
+    if value.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    value
+        .split(',')
+        .map(|token| match token.trim() {
+            "0" => Ok(false),
+            "1" => Ok(true),
+            other => Err(ToolError::message(format!(
+                "WEAK_ASKS={value:?}: {other:?} is not 0 or 1"
+            ))),
+        })
+        .collect()
+}
+
 impl SwarmSettings {
     /// Settings from the environment for a swarm of `node_count` nodes.
     pub fn from_env(node_count: usize) -> ToolResult<Self> {
@@ -162,6 +184,7 @@ impl SwarmSettings {
             profile: env_vars::string("PROFILE", "release"),
             payout_levels: parse_payout_levels(&env_vars::string("PAYOUT_LEVELS", ""))?,
             weak_shares: env_vars::string("WEAK_SHARES", "0") == "1",
+            weak_asks: parse_weak_asks(&env_vars::string("WEAK_ASKS", ""))?,
             virtual_miners: env_vars::optional("VIRTUAL_MINERS")?,
             merge_tokens: env_vars::optional_string("MERGE_TOKENS"),
             log_level: env_vars::string("LOG_LEVEL", "debug"),
@@ -374,16 +397,22 @@ ideal_block_time_secs = {block_time}
             .map(|path| format!("merge_mining_tokens = \"{}\"\n", toml_basic_string(path)))
             .unwrap_or_default(),
         log_level = toml_basic_string(&settings.log_level),
-        sim_options = sim_options(settings),
+        sim_options = sim_options(settings, index),
     );
     config
 }
 
-/// The `[sim]` lines of the swarm's optional settings: weak shares and the
-/// miners each node models.
-fn sim_options(settings: &SwarmSettings) -> String {
+/// The `[sim]` lines of the swarm's optional settings for node `index`: weak
+/// shares, whether they ask for an easier weak target, and the miners each
+/// node models.
+fn sim_options(settings: &SwarmSettings, index: usize) -> String {
     let weak_shares = if settings.weak_shares {
         "weak_shares = true\n"
+    } else {
+        ""
+    };
+    let weak_asks = if settings.weak_asks.get(index).copied().unwrap_or(false) {
+        "weak_asks = true\n"
     } else {
         ""
     };
@@ -391,7 +420,7 @@ fn sim_options(settings: &SwarmSettings) -> String {
         .virtual_miners
         .map(|count| format!("virtual_miners = {count}\n"))
         .unwrap_or_default();
-    format!("{weak_shares}{virtual_miners}")
+    format!("{weak_shares}{weak_asks}{virtual_miners}")
 }
 
 /// The longest pool signature, the highest node's, must fit the config's

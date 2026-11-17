@@ -1393,6 +1393,7 @@ pub(crate) fn share(view: &ShareView) -> Markup {
                 (stat("Time", html! { (share.time) }))
                 @if share.weak_count > 0 {
                     (stat("Weak shares", html! { (share.weak_count) }))
+                    (stat("Weak shares asking", html! { (share.weak_asking) }))
                     (stat("Weak ratio", html! { (fmt_weak_ratio(share.weak_ratio)) }))
                     (stat("Weak root", html! { span.mono { (share.weak_root) } }))
                 }
@@ -1618,8 +1619,9 @@ mod tests {
     }
 
     /// A share's page with the weak-share fields as the lookup reports
-    /// them: `weak_count` carried, `weak_ratio` over the minimum in
-    /// `WEAK_RATIO_UNIT` parts, and `weak_shares` the bodies still held.
+    /// them: `weak_count` carried, of which as many as carried ask,
+    /// `weak_ratio` over the minimum in `WEAK_RATIO_UNIT` parts, and
+    /// `weak_shares` the bodies still held.
     fn share_view(
         weak_count: u16,
         weak_ratio: u32,
@@ -1652,6 +1654,7 @@ mod tests {
                 transactions: None,
                 pruned: false,
                 weak_count,
+                weak_asking: weak_count,
                 weak_ratio,
                 weak_root: "f61d3df0eef9c5d70dbc861965b0905d037e774e6a43ea3f4a8518fa41913343"
                     .to_string(),
@@ -2463,6 +2466,7 @@ mod tests {
         let page = share(&share_view(1, 262_144, vec![weak])).into_string();
         assert!(page.contains("<span class=\"badge-weak\">1 weak</span>"));
         assert!(page.contains("Weak shares"));
+        assert!(page.contains("Weak shares asking"));
         assert!(page.contains("R = 262144 (256x the minimum target)"));
         assert!(page.contains("Weak root"));
         assert!(page.contains("1 carried"));
