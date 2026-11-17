@@ -207,6 +207,17 @@ before a peer. The sample configs set `max_established_incoming` to 128:
 with 1,000 nodes, a quarter of them accepting inbound connections and 30%
 of those in ten cloud /16s, the busiest node takes about 110.
 
+The book of known peers survives a restart. It is written to
+`p2p_peers.json` beside the store every ten minutes and when the node
+stops, and read on the next start. Peers keep whether the node reached
+them. The peers held over outgoing connections when it was saved are
+anchors: dialed before any other known peer on the next start, once, so a
+restarted node is back among its peers before anyone can fill its slots, as
+Bitcoin Core's `anchors.dat` does. They still pass the rules above. A
+missing or broken file means an empty book; a node with
+`ephemeral_node_key` keeps none, since redialing its anchors would link its
+restarts.
+
 ## One view of the shares
 
 Every node keeps a replica of the share chain, and the nodes agree on it by

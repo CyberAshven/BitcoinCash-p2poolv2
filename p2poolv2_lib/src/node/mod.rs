@@ -1258,6 +1258,39 @@ mod tests {
         assert!(node_a.nostr_announcer.is_none());
     }
 
+    /// A node saves the peers it knows beside its store, and a node started
+    /// again on that store knows them; an ephemeral node writes no book.
+    #[tokio::test]
+    async fn a_restarted_node_knows_the_peers_it_saved() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = build_test_config("/ip4/127.0.0.1/tcp/0", None);
+        config.store.path = dir.path().join("store.db").display().to_string();
+        config.network.ephemeral_node_key = false;
+        let peer = PeerId::random();
+
+        let mut node = build_test_node(config.clone());
+        node.outgoing_peer_target
+            .learn_addresses(peer, [&"/ip4/1.2.3.4/tcp/6884".parse().unwrap()]);
+        node.save_peer_book();
+        let book = dir.path().join(crate::config::DEFAULT_PEER_BOOK_FILE);
+        assert!(book.exists());
+
+        let restarted = build_test_node(config.clone());
+        assert!(
+            restarted
+                .outgoing_peer_target
+                .saved_book()
+                .peers
+                .iter()
+                .any(|saved| saved.peer_id == peer.to_string())
+        );
+
+        std::fs::remove_file(&book).unwrap();
+        config.network.ephemeral_node_key = true;
+        build_test_node(config).save_peer_book();
+        assert!(!book.exists());
+    }
+
     /// A node restarted on the same key file has the same peer ID; one with
     /// `ephemeral_node_key` gets a new one each start.
     #[tokio::test]

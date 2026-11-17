@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+A restarted node remembers its peers. The outgoing peer target's book of
+known peers is saved to `p2p_peers.json` beside the store every ten
+minutes and when the node stops, and read on the next start; the peers it
+held over outgoing connections are anchors, dialed first, once, within the
+target's group and limit rules. A broken or missing file is an empty book,
+and a node with `ephemeral_node_key` keeps none. No share-chain rule,
+message or store change.
+
 Nodes find each other through Nostr. A node with an `external_address`
 publishes it on public Nostr relays every hour, as a signed NIP-78 event that
 expires after three hours (NIP-40) and carries a 16-bit proof of work
