@@ -10,10 +10,13 @@ mod dial_filter;
 mod dns_seeds;
 pub mod emission_worker;
 mod found_block_verifier;
+mod node_key;
+pub(crate) mod nostr_seeds;
 pub mod organise_worker;
 mod outgoing_peer_target;
 pub mod p2p_health;
 pub mod payout_tree_executor;
+mod peer_book;
 pub mod peer_reconnector;
 pub mod request_response_handler;
 pub mod request_sender;
@@ -201,6 +204,9 @@ struct Node {
     /// Dials known peers while the node has fewer outgoing peers than
     /// target_outgoing_peers.
     outgoing_peer_target: OutgoingPeerTarget,
+    /// Where the outgoing peer target's book is saved, or None with
+    /// `ephemeral_node_key` (`peer_book`).
+    peer_book_path: Option<std::path::PathBuf>,
     connection_tracker: ConnectionTracker,
     /// Whether an external address has been confirmed and advertised
     external_address_confirmed: bool,
@@ -211,6 +217,11 @@ struct Node {
     /// DNS seeds to fall back on, or None when disabled in config, the
     /// network has none, or the chain is Bitcoin Cash.
     dns_seeds: Option<dns_seeds::DnsSeeds>,
+    /// Nostr relays to announce on and look peers up on, or None without
+    /// relays (`nostr_seeds`).
+    nostr_seeds: Option<Arc<nostr_seeds::NostrSeeds>>,
+    /// The task publishing this node's announcement, while it runs.
+    nostr_announcer: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl Node {
@@ -226,13 +237,16 @@ impl Node {
         response_worker_tx: ResponseWorkerSender,
         share_transaction_pool: Option<ShareTransactionPool>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        let id_keys = libp2p::identity::Keypair::generate_ed25519();
+        let id_keys =
+            node_key::load_or_create(config.network.node_key_file(&config.store.path).as_deref())?;
 
         let genesis_hash = crate::shares::bch_genesis::genesis_for_stratum(&config.stratum)
             .map_err(|error| -> Box<dyn Error> { error })?
             .block_hash();
         let network_protocol =
             protocol_string(config.stratum.network, config.stratum.chain, genesis_hash);
+        let nostr_seeds =
+            nostr_seeds::from_config(&config, &id_keys, &network_protocol)?.map(Arc::new);
 
         let behavior = match P2PoolBehaviour::new(&id_keys, &config, genesis_hash) {
             Ok(behavior) => behavior,
@@ -369,7 +383,12 @@ impl Node {
         );
 
         let peer_reconnector = peer_reconnector::PeerReconnector::new(&config.network.dial_peers);
-        let outgoing_peer_target = OutgoingPeerTarget::new(&config.network, blocked_ips.clone());
+        let mut outgoing_peer_target =
+            OutgoingPeerTarget::new(&config.network, blocked_ips.clone());
+        let peer_book_path = config.network.peer_book_file(&config.store.path);
+        if let Some(path) = &peer_book_path {
+            outgoing_peer_target.load_book(peer_book::load(path));
+        }
 
         let mut node = Self {
             swarm,
@@ -380,14 +399,62 @@ impl Node {
             monitoring_event_sender,
             peer_reconnector,
             outgoing_peer_target,
+            peer_book_path,
             connection_tracker: ConnectionTracker::new(blocked_ips),
             external_address_confirmed,
             listen_port,
             has_bootstrapped_kad: false,
             dns_seeds,
+            nostr_seeds,
+            nostr_announcer: None,
         };
         node.attempt_reconnections();
         Ok(node)
+    }
+
+    /// Starts publishing this node's announcement on its Nostr relays, when
+    /// it has relays and something to announce. The actor calls this once,
+    /// inside the runtime.
+    pub(crate) fn start_nostr_announcer(&mut self) {
+        if let Some(seeds) = &self.nostr_seeds
+            && !seeds.announce.is_empty()
+            && self.nostr_announcer.is_none()
+        {
+            info!(
+                "Announcing {} on {} Nostr relays",
+                seeds
+                    .announce
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                seeds.relays.len()
+            );
+            self.nostr_announcer = Some(nostr_seeds::spawn_announcer(Arc::clone(seeds)));
+        }
+    }
+
+    /// Asks the Nostr relays for announced peers and dials the newest few,
+    /// while this node has fewer than `nostr_seeds::LOOKUP_BELOW_PEERS`
+    /// peers.
+    pub(crate) fn look_up_nostr_peers_if_short(&self) {
+        let Some(seeds) = &self.nostr_seeds else {
+            return;
+        };
+        let connected: HashSet<libp2p::PeerId> = self.swarm.connected_peers().copied().collect();
+        if connected.len() >= nostr_seeds::LOOKUP_BELOW_PEERS {
+            debug!(
+                "Skipping the Nostr lookup, {} peers connected",
+                connected.len()
+            );
+            return;
+        }
+        info!(
+            "{} peers connected, asking {} Nostr relays for more",
+            connected.len(),
+            seeds.relays.len()
+        );
+        nostr_seeds::spawn_lookup(Arc::clone(seeds), connected, self.swarm_tx.clone());
     }
 
     /// Queries the DNS seeds and dials the returned addresses, unless a peer
@@ -413,8 +480,22 @@ impl Node {
         self.swarm.connected_peers().cloned().collect()
     }
 
+    /// Save the outgoing peer target's book (`peer_book`), unless the node
+    /// keeps none. A failure is logged; the node goes on.
+    pub(crate) fn save_peer_book(&self) {
+        if let Some(path) = &self.peer_book_path
+            && let Err(error) = peer_book::save(path, &self.outgoing_peer_target.saved_book())
+        {
+            warn!("{error}");
+        }
+    }
+
     #[allow(dead_code)]
     pub fn shutdown(&mut self) -> Result<(), Box<dyn Error>> {
+        self.save_peer_book();
+        if let Some(announcer) = self.nostr_announcer.take() {
+            announcer.abort();
+        }
         for peer_id in self.swarm.connected_peers().cloned().collect::<Vec<_>>() {
             self.swarm.disconnect_peer_id(peer_id).unwrap_or_default();
         }
@@ -925,6 +1006,10 @@ mod tests {
             blocked_ips: vec![],
             external_address: None,
             dns_seed: false,
+            node_key_path: None,
+            ephemeral_node_key: true,
+            nostr_relays: vec![],
+            nostr_announce: false,
             target_outgoing_peers: 16,
         };
         network_config.dial_peers = vec![unreachable_peer];
@@ -1051,6 +1136,10 @@ mod tests {
                 blocked_ips: vec![],
                 external_address,
                 dns_seed: false,
+                node_key_path: None,
+                ephemeral_node_key: true,
+                nostr_relays: vec![],
+                nostr_announce: false,
                 target_outgoing_peers: 16,
             },
             bitcoinrpc: BitcoinRpcConfig {
@@ -1107,6 +1196,125 @@ mod tests {
             None,
         )
         .expect("Node initialization failed")
+    }
+
+    /// End to end on regtest: node A announces its address on a relay, and
+    /// node B, which knows no peer, finds A there and connects to it.
+    #[tokio::test]
+    async fn a_node_with_no_peers_finds_one_through_a_nostr_relay() {
+        use crate::node::nostr_seeds::tests::spawn_relay;
+        let (relay_url, relay) = spawn_relay().await;
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let regtest = |mut config: Config| {
+            config.stratum.network = bitcoin::Network::Regtest;
+            config.network.nostr_relays = vec![relay_url.clone()];
+            config
+        };
+        let mut config_a = regtest(build_test_config(
+            &format!("/ip4/127.0.0.1/tcp/{port}"),
+            Some(format!("/ip4/127.0.0.1/tcp/{port}")),
+        ));
+        config_a.network.nostr_announce = true;
+        let config_b = regtest(build_test_config("/ip4/127.0.0.1/tcp/0", None));
+
+        let mut node_a = build_test_node(config_a);
+        let mut node_b = build_test_node(config_b);
+        let peer_a = *node_a.swarm.local_peer_id();
+        assert!(node_b.nostr_seeds.as_ref().unwrap().announce.is_empty());
+        node_a.start_nostr_announcer();
+
+        let found = tokio::time::timeout(Duration::from_secs(20), async {
+            let mut asked = false;
+            loop {
+                if !asked && !relay.events.lock().unwrap().is_empty() {
+                    node_b.look_up_nostr_peers_if_short();
+                    asked = true;
+                }
+                tokio::select! {
+                    _ = node_a.swarm.select_next_some() => {}
+                    event = node_b.swarm.select_next_some() => {
+                        if let SwarmEvent::ConnectionEstablished { peer_id, .. } = event
+                            && peer_id == peer_a
+                        {
+                            return;
+                        }
+                    }
+                    Some(send) = node_b.swarm_rx.recv() => {
+                        if let crate::node::SwarmSend::Dial(address) = send {
+                            node_b.swarm.dial(address).unwrap();
+                        }
+                    }
+                    () = tokio::time::sleep(Duration::from_millis(50)) => {}
+                }
+            }
+        })
+        .await;
+
+        assert!(found.is_ok(), "node B never connected to node A");
+        node_a.shutdown().unwrap();
+        assert!(node_a.nostr_announcer.is_none());
+    }
+
+    /// A node saves the peers it knows beside its store, and a node started
+    /// again on that store knows them; an ephemeral node writes no book.
+    #[tokio::test]
+    async fn a_restarted_node_knows_the_peers_it_saved() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = build_test_config("/ip4/127.0.0.1/tcp/0", None);
+        config.store.path = dir.path().join("store.db").display().to_string();
+        config.network.ephemeral_node_key = false;
+        let peer = PeerId::random();
+
+        let mut node = build_test_node(config.clone());
+        node.outgoing_peer_target
+            .learn_addresses(peer, [&"/ip4/1.2.3.4/tcp/6884".parse().unwrap()]);
+        node.save_peer_book();
+        let book = dir.path().join(crate::config::DEFAULT_PEER_BOOK_FILE);
+        assert!(book.exists());
+
+        let restarted = build_test_node(config.clone());
+        assert!(
+            restarted
+                .outgoing_peer_target
+                .saved_book()
+                .peers
+                .iter()
+                .any(|saved| saved.peer_id == peer.to_string())
+        );
+
+        std::fs::remove_file(&book).unwrap();
+        config.network.ephemeral_node_key = true;
+        build_test_node(config).save_peer_book();
+        assert!(!book.exists());
+    }
+
+    /// A node restarted on the same key file has the same peer ID; one with
+    /// `ephemeral_node_key` gets a new one each start.
+    #[tokio::test]
+    async fn a_restarted_node_keeps_its_peer_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = build_test_config("/ip4/127.0.0.1/tcp/0", None);
+        config.store.path = dir.path().join("store.db").display().to_string();
+        config.network.ephemeral_node_key = false;
+
+        let first = *build_test_node(config.clone()).swarm.local_peer_id();
+        assert!(
+            dir.path()
+                .join(crate::config::DEFAULT_NODE_KEY_FILE)
+                .exists()
+        );
+        let restarted = *build_test_node(config.clone()).swarm.local_peer_id();
+        assert_eq!(first, restarted);
+
+        config.network.ephemeral_node_key = true;
+        let ephemeral = *build_test_node(config.clone()).swarm.local_peer_id();
+        let ephemeral_again = *build_test_node(config).swarm.local_peer_id();
+        assert_ne!(ephemeral, first);
+        assert_ne!(ephemeral, ephemeral_again);
     }
 
     #[tokio::test]

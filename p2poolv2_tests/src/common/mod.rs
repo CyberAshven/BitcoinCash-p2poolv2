@@ -31,6 +31,10 @@ pub fn default_test_config() -> Config {
             blocked_ips: vec![],
             external_address: None,
             dns_seed: false,
+            node_key_path: None,
+            ephemeral_node_key: true,
+            nostr_relays: vec![],
+            nostr_announce: false,
             target_outgoing_peers: 16,
         },
         bitcoinrpc: BitcoinRpcConfig {
