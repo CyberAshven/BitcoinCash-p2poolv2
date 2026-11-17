@@ -61,9 +61,11 @@ header tag, `0x23`, and only when the root is not the empty one) or in
 so one proof of work stands behind one root. Every peer rebuilds output 0
 from that commitment byte for byte when it rebuilds the coinbase, and checks
 only its format: no peer knows the tokens behind a root, and share validity
-never depends on them. The rule tag `mm2-roots-asert8` names this header
+never depends on them. The rule tag `mm2-roots-asert8-ticks` names this header
 format with the ASERT band below (`8`: the test networks' eighth to eight
-times).
+times; `-ticks`: the band follows the CHIP-2025-03 ticks and next block
+interval of the block the share builds on, see
+[Mining on the current chain](sharechain/current-chain.md#one-minute-blocks)).
 
 A share is a **token share** when its commitment is anything but the exact
 empty one (`share_has_token_commitment`), and a **no-token share**

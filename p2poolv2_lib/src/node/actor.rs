@@ -43,6 +43,7 @@ use crate::node::weak_share_worker::{WeakShareNetwork, WeakShareWorker};
 use crate::pool_difficulty::PoolDifficulty;
 #[cfg(not(test))]
 use crate::pool_difficulty::PoolDifficulty;
+use crate::shares::bch_asert::TickSchedule;
 #[cfg(test)]
 #[mockall_double::double]
 use crate::shares::chain::chain_store_handle::ChainStoreHandle;
@@ -132,9 +133,13 @@ impl NodeHandle {
                 &config.bitcoinrpc.username,
                 &config.bitcoinrpc.password,
             )?;
-            BchHeaderFeeder::new(client, chain_store_handle.clone())
-                .first_sync(FIRST_SYNC_LIMIT)
-                .await;
+            BchHeaderFeeder::new(
+                client,
+                chain_store_handle.clone(),
+                config.stratum.bitcoin_cash_network,
+            )
+            .first_sync(FIRST_SYNC_LIMIT)
+            .await;
         }
         let (node_actor, stopping_rx) = NodeActor::new(
             config,
@@ -609,7 +614,8 @@ fn start_payout_tree_executor(
         }
     };
     let (sink, found) = payout_tree_channel();
-    let executor = PayoutTreeExecutor::new(client, chain_store_handle.clone(), found);
+    let executor = PayoutTreeExecutor::new(client, chain_store_handle.clone(), found)
+        .with_tick_schedule(bitcoin_cash_tick_schedule(config));
     tokio::spawn(executor.run());
     Some(sink)
 }
@@ -694,13 +700,20 @@ impl NodeActor {
                 &config.bitcoinrpc.password,
             )?;
             (
-                Some(FoundBlockVerifier::new(
-                    client.clone(),
-                    chain_store_handle.clone(),
-                    metrics.clone(),
-                )),
+                Some(
+                    FoundBlockVerifier::new(
+                        client.clone(),
+                        chain_store_handle.clone(),
+                        metrics.clone(),
+                    )
+                    .with_tick_schedule(bitcoin_cash_tick_schedule(&config)),
+                ),
                 // Follows BCHN's headers for mining on the current chain.
-                Some(BchHeaderFeeder::new(client, chain_store_handle.clone())),
+                Some(BchHeaderFeeder::new(
+                    client,
+                    chain_store_handle.clone(),
+                    config.stratum.bitcoin_cash_network,
+                )),
             )
         } else {
             (None, None)
@@ -1285,6 +1298,16 @@ impl NodeActor {
 /// to compare against, so it is not progress and the sync retry still fires.
 fn confirmed_tip_progressed(last_seen: Option<BlockHash>, current: BlockHash) -> bool {
     last_seen.is_some_and(|seen| seen != current)
+}
+
+/// The configured Bitcoin Cash network's block intervals (its timed
+/// switches and pins), or ten-minute blocks when the node runs no Bitcoin
+/// Cash network.
+pub(crate) fn bitcoin_cash_tick_schedule(config: &Config) -> TickSchedule {
+    config
+        .stratum
+        .bitcoin_cash_network
+        .map_or(TickSchedule::TEN_MINUTES, TickSchedule::for_network)
 }
 
 #[cfg(test)]

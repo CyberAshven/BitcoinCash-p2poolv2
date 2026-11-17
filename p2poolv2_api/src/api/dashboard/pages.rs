@@ -963,7 +963,7 @@ pub(crate) fn overview(view: &Overview) -> Markup {
                   format!("{} rejected of {} shares", view.rejected_shares_total, view.accepted_shares_total)]))
             (kpi_card("network hashrate", optional(view.network_hashrate, fmt_hashrate), "kpi-value-net", None,
                 &[format!("Difficulty {}", optional(view.network_difficulty, fmt_difficulty)),
-                  "Est. from diff. 10-min blocks".to_string()]))
+                  "Est. from diff. and block time".to_string()]))
             (kpi_card("Share chain height",
                 view.tip_height.map(|height| height.to_string()).unwrap_or_else(|| "—".to_string()), "", None,
                 &[format!("Min. Difficulty {}", optional(view.share_difficulty, fmt_difficulty))]))

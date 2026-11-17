@@ -485,7 +485,10 @@ impl DefaultShareValidator {
         let weak_target = self.validate_weak_share_proof_of_work(weak_share, &parent)?;
 
         self.validate_share_version(header, chain_store_handle)?;
-        self.validate_bch_prev_known(header, chain_store_handle)?;
+        // As for a full share: with the BCH prev known, the token band
+        // follows its own ticks and next interval.
+        let bch_prev = self.validate_bch_prev_known(header, chain_store_handle)?;
+        self.validate_token_share_asert(header, bch_prev)?;
         let ancestor_times = stored_ancestor_times(parent_hash, chain_store_handle)?;
         check_median_time_past(header.time, &ancestor_times)?;
         Ok(weak_target)
@@ -520,7 +523,8 @@ impl DefaultShareValidator {
         check_share_version_alone(header.share_version).map_err(|error| {
             ValidationError::consensus(format!("Invalid share version: {error}"))
         })?;
-        self.validate_token_share_asert(header)?;
+        // No store here: the pins give the BCH prev's ticks by height.
+        self.validate_token_share_asert(header, None)?;
         super::ShareValidator::validate_coinbase_proof(self, header, &weak_share.merkle_branch)
     }
 

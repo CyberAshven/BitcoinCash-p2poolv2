@@ -391,11 +391,13 @@ async fn overview(
     // produced a difficulty yet, fall back to the newest sampled network
     // hashrate and invert it back to a difficulty, so the card never goes
     // blank while samples still carry a value.
+    let interval = history::block_interval_seconds(state);
     let network_hashrate = live_network_difficulty
-        .map(history::network_hashrate)
+        .map(|difficulty| history::network_hashrate(difficulty, interval))
         .or_else(|| samples.iter().rev().find_map(|sample| sample.network));
-    let network_difficulty = live_network_difficulty
-        .or_else(|| network_hashrate.map(history::difficulty_from_network_hashrate));
+    let network_difficulty = live_network_difficulty.or_else(|| {
+        network_hashrate.map(|rate| history::difficulty_from_network_hashrate(rate, interval))
+    });
     // The metrics read comes before both local and pool, so the two cards
     // take theirs the same way: live first, then the newest non-null sample.
     let metrics = state.metrics_handle.get_metrics().await;
