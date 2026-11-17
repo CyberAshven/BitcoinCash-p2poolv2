@@ -208,6 +208,7 @@ mod tests {
             share_validator: Arc::new(MockDefaultShareValidator::default()),
             share_transaction_pool: None,
             weak_share_tx: None,
+            coinbase_rebuilder: None,
         }
     }
 

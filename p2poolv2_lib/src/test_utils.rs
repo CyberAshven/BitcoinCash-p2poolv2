@@ -1935,6 +1935,64 @@ fn build_test_weak_share_with(
     }
 }
 
+/// `share`, a Bitcoin Cash share, merge-mining `pool_merge_mining` when
+/// given, with a Bitcoin Cash coinbase that pays `weights` of
+/// `coinbase_value` exactly as the validator rebuilds it from a window
+/// giving those weights: output 0 from the header's merge-mining fields, the
+/// payouts and payout tree of the split they set, the donation and fee of
+/// its header, and the commitment from its header. Its coinbase proof, its
+/// merkle root (an empty branch) and its share coinbase all follow, so it
+/// passes the admission gate of a Bitcoin Cash validator whose ceiling its
+/// bits meet.
+#[cfg(test)]
+pub fn build_test_share_paying(
+    mut share: ShareBlock,
+    weights: &PplnsWeights,
+    coinbase_value: u64,
+    pool_merge_mining: Option<MergeMiningCommitment>,
+) -> ShareBlock {
+    share.header.pool_merge_mining = pool_merge_mining;
+    let header = &share.header;
+    let witness_root = header.coinbase_proof.share_witness_root;
+    let payouts = build_pplns_outputs(
+        coinbase_value,
+        weights,
+        &header.donation_address,
+        header.donation,
+        &header.fee_address,
+        header.fee,
+        crate::accounting::payout::coinbase_budget::split_for_share(Chain::BitcoinCash, header),
+    )
+    .expect("test share payouts");
+    let coinbase = crate::stratum::work::coinbase::build_coinbase(
+        bitcoin::transaction::Version::TWO,
+        &payouts.outputs,
+        header.bitcoin_height as i64,
+        PushBytesBuf::from(&[0u8]),
+        None,
+        b"P2Poolv2",
+        Some(ShareCommitment::from_share_header_and_root(header, witness_root).hash()),
+        TEST_COINBASE_NSECS,
+        Some(&[0u8; EXTRANONCE1_SIZE + EXTRANONCE2_SIZE]),
+        Some(header.merge_mining_commitment()),
+        payouts.tree_output().as_ref(),
+    )
+    .expect("test share coinbase");
+    share.header.coinbase_proof =
+        CoinbaseProof::from_coinbase(&coinbase, witness_root).expect("test share coinbase proof");
+    share.header.bitcoin_header.merkle_root = coinbase.compute_txid().into();
+    share.template_merkle_branches = Vec::new();
+    share.transactions[0] = ShareTransaction(
+        crate::shares::transactions::coinbase::build_sharechain_coinbase_for_witness_root(
+            &share.header.miner_address,
+            share.header.bitcoin_header.block_hash(),
+            witness_root,
+        ),
+    );
+    share.bitcoin_coinbase = coinbase;
+    share
+}
+
 /// Build a PoolDifficulty anchored on-schedule so that the target for a
 /// parent at height 1 and time TEST_TIP_TIME is the anchor target (0x1b4188f5).
 #[cfg(any(test, feature = "test-utils"))]

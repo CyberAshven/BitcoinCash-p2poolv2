@@ -440,6 +440,7 @@ impl Node {
             responses_dropped_total: self.request_response_handler.responses_dropped_total(),
             response_queue_depth: self.request_response_handler.response_queue_depth(),
             share_relay: self.request_response_handler.share_relay(),
+            share_rebuilds: self.request_response_handler.share_rebuilds(),
         }
     }
 
