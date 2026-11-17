@@ -32,6 +32,7 @@ use crate::node::p2p_message_handlers::senders::share_block::weak_shares_to_pref
 use crate::node::payout_tree_executor::{
     PayoutTreeExecutor, PayoutTreeSender, payout_tree_channel,
 };
+use crate::node::peer_book;
 use crate::node::request_response_handler::block_fetcher::{
     BlockFetcher, create_block_fetcher_channel,
 };
@@ -945,6 +946,13 @@ impl NodeActor {
         nostr_lookup_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let nostr_lookups = self.node.nostr_seeds.is_some();
 
+        // Save the book of known peers now and then, so a crash loses little.
+        let mut peer_book_interval = tokio::time::interval_at(
+            tokio::time::Instant::now() + peer_book::SAVE_EVERY,
+            peer_book::SAVE_EVERY,
+        );
+        peer_book_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
         let stop_reason = loop {
             tokio::select! {
                 buf = self.node.swarm_rx.recv() => {
@@ -1005,6 +1013,9 @@ impl NodeActor {
                 _ = nostr_lookup_interval.tick(), if nostr_lookups => {
                     self.node.look_up_nostr_peers_if_short();
                 }
+                _ = peer_book_interval.tick() => {
+                    self.node.save_peer_book();
+                }
                 relay = next_relay_transaction(&mut self.share_transaction_relay),
                     if self.share_transaction_relay.is_some() => {
                     match relay {
@@ -1036,6 +1047,9 @@ impl NodeActor {
     /// go through the store writer's atomic batches, so nothing is left half
     /// written, and in-memory state is rebuilt on the next start.
     async fn shut_down(mut self, reason: StopReason) {
+        // Keep the peers this node knows, and the ones it holds now as
+        // anchors, for its next start.
+        self.node.save_peer_book();
         self.workers.shutdown().await;
         match reason {
             StopReason::Requested(reply) => {

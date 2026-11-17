@@ -16,6 +16,7 @@ pub mod organise_worker;
 mod outgoing_peer_target;
 pub mod p2p_health;
 pub mod payout_tree_executor;
+mod peer_book;
 pub mod peer_reconnector;
 pub mod request_response_handler;
 pub mod request_sender;
@@ -203,6 +204,9 @@ struct Node {
     /// Dials known peers while the node has fewer outgoing peers than
     /// target_outgoing_peers.
     outgoing_peer_target: OutgoingPeerTarget,
+    /// Where the outgoing peer target's book is saved, or None with
+    /// `ephemeral_node_key` (`peer_book`).
+    peer_book_path: Option<std::path::PathBuf>,
     connection_tracker: ConnectionTracker,
     /// Whether an external address has been confirmed and advertised
     external_address_confirmed: bool,
@@ -379,7 +383,12 @@ impl Node {
         );
 
         let peer_reconnector = peer_reconnector::PeerReconnector::new(&config.network.dial_peers);
-        let outgoing_peer_target = OutgoingPeerTarget::new(&config.network, blocked_ips.clone());
+        let mut outgoing_peer_target =
+            OutgoingPeerTarget::new(&config.network, blocked_ips.clone());
+        let peer_book_path = config.network.peer_book_file(&config.store.path);
+        if let Some(path) = &peer_book_path {
+            outgoing_peer_target.load_book(peer_book::load(path));
+        }
 
         let mut node = Self {
             swarm,
@@ -390,6 +399,7 @@ impl Node {
             monitoring_event_sender,
             peer_reconnector,
             outgoing_peer_target,
+            peer_book_path,
             connection_tracker: ConnectionTracker::new(blocked_ips),
             external_address_confirmed,
             listen_port,
@@ -470,8 +480,19 @@ impl Node {
         self.swarm.connected_peers().cloned().collect()
     }
 
+    /// Save the outgoing peer target's book (`peer_book`), unless the node
+    /// keeps none. A failure is logged; the node goes on.
+    pub(crate) fn save_peer_book(&self) {
+        if let Some(path) = &self.peer_book_path
+            && let Err(error) = peer_book::save(path, &self.outgoing_peer_target.saved_book())
+        {
+            warn!("{error}");
+        }
+    }
+
     #[allow(dead_code)]
     pub fn shutdown(&mut self) -> Result<(), Box<dyn Error>> {
+        self.save_peer_book();
         if let Some(announcer) = self.nostr_announcer.take() {
             announcer.abort();
         }

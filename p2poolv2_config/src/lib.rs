@@ -1449,6 +1449,9 @@ fn default_nostr_announce() -> bool {
 /// File name of the node identity when `node_key_path` is not set.
 pub const DEFAULT_NODE_KEY_FILE: &str = "p2p_node_key";
 
+/// File name of the saved book of known peers, beside the store.
+pub const DEFAULT_PEER_BOOK_FILE: &str = "p2p_peers.json";
+
 impl NetworkConfig {
     /// Where this node keeps its libp2p identity: `node_key_path`, else
     /// [`DEFAULT_NODE_KEY_FILE`] in the directory holding `store_path`.
@@ -1464,6 +1467,22 @@ impl NetworkConfig {
                 .unwrap_or_else(|| std::path::Path::new("."))
                 .join(DEFAULT_NODE_KEY_FILE),
         })
+    }
+
+    /// Where this node saves its book of known peers:
+    /// [`DEFAULT_PEER_BOOK_FILE`] in the directory holding `store_path`.
+    /// `None` with `ephemeral_node_key`, which keeps nothing that links a
+    /// node's restarts.
+    pub fn peer_book_file(&self, store_path: &str) -> Option<std::path::PathBuf> {
+        if self.ephemeral_node_key {
+            return None;
+        }
+        Some(
+            std::path::Path::new(store_path)
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new("."))
+                .join(DEFAULT_PEER_BOOK_FILE),
+        )
     }
 }
 
