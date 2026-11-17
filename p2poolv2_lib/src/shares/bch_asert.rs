@@ -191,7 +191,9 @@ impl TickSchedule {
     /// one-minute blocks from 2027-05-15 12:00 UTC, no block pinned yet.
     /// The header gate checks token shares by the pins, so pinning the
     /// switch block changes its verdicts: a share-chain rule change, with a
-    /// new protocol segment, never a quiet update.
+    /// new protocol segment, never a quiet update. The SAFA covenant
+    /// (`p2poolv2_safa`) is compiled with the same pin, so it is pinned there
+    /// in the same change.
     const MAINNET: Self = Self {
         timed: MAINNET_SWITCHES,
         pinned: [None; MAX_SWITCHES],
@@ -570,11 +572,12 @@ impl BchAsert {
     /// network whose switch is not pinned yet, as mainnet's is not.
     ///
     /// The bands are the SAFA covenant's (`p2poolv2_safa`), number for
-    /// number, but the covenant still computes ASERT by height with ten-minute
-    /// blocks: after a network's switch to one-minute blocks it computes a
-    /// target ten times harder than this check, so a token share this check
-    /// accepts would fail the covenant's band. Open before any token
-    /// deployment: the covenant needs the parent's ticks and interval too.
+    /// number, and so is the computed target without a known parent: the
+    /// covenant is compiled with the same pinned switch and counts the
+    /// parent's ticks and the new block's interval from it, as
+    /// [`TickSchedule::tick_info`] does. A deployed covenant keeps the pins
+    /// it was compiled with, so a pin added here later needs a new covenant
+    /// with it; the tests compare the two for every network.
     pub fn check_header_bits(
         &self,
         bits: CompactTarget,

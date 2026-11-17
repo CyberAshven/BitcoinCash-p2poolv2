@@ -81,17 +81,52 @@ switch at median time past 1810382400 (2027-05-15 12:00 UTC), as in BCHN.
   reports it as `block_interval_secs`; `p2poolv2_cli bch-trade refund`
   prints the first block a Bitcoin Cash refund is valid in, since a lock
   height counts ten-minute units.
-- Open before any token deployment: the SAFA covenant (`p2poolv2_safa`, not
-  deployed) still computes ASERT by height with ten-minute blocks, so after
-  a network's switch it computes a target ten times harder than P2Pool's
-  token band, and a token share P2Pool accepts would fail the covenant. The
-  covenant is not changed here. Mainnet's activation block is not pinned
-  yet, so until a release pins it the header gate refuses mainnet token
-  shares after the switch. Pinning it changes the gate's verdicts, so it is
-  a share-chain rule change of its own, with a new protocol segment. Token
-  jobs (also Stratum V2 custom jobs) and token wins are offered only when
-  the header passes both bands peers check: the pins' and the known BCH
-  prev's.
+- The SAFA covenant (`p2poolv2_safa`) counts the ticks the header gate
+  counts without a known parent. It is compiled with the network's pinned
+  switch (chipnet's, after block 332,450; none for mainnet yet), takes the
+  parent's ticks and the header's interval from it and makes a one-minute
+  header's target ten times easier, so a token share the gate accepts
+  passes the covenant's band. Before, it counted every block as ten
+  minutes and computed a target ten times too hard after a switch, harder
+  still with every block. P2Pool's tests run the compiled covenant in the
+  BCH 2026 VM against the gate: around both edges of both bands, on the
+  real chipnet blocks 332,439 to 332,460 and on a mainnet with a switch
+  pinned in both; the CHIP's ASERT vectors pass in the covenant too.
+- The covenant's claim locks to its coinbase block's ticks. A Bitcoin Cash
+  lock height counts units of 600 ticks, so a claim locked to its
+  coinbase's block height, as before, waits nine more blocks for every
+  block past a switch (a chipnet win at height 333,800 could not be
+  claimed before block 345,951). The lock is now the block's ticks in
+  those units, rounded up, from the same pin: never final in the
+  coinbase's own block or before it, and final at most ten one-minute
+  blocks after it. The claim builder sets it and the claimer tries a win
+  once it is final in the next block. P2Pool's tests check the covenant's
+  lock heights against `TickSchedule::first_block_after_lock_height`.
+- The covenant's claim target eases by the ticks since the thread's state,
+  not the blocks: `min(dt, 288 x 600) * 5000 / (threads x 600)`, and the
+  fallback band opens 4,032 x 600 ticks after it. Counted in blocks, a
+  one-minute block eased the target as much as a ten-minute one, so claims
+  and the token's emission ran ten times faster in wall time and the
+  fallback opened after under three days instead of four weeks. On
+  ten-minute blocks every target is the same as before. Node-local: a
+  token job's SAFA leaf target eases the same way, counted by the
+  network's pins (`TokenSet::at_height`), and P2Pool's tests compare it
+  with `p2poolv2_safa`'s over every thread count and with the covenant's
+  leaf after chipnet's switch. A thread still takes one claim per block,
+  so a height is never claimed twice.
+- The covenant's bytes changed with all three (chipnet: a 1,437-byte
+  redeem script, K 2,017, another address). The tSAFA deployment made on
+  chipnet on 2026-10-29 keeps the earlier covenant, which since block
+  332,451 accepts only minimum-difficulty blocks; chipnet needs a new
+  deployment, and the fixtures recorded from the old one are replayed
+  against its recorded bytes until then (`p2poolv2_safa/README.md`).
+- Open before any token deployment: Mainnet's activation block is not pinned yet, in the
+  gate or the covenant, so until a release pins it the header gate refuses
+  mainnet token shares after the switch. Pinning it changes the gate's
+  verdicts, so it is a share-chain rule change of its own, with a new
+  protocol segment, and a new covenant with the same pin. Token jobs (also
+  Stratum V2 custom jobs) and token wins are offered only when the header
+  passes both bands peers check: the pins' and the known BCH prev's.
 
 The CHIP's ASERT and tick vectors pass, and real chipnet headers 332,429 to
 332,460 fed through the header path get the ticks and next intervals Knuth
