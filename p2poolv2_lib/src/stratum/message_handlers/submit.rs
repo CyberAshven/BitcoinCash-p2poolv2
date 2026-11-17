@@ -254,6 +254,7 @@ fn token_win_messages<'a>(
         coinbase,
         &job.template_merkle_branches,
         stratum_context.token_asert(),
+        stratum_context.bch_prev_tick_info(&header.prev_blockhash),
     );
     let mut messages = Vec::with_capacity(wins.len());
     for win in &wins {

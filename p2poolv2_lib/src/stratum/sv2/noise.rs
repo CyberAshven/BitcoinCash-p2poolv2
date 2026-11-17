@@ -31,8 +31,7 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::time::timeout;
 
-/// How long a client has to send its handshake key after connecting, and
-/// how long a server has to answer the node's own.
+/// How long a client has to send its handshake key after connecting.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// One connection's encryption and decryption state after the handshake.
@@ -86,12 +85,14 @@ impl NoiseTransport {
 
     /// Run the initiator side of the handshake on `stream`.
     ///
-    /// The server must answer within [`HANDSHAKE_TIMEOUT`] with a
-    /// certificate that `authority_public_key`, a 32-byte x-only key,
-    /// signed and that is valid now; anything else is an error.
+    /// The server must answer within `reply_timeout` with a certificate
+    /// that `authority_public_key`, a 32-byte x-only key, signed and that
+    /// is valid now; anything else is an error. The caller gives a server
+    /// it reaches over Tor or I2P longer than one it connects to directly.
     pub(crate) async fn connect<Stream>(
         stream: &mut Stream,
         authority_public_key: [u8; 32],
+        reply_timeout: Duration,
     ) -> Result<Self, String>
     where
         Stream: AsyncReadExt + AsyncWriteExt + Unpin,
@@ -107,7 +108,7 @@ impl NoiseTransport {
             .await
             .map_err(|error| error.to_string())?;
         let mut reply = [0u8; INITIATOR_EXPECTED_HANDSHAKE_MESSAGE_SIZE];
-        timeout(HANDSHAKE_TIMEOUT, stream.read_exact(&mut reply))
+        timeout(reply_timeout, stream.read_exact(&mut reply))
             .await
             .map_err(|_| "handshake timed out".to_string())?
             .map_err(|error| error.to_string())?;

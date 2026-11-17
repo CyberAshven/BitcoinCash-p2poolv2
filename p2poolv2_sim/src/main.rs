@@ -94,8 +94,8 @@ async fn main() -> ExitCode {
     // maturity: Bitcoin's is the sim's 20 shares, Bitcoin Cash's stays 100,
     // a share-chain rule the sim build does not change, and each chain's
     // prune depth follows from its maturity and the sim window (Bitcoin
-    // Cash: 2 * (100 + 80 + 3) = 366). `cargo sim maturity-check` and the
-    // prune scenarios read them from this line.
+    // Cash: 2 * (100 + 80 + 3) + 48 = 414, with WEAK_DEPTH). `cargo sim
+    // maturity-check` and the prune scenarios read them from this line.
     let depths = ChainDepths::for_chain(node_config.stratum.chain);
     info!(
         "Sim depths: coinbase maturity {} shares, PPLNS window {PPLNS_WINDOW_SHARES} shares, \

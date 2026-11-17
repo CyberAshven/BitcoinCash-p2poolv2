@@ -5,6 +5,7 @@
 use super::*;
 use crate::config::BitcoinCashNetwork;
 use crate::shares::bch_asert::tests::{MAINNET_PAIRS, header};
+use crate::shares::bch_headers::tests::ten_minute_header;
 use bitcoin::block::Version;
 use bitcoin::{CompactTarget, TxMerkleNode};
 use std::collections::BTreeMap;
@@ -35,6 +36,8 @@ impl Tree {
                 bits: CompactTarget::from_consensus(0x207f_ffff),
                 nonce: height,
             },
+            ticks: i64::from(height) * 600,
+            next_interval: 600,
         };
         self.headers.insert(known.block_hash(), known);
         known
@@ -187,18 +190,9 @@ fn a_message_carries_each_header_once_oldest_first_within_the_cap() {
 /// runs the full header check.
 fn real_chain() -> [KnownBchHeader; 3] {
     [
-        KnownBchHeader {
-            height: MAINNET_PAIRS[0].0,
-            header: header(MAINNET_PAIRS[0].1),
-        },
-        KnownBchHeader {
-            height: MAINNET_PAIRS[1].0,
-            header: header(MAINNET_PAIRS[1].1),
-        },
-        KnownBchHeader {
-            height: MAINNET_PAIRS[1].0 + 1,
-            header: header(MAINNET_PAIRS[1].2),
-        },
+        ten_minute_header(MAINNET_PAIRS[0].0, header(MAINNET_PAIRS[0].1)),
+        ten_minute_header(MAINNET_PAIRS[1].0, header(MAINNET_PAIRS[1].1)),
+        ten_minute_header(MAINNET_PAIRS[1].0 + 1, header(MAINNET_PAIRS[1].2)),
     ]
 }
 

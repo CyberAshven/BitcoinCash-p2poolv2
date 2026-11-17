@@ -6,6 +6,7 @@
 //! confirmation. A header meeting its claimed target is only a candidate.
 
 use crate::accounting::stats::metrics::MetricsHandle;
+use crate::shares::bch_asert::TickSchedule;
 #[cfg(test)]
 #[mockall_double::double]
 use crate::shares::chain::chain_store_handle::ChainStoreHandle;
@@ -25,10 +26,11 @@ const CANDIDATES_PER_ROUND: usize = 32;
 const VERIFICATION_INTERVAL: Duration = Duration::from_secs(5);
 const VERIFICATION_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// BCHN finalizes blocks this deep and will not reorganise below them
-/// (`-maxreorgdepth`, default 10). A candidate at least this far below
-/// BCHN's tip, with another block at its height, can never be accepted.
-const BCHN_FINALIZATION_DEPTH: u64 = 10;
+/// BCHN finalizes blocks this many ticks deep and will not reorganise below
+/// them (`-maxreorgticks`, CHIP-2025-03): 10 ten-minute blocks or 100
+/// one-minute blocks. A candidate at least this far below BCHN's tip, with
+/// another block at its height, can never be accepted.
+const BCHN_FINALIZATION_TICKS: i64 = 6_000;
 
 pub(crate) struct FoundBlockVerifier {
     client: BitcoindRpcClient,
@@ -46,6 +48,9 @@ pub(crate) struct FoundBlockVerifier {
     /// BCHN's tip height for this round, read at most once and only when a
     /// candidate's height holds another block.
     round_tip: Option<Option<u64>>,
+    /// The network's pins, which count a candidate's depth in ticks by
+    /// height while the known headers cannot.
+    tick_schedule: TickSchedule,
 }
 
 impl FoundBlockVerifier {
@@ -63,6 +68,33 @@ impl FoundBlockVerifier {
             historical_candidates: HashSet::with_capacity(CANDIDATES_PER_ROUND),
             settled: HashSet::with_capacity(CANDIDATES_PER_ROUND),
             round_tip: None,
+            tick_schedule: TickSchedule::TEN_MINUTES,
+        }
+    }
+
+    /// The verifier for a network whose pins are `tick_schedule`, for when
+    /// the known headers cannot count a candidate's depth. Without it, that
+    /// count takes every block as a ten-minute block.
+    pub(crate) fn with_tick_schedule(mut self, tick_schedule: TickSchedule) -> Self {
+        self.tick_schedule = tick_schedule;
+        self
+    }
+
+    /// How many ticks the block at `height` on BCHN's best chain, `at_height`,
+    /// is below BCHN's tip at `tip_height`: from the two blocks' known
+    /// headers, or by the network's pins while either is not known.
+    fn ticks_below_tip(&self, at_height: BlockHash, height: u32, tip_height: u32) -> i64 {
+        let known = |hash: &BlockHash| self.store.get_bch_header(hash).ok().flatten();
+        let tip = self
+            .store
+            .get_bch_best_hash(tip_height)
+            .ok()
+            .flatten()
+            .and_then(|tip| known(&tip))
+            .filter(|tip| tip.height == tip_height);
+        match (tip, known(&at_height)) {
+            (Some(tip), Some(block)) => tip.ticks - block.ticks,
+            _ => self.tick_schedule.ticks(tip_height) - self.tick_schedule.ticks(height),
         }
     }
 
@@ -160,15 +192,20 @@ impl FoundBlockVerifier {
                     }
                 }
             }
-            Ok(Ok(_)) => {
-                let final_height = candidate
-                    .bitcoin_height
-                    .saturating_add(BCHN_FINALIZATION_DEPTH);
-                if self
+            Ok(Ok(reported)) => {
+                let height = u32::try_from(candidate.bitcoin_height).ok();
+                let at_height = reported.parse::<BlockHash>().ok();
+                let tip = self
                     .tip_height()
                     .await
-                    .is_some_and(|tip| tip >= final_height)
-                {
+                    .and_then(|tip| u32::try_from(tip).ok());
+                let finalized = match (height, at_height, tip) {
+                    (Some(height), Some(at_height), Some(tip)) if tip >= height => {
+                        self.ticks_below_tip(at_height, height, tip) >= BCHN_FINALIZATION_TICKS
+                    }
+                    _ => false,
+                };
+                if finalized {
                     info!(
                         "Candidate pool block {block_hash} lost its height to a final BCHN block; \
                          no longer checking it"

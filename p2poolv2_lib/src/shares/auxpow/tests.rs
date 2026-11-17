@@ -192,12 +192,17 @@ fn golden_one_leaf_proof_encodes_and_verifies() {
     assert_eq!(decoded, proof);
     assert_eq!(decoded.coinbase_height(), Some(325_909));
     decoded
-        .verify(&leaf, MAX_MERGE_MINING_TREE_HEIGHT, None)
+        .verify(&leaf, MAX_MERGE_MINING_TREE_HEIGHT, None, None)
         .unwrap();
     // The header's regtest bits are above BCH's limit: the mainnet ASERT
     // check refuses them.
     assert!(matches!(
-        decoded.verify(&leaf, MAX_MERGE_MINING_TREE_HEIGHT, Some(BchAsert::MAINNET)),
+        decoded.verify(
+            &leaf,
+            MAX_MERGE_MINING_TREE_HEIGHT,
+            Some(BchAsert::MAINNET),
+            None
+        ),
         Err(AuxError::Asert(_))
     ));
 }
@@ -212,7 +217,7 @@ fn golden_proof_rejects_another_state_hash() {
         ..token_a()
     };
     assert_eq!(
-        proof.verify(&stale, MAX_MERGE_MINING_TREE_HEIGHT, None),
+        proof.verify(&stale, MAX_MERGE_MINING_TREE_HEIGHT, None, None),
         Err(AuxError::MerkleRoot)
     );
 }
@@ -223,7 +228,7 @@ fn golden_proof_rejects_a_changed_first_state_byte() {
     let mut stale = token_a();
     stale.state_hash[0] ^= 1;
     assert_eq!(
-        proof.verify(&stale, MAX_MERGE_MINING_TREE_HEIGHT, None),
+        proof.verify(&stale, MAX_MERGE_MINING_TREE_HEIGHT, None, None),
         Err(AuxError::MerkleRoot)
     );
 }
@@ -234,7 +239,7 @@ fn golden_proof_rejects_a_changed_last_state_byte() {
     let mut stale = token_a();
     stale.state_hash[31] ^= 1;
     assert_eq!(
-        proof.verify(&stale, MAX_MERGE_MINING_TREE_HEIGHT, None),
+        proof.verify(&stale, MAX_MERGE_MINING_TREE_HEIGHT, None, None),
         Err(AuxError::MerkleRoot)
     );
 }
@@ -269,13 +274,22 @@ fn verifier_checks_height_target_head_and_tail() {
     let leaf = token_a();
     let mut token_limit = leaf;
     token_limit.target_bits = 0x2080_0000;
-    assert_eq!(golden.verify(&token_limit, 16, None), Err(AuxError::Target));
+    assert_eq!(
+        golden.verify(&token_limit, 16, None, None),
+        Err(AuxError::Target)
+    );
     let mut proof = golden.clone();
     proof.coinbase_head[4] = 2;
-    assert_eq!(proof.verify(&leaf, 16, None), Err(AuxError::CoinbaseHead));
+    assert_eq!(
+        proof.verify(&leaf, 16, None, None),
+        Err(AuxError::CoinbaseHead)
+    );
     let mut proof = golden.clone();
     proof.coinbase_tail.truncate(3);
-    assert_eq!(proof.verify(&leaf, 16, None), Err(AuxError::CoinbaseTail));
+    assert_eq!(
+        proof.verify(&leaf, 16, None, None),
+        Err(AuxError::CoinbaseTail)
+    );
     // A harder token target than the header's work.
     let mut hard = leaf;
     hard.target_bits = 0x0300_0001;
@@ -283,7 +297,7 @@ fn verifier_checks_height_target_head_and_tail() {
         header: golden.header,
         ..golden.clone()
     };
-    assert!(proof.verify(&hard, 16, None).is_err());
+    assert!(proof.verify(&hard, 16, None, None).is_err());
     // A two-leaf proof is refused by a token limited to one leaf.
     let tree = AuxiliaryTree::build(&[token_a(), token_b()]).unwrap();
     let coinbase = vector_coinbase(tree.commitment);
@@ -292,7 +306,7 @@ fn verifier_checks_height_target_head_and_tail() {
         ..golden.header
     };
     let two = AuxProof::new(header, &coinbase, &[], tree.commitment, &tree.branches[0]).unwrap();
-    assert_eq!(two.verify(&leaf, 0, None), Err(AuxError::Height));
+    assert_eq!(two.verify(&leaf, 0, None, None), Err(AuxError::Height));
 }
 
 #[test]
@@ -344,14 +358,14 @@ fn token_targets_must_be_canonical_compact() {
 #[test]
 fn proof_from_a_p2pool_declared_coinbase_verifies() {
     let (proof, leaf) = test_bch_auxpow();
-    proof.verify(&leaf, 16, None).unwrap();
+    proof.verify(&leaf, 16, None, None).unwrap();
     let bytes = proof.to_bytes().unwrap();
     assert_eq!(AuxProof::from_bytes(&bytes).unwrap(), proof);
     let other = TokenLeaf {
         category: [0x99; 32],
         ..leaf
     };
-    assert!(proof.verify(&other, 16, None).is_err());
+    assert!(proof.verify(&other, 16, None, None).is_err());
 }
 
 /// P2PKH to twenty `byte` bytes.

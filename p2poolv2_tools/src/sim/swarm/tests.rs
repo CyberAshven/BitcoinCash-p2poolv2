@@ -37,6 +37,8 @@ fn settings(node_count: usize) -> SwarmSettings {
         profile: "release".to_string(),
         payout_levels: Vec::new(),
         weak_shares: false,
+        weak_asks: Vec::new(),
+        keep_whole_weak_shares: Vec::new(),
         virtual_miners: None,
         merge_tokens: None,
         log_level: "debug".to_string(),
@@ -129,6 +131,74 @@ fn an_empty_payout_levels_value_is_no_levels() {
 #[test]
 fn a_payout_level_above_seven_is_refused() {
     assert!(parse_payout_levels("5,8").is_err());
+}
+
+/// `WEAK_ASKS=0,1` makes node 1's weak shares ask, and node 0's and any node
+/// past the list not.
+#[test]
+fn node_config_writes_weak_asks_for_the_nodes_that_ask() {
+    let mut swarm = settings(3);
+    swarm.weak_asks = parse_weak_asks("0, 1").unwrap();
+    let shape = NodeShape {
+        hashrate: "5".to_string(),
+        latency_ms: 0,
+    };
+    let weak_asks = |index: usize| {
+        let config = node_config(
+            &swarm,
+            &NodeIdentity {
+                index,
+                payout_address: "bchreg:qpayout",
+                shape: &shape,
+            },
+        );
+        let parsed: toml::Table = config.parse().expect("config parses");
+        parsed
+            .get("sim")
+            .and_then(|table| table.get("weak_asks"))
+            .and_then(toml::Value::as_bool)
+    };
+
+    assert_eq!(weak_asks(0), None);
+    assert_eq!(weak_asks(1), Some(true));
+    assert_eq!(weak_asks(2), None);
+}
+
+/// `KEEP_WHOLE_WEAK_SHARES=0,1` makes node 1 keep whole weak shares to the
+/// body prune depth, and the others prune them at one payout depth.
+#[test]
+fn node_config_keeps_whole_weak_shares_for_the_nodes_listed() {
+    let mut swarm = settings(3);
+    swarm.keep_whole_weak_shares = parse_keep_whole_weak_shares("0,1").unwrap();
+    let shape = NodeShape {
+        hashrate: "5".to_string(),
+        latency_ms: 0,
+    };
+    let keeps_whole = |index: usize| {
+        let config = node_config(
+            &swarm,
+            &NodeIdentity {
+                index,
+                payout_address: "bchreg:qpayout",
+                shape: &shape,
+            },
+        );
+        let parsed: toml::Table = config.parse().expect("config parses");
+        parsed
+            .get("store")
+            .and_then(|table| table.get("keep_whole_weak_shares"))
+            .and_then(toml::Value::as_bool)
+    };
+
+    assert_eq!(keeps_whole(0), None);
+    assert_eq!(keeps_whole(1), Some(true));
+    assert_eq!(keeps_whole(2), None);
+}
+
+#[test]
+fn weak_asks_takes_only_zeros_and_ones() {
+    assert!(parse_weak_asks("").unwrap().is_empty());
+    assert!(parse_weak_asks("1,2").is_err());
 }
 
 #[test]
