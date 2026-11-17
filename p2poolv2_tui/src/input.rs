@@ -11,6 +11,7 @@
 //! being typed.
 
 use crate::app::{App, ExplorerTrigger, MAX_INPUT_CHARS};
+use crate::systemd::ServiceAction;
 use crate::views::bchn::BCHN_TABS;
 use crate::views::pool::POOL_TABS;
 use crate::views::settings::{FieldKind, SETTINGS_FIELDS};
@@ -31,6 +32,18 @@ pub fn handle_key(app: &mut App, key: KeyEvent, now: Instant) -> ControlFlow<()>
     let control = key.modifiers.contains(KeyModifiers::CONTROL);
     if (control && key.code == KeyCode::Char('c')) || (!typing && key.code == KeyCode::Char('q')) {
         return ControlFlow::Break(());
+    }
+    if app.service_controls() {
+        let action = match key.code {
+            KeyCode::Char('s') => Some(ServiceAction::Start),
+            KeyCode::Char('x') => Some(ServiceAction::Stop),
+            KeyCode::Char('r') => Some(ServiceAction::Restart),
+            _ => None,
+        };
+        if let Some(action) = action {
+            app.run_service_action(action, now);
+            return ControlFlow::Continue(());
+        }
     }
     if !typing && key.code == KeyCode::Char('r') && app.screen != Screen::FileExplorer {
         app.refresh_now();
@@ -203,7 +216,9 @@ mod tests {
     use crate::config_editor::field_index;
     use crate::remote::Remote;
     use crate::settings::Settings;
+    use crate::systemd::P2PoolV2Service;
     use crate::test_utils::{BCH_CHIPNET_CONFIG, sample_miners, write_config};
+    use crate::views::pool::SYSTEM_TAB;
     use std::path::PathBuf;
     use tokio::runtime::Handle;
 
@@ -321,5 +336,56 @@ mod tests {
         key.kind = KeyEventKind::Release;
         assert!(handle_key(&mut app, key, Instant::now()).is_continue());
         assert_eq!(app.screen, Screen::Home);
+    }
+
+    /// Without a service instance, s and x on the System tab do nothing and
+    /// r still refreshes.
+    #[tokio::test]
+    async fn test_service_keys_need_a_service_instance() {
+        let mut app = App::new(Settings::default(), PathBuf::from("."), Handle::current());
+        app.select_sidebar(3);
+        app.pool_tab = SYSTEM_TAB;
+        assert!(!app.service_controls());
+        let now = Instant::now();
+        for key in ['s', 'x', 'r'] {
+            let key = KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE);
+            assert!(handle_key(&mut app, key, now).is_continue());
+        }
+        assert!(app.service_error.is_none());
+        assert!(matches!(app.service_status, Remote::Unconfigured));
+    }
+
+    /// With a node config in the user config directory, s on the System tab
+    /// runs `systemctl --user start`; here a missing `systemctl`, whose
+    /// failure comes back to the tab. On another tab s does nothing.
+    #[tokio::test]
+    async fn test_s_on_the_system_tab_starts_the_service() {
+        let Some(config_dir) = crate::systemd::user_p2pool_config_dir() else {
+            return;
+        };
+        let mut app = App::new(Settings::default(), PathBuf::from("."), Handle::current());
+        app.node_config_path = Some(config_dir.join("config-chipnet.toml"));
+        app.service = P2PoolV2Service::with_systemctl("p2poolv2-tui-no-such-systemctl");
+        app.select_sidebar(3);
+        let start = KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE);
+        assert!(!app.service_controls());
+        assert!(handle_key(&mut app, start, Instant::now()).is_continue());
+
+        app.pool_tab = SYSTEM_TAB;
+        assert!(app.service_controls());
+        assert!(handle_key(&mut app, start, Instant::now()).is_continue());
+        for _ in 0..500 {
+            app.drain(Instant::now());
+            if app.service_error.is_some() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let error = app.service_error.clone().unwrap();
+        assert!(
+            error.starts_with("Start failed: failed to execute systemctl start"),
+            "{error}"
+        );
+        assert!(matches!(app.service_status, Remote::Failed(_)));
     }
 }

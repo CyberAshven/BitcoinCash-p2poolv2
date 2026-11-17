@@ -52,21 +52,30 @@ const BITCOIN_CASH_NODE_EXPORTS: [(&str, &str); 5] = [
 ];
 
 /// Ports Umbrel's Bitcoin and mining apps take, which a miner may run beside
-/// these (getumbrel/umbrel-apps at 2026-10-23, and p2poolv2/umbrel-app):
+/// these (getumbrel/umbrel-apps at 2026-10-23, and p2poolv2/umbrel-app at
+/// b4e19f96):
 /// - Bitcoin Node: dashboard 2100, RPC 8332, P2P 8333, Tor 8334, whitebind
 ///   8335 and ZMQ 28332 to 28336;
 /// - Bitcoin Knots: dashboard 2105, RPC 9332, P2P 9333, whitebind 9335, Tor
 ///   8334 and ZMQ 48332 to 48336;
 /// - Bitcoin Cash Node: dashboard 3330, P2P 8335, RPC 8332 and ZMQ 28332;
-/// - P2Poolv2 for Bitcoin: Stratum 3333, P2P 6884 and dashboard 46884;
+/// - P2Poolv2 for Bitcoin: Stratum 3333, P2P 6884, dashboard 36884 and
+///   Grafana 3001;
 /// - Public Pool: Stratum 2018, dashboard 2019 and its web app 2021;
 /// - DATUM: dashboard 21000 and Stratum 23334;
 /// - Gobrrr Pool: Stratum 21420 and 21422, dashboard 21421.
-const TAKEN_PORTS: [u16; 31] = [
-    2018, 2019, 2021, 2100, 2105, 3330, 3333, 6884, 8332, 8333, 8334, 8335, 9332, 9333, 9335,
-    21000, 21420, 21421, 21422, 23334, 28332, 28333, 28334, 28335, 28336, 46884, 48332, 48333,
+const TAKEN_PORTS: [u16; 32] = [
+    2018, 2019, 2021, 2100, 2105, 3001, 3330, 3333, 6884, 8332, 8333, 8334, 8335, 9332, 9333, 9335,
+    21000, 21420, 21421, 21422, 23334, 28332, 28333, 28334, 28335, 28336, 36884, 48332, 48333,
     48334, 48335, 48336,
 ];
+
+/// Host ports umbrelOS 2.0 keeps for Umbrel Machines' port forwards
+/// (`MACHINES_PORT_MIN` and `MACHINES_PORT_MAX` in umbreld, reserved in
+/// getumbrel/umbrel's `99-umbrel-machines-ports.conf`). An app port in this
+/// range can clash with a Machine's forward, which is why upstream's app
+/// left 46884.
+const MACHINES_PORTS: std::ops::RangeInclusive<u16> = 40000..=49999;
 
 /// Umbrel cuts a setting's note at this many characters.
 const MAX_SETTING_NOTE_LENGTH: usize = 300;
@@ -127,6 +136,25 @@ fn compose_value<'a>(compose: &'a str, key: &str) -> &'a str {
         .find_map(|line| line.trim().strip_prefix(prefix.as_str()))
         .unwrap_or_else(|| panic!("compose sets no {key}"))
         .trim()
+}
+
+/// The lines of `service` in a compose file, from its `  <service>:` line
+/// to the next service's.
+fn service_block(compose: &str, service: &str) -> String {
+    let header = format!("  {service}:");
+    compose
+        .lines()
+        .skip_while(|line| line.trim_end() != header)
+        .skip(1)
+        .take_while(|line| {
+            let next_service = line.starts_with("  ")
+                && !line.starts_with("   ")
+                && !line.trim_start().starts_with('#')
+                && line.trim_end().ends_with(':');
+            !next_service
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// The `- "host:container"` port mappings the compose file publishes.
@@ -355,7 +383,7 @@ fn umbrel_apps_publish_the_ports_their_nodes_listen_on() {
             .unwrap();
 
         assert_eq!(
-            published_ports(app.compose),
+            published_ports(&service_block(app.compose, "p2pool")),
             [
                 (config.stratum.port, config.stratum.port),
                 (listen_port, listen_port)
@@ -376,8 +404,8 @@ fn umbrel_apps_publish_the_ports_their_nodes_listen_on() {
     }
 }
 
-/// The apps can run beside each other, the Bitcoin P2Poolv2 app and
-/// Umbrel's Bitcoin apps.
+/// The apps can run beside each other, the Bitcoin P2Poolv2 app,
+/// Umbrel's Bitcoin apps and Umbrel Machines.
 #[test]
 fn umbrel_app_host_ports_are_free() {
     let mut used: Vec<u16> = Vec::new();
@@ -391,6 +419,11 @@ fn umbrel_app_host_ports_are_free() {
             assert!(
                 !TAKEN_PORTS.contains(&port),
                 "{}: port {port} is taken",
+                app.id
+            );
+            assert!(
+                !MACHINES_PORTS.contains(&port),
+                "{}: port {port} is in umbrelOS's Machines range",
                 app.id
             );
             assert!(!used.contains(&port), "{}: port {port} used twice", app.id);
@@ -430,4 +463,67 @@ fn umbrel_apps_belong_to_the_store() {
         ["bitcoin-cash-node"]
     );
     assert!(manifest_list(BCH_P2POOL_EXTERNAL.manifest, "dependencies").is_empty());
+}
+
+/// The repository's Grafana files each app carries, relative to
+/// `prometheus/grafana` and to the app's `grafana` folder.
+const GRAFANA_FILES: [&str; 6] = [
+    "dashboards/node-provision.json",
+    "dashboards/pool-provision.json",
+    "dashboards/users-provision.json",
+    "dashboards/users_private-provision.json",
+    "provisioning/dashboards/dashboards.yml",
+    "provisioning/datasources/prometheus.yml",
+];
+
+/// A file of the repository, by its path from the workspace root.
+fn repository_file(path: &str) -> Vec<u8> {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join(path);
+    std::fs::read(&path).unwrap_or_else(|error| panic!("{}: {error}", path.display()))
+}
+
+/// An Umbrel app folder must hold every file its services mount, so each
+/// app carries a copy of the repository's Grafana dashboards and
+/// provisioning, byte for byte, and its Prometheus scrapes its own node:
+/// the `p2pool` service, on the API port the app proxy uses.
+#[test]
+fn umbrel_apps_carry_the_repository_dashboards() {
+    for app in &APPS {
+        for file in GRAFANA_FILES {
+            assert!(
+                repository_file(&format!("packaging/umbrel/{}/grafana/{file}", app.id))
+                    == repository_file(&format!("prometheus/grafana/{file}")),
+                "{}: grafana/{file} differs from prometheus/grafana/{file}; copy it again",
+                app.id
+            );
+        }
+        let prometheus = String::from_utf8(repository_file(&format!(
+            "packaging/umbrel/{}/prometheus.yml",
+            app.id
+        )))
+        .unwrap();
+        let target = format!("- p2pool:{}", compose_value(app.compose, "APP_PORT"));
+        assert!(
+            prometheus.lines().any(|line| line.trim() == target),
+            "{}: prometheus.yml must scrape {target}",
+            app.id
+        );
+        assert!(
+            !service_block(app.compose, "p2pool").is_empty(),
+            "{}: no p2pool service",
+            app.id
+        );
+        let grafana = service_block(app.compose, "grafana");
+        assert!(
+            grafana.contains("GF_SECURITY_ADMIN_PASSWORD=${APP_PASSWORD}"),
+            "{}",
+            app.id
+        );
+        assert_eq!(
+            manifest_value(app.manifest, "deterministicPassword"),
+            "true"
+        );
+    }
 }

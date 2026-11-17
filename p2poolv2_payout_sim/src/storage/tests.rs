@@ -55,15 +55,38 @@ fn the_default_level_caps_the_outputs_whatever_the_payees() {
         hundred_thousand, million,
         "the draw pays the reward in whole levels"
     );
-    assert_eq!(million.outputs, (312_500_000.0_f64 / 17_472.0).floor());
-    assert_eq!(million.tree, 0.0, "17,885 outputs fit the 1 MB coinbase");
+    assert_eq!(million.outputs, (BLOCK_REWARD_SATOSHIS / 17_472.0).floor());
+    assert_eq!(million.tree, 0.0, "the outputs fit the 1 MB coinbase");
 }
 
 #[test]
-fn the_lowest_level_fills_the_coinbase_and_pays_the_rest_through_the_tree() {
+fn a_one_minute_block_pays_1788_default_level_outputs() {
+    // 0.3125 BCH over 17,472 sat; a ten-minute block's 3.125 BCH paid 17,885.
+    assert_eq!(coinbase(1_000_000, DEFAULT_LEVEL).outputs, 1_788.0);
+}
+
+#[test]
+fn the_lowest_level_pays_every_output_in_the_coinbase_of_a_one_minute_block() {
+    // 0.3125 BCH over 1,092 sat is 28,617 outputs, under the 29,400 that
+    // 1,000,000 bytes less 367 hold at 34 bytes each. A ten-minute block's
+    // 286,172 outputs filled the coinbase and paid the rest through the tree.
     let block = coinbase(1_000_000, MIN_PAYOUT_LEVEL);
-    assert_eq!(block.outputs, (312_500_000.0_f64 / 1_092.0).floor());
-    assert_eq!(block.direct, 29_400.0, "1,000,000 bytes less 367, over 34");
-    assert_eq!(block.tree, block.outputs - 29_400.0);
+    assert_eq!(
+        block.outputs,
+        (BLOCK_REWARD_SATOSHIS / level_amount(MIN_PAYOUT_LEVEL) as f64).floor()
+    );
+    assert_eq!(block.outputs, 28_617.0);
+    assert_eq!(block.direct, block.outputs);
+    assert_eq!(block.tree, 0.0);
     assert!(block.bytes <= 1_000_000.0, "{}", block.bytes);
+}
+
+#[test]
+fn levels_never_reach_the_payout_tree_without_fees() {
+    // The reward over the lowest level is under the 29,400 outputs the
+    // coinbase holds, so only fees (left out here) could fill it.
+    let fit = ((BCH_MAX_TRANSACTION_BYTES - HYBRID_COINBASE_BYTES_BESIDE_PAYOUTS)
+        / P2PKH_OUTPUT_BYTES) as f64;
+    assert_eq!(fit, 29_400.0);
+    assert!(BLOCK_REWARD_SATOSHIS / (level_amount(MIN_PAYOUT_LEVEL) as f64) < fit);
 }

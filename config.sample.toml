@@ -179,6 +179,12 @@ zmqpubhashblock = "tcp://127.0.0.1:28332"
 # runs the Noise handshake; it is required unless the provider is on this
 # computer (a loopback address).
 # template_provider_authority_public_key = "9b..."
+# HOST:PORT of a SOCKS5 proxy to reach the provider through: Tor's SOCKS port
+# (127.0.0.1:9050) for a .onion address, or an I2P router's SOCKS proxy
+# (i2pd: 127.0.0.1:4447) for a .b32.i2p address. The provider's name goes to
+# the proxy and is never resolved on this computer, and nothing is dialed
+# directly. Needs the provider's authority public key.
+# template_provider_proxy = "127.0.0.1:9050"
 # Version rolling mask offered to miners (BIP 310 negotiation): the 16 general
 # purpose bits of BIP 320, 0x1fffe000, which ASIC firmware rolls on Bitcoin
 # Cash as on Bitcoin. It is the code default and what Stratum V2 channels allow

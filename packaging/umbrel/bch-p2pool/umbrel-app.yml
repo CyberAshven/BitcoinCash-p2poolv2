@@ -5,7 +5,7 @@ tagline: Peer-to-peer Bitcoin Cash mining pool on your own node
 icon: https://raw.githubusercontent.com/CyberAshven/BitcoinCash-p2poolv2/main/packaging/umbrel/bch-p2pool/icon.png
 category: crypto
 version: "0.0.1-alpha"
-port: 46890
+port: 36890
 description: >-
   P2Poolv2 for Bitcoin Cash is a mining pool with no operator. Nodes keep a
   share chain together, and every block the pool finds pays each miner
@@ -14,7 +14,8 @@ description: >-
 
   This app mines on the Bitcoin Cash Node app on this Umbrel (mainnet): it
   takes block templates from BCHN and hears about new blocks over ZMQ, with
-  no setup. Point your miners at port 3340 of your Umbrel.
+  no setup. Point your miners at port 3340 of your Umbrel. Grafana shows the
+  node's dashboards on port 3342.
 
 
   Alpha software. The pool runs on chipnet; mainnet has not started. To try
@@ -33,10 +34,13 @@ dependencies:
 path: ""
 defaultUsername: ""
 defaultPassword: ""
+# Grafana's admin password is this app's APP_PASSWORD, as upstream's app.
+deterministicPassword: true
 storage:
   dataRoot: data
 backupIgnore:
   - data/logs
+  - data/prometheus
 environment:
   - name: P2POOL_STRATUM__MINER_ADDRESS
     services:

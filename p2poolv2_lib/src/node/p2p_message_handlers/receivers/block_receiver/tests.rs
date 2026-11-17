@@ -2406,3 +2406,523 @@ fn test_validate_asert_accepts_wanted_bits_easier_than_bits() {
 
     assert!(result.is_ok(), "{}", result.unwrap_err());
 }
+
+//* Header-check forwarding: a share a peer sent is relayed once it passes
+//* the header check and is stored, before its body is validated. It is
+//* never relayed when its header fails, twice, when it or its parent is
+//* already Invalid, or while the chain is not current. Each test drops the
+//* receiver before reading the relay channel, so an empty channel reads as
+//* None rather than waiting.
+
+/// A share whose header checks out is relayed once stored, before its body
+/// is validated. Its parent is only `HeaderValid`: the parent's body need
+/// not be validated either. The validator has no `validate_share_block`
+/// expectation, so a body check here would panic.
+#[tokio::test]
+async fn test_a_share_passing_the_header_check_is_relayed_before_its_body_is_validated() {
+    let parent_hash = BlockHash::from_byte_array([0x61; 32]);
+    let parent_header = TestShareBlockBuilder::new()
+        .nonce(0xe9695790)
+        .build()
+        .header;
+
+    let mut mock_store = ChainStoreHandle::default();
+    mock_store
+        .expect_get_candidate_tip_height()
+        .returning(|| Ok(Some(0)));
+    mock_store
+        .expect_all_block_and_uncle_data_available()
+        .returning(|_, _| Ok(true));
+    mock_store
+        .expect_get_block_metadata()
+        .returning(move |hash| {
+            if hash == &parent_hash {
+                Ok(BlockMetadata {
+                    expected_height: Some(0),
+                    chain_work: bitcoin::Work::from_be_bytes([0u8; 32]),
+                    status: Status::HeaderValid,
+                    chain: ChainMembership::Candidate,
+                })
+            } else {
+                Err(StoreError::NotFound("not found".to_string()))
+            }
+        });
+    mock_store
+        .expect_get_asert_parent()
+        .with(mockall::predicate::eq(parent_hash))
+        .returning(move |_| {
+            Ok(AsertParent::from_header(
+                &parent_header,
+                0,
+                parent_header.time,
+            ))
+        });
+    mock_store
+        .expect_get_share_header()
+        .returning(|_| Ok(TestShareBlockBuilder::new().build().header));
+    mock_store.expect_share_block_exists().returning(|_| false);
+    mock_store.expect_is_current().returning(|| true);
+    mock_store
+        .expect_carried_bch_headers()
+        .returning(|_| Vec::new());
+    mock_store
+        .expect_add_share_block_and_organise_header()
+        .times(1)
+        .returning(|_| Ok(None));
+
+    let mut mock_validator = MockDefaultShareValidator::default();
+    mock_validator.expect_bch_header_rules().return_const(None);
+    mock_validator
+        .expect_validate_uncles()
+        .returning(|_, _| Ok(()));
+    mock_validator
+        .expect_validate_header_timestamp()
+        .returning(|_, _| Ok(()));
+    let mut pool_difficulty = PoolDifficulty::default();
+    pool_difficulty
+        .expect_calculate_target_clamped()
+        .returning(|_| CompactTarget::from_consensus(crate::shares::share_block::MAX_POOL_TARGET));
+    mock_validator
+        .expect_pool_difficulty()
+        .return_const(pool_difficulty);
+
+    let (_, event_rx) = create_block_receiver_channel();
+    let (block_fetcher_handle, _block_fetcher_rx) = block_fetcher::create_block_fetcher_channel();
+    let (validation_tx, mut validation_rx) = validation_worker::create_validation_channel();
+    let (relay_tx, mut relay_rx) = mpsc::channel(8);
+    let mut receiver = BlockReceiver::new(
+        event_rx,
+        Arc::new(mock_validator),
+        mock_store,
+        block_fetcher_handle,
+        validation_tx,
+    )
+    .with_relay(relay_tx);
+
+    let mut child_block = TestShareBlockBuilder::new()
+        .prev_share_blockhash(parent_hash.to_string())
+        .nonce(0xe9695791)
+        .build();
+    child_block.header.bits =
+        CompactTarget::from_consensus(crate::shares::share_block::MAX_POOL_TARGET);
+    let child_hash = child_block.block_hash();
+
+    let result = receiver.process_share_block(child_block).await;
+    assert!(result.is_ok(), "Expected Ok, got: {}", result.unwrap_err());
+    drop(receiver);
+
+    match relay_rx.recv().await {
+        Some(SwarmSend::BroadcastBlock(relayed, _)) => assert_eq!(relayed.block_hash(), child_hash),
+        _ => panic!("Expected the share relayed once its header checked out"),
+    }
+    assert!(
+        relay_rx.recv().await.is_none(),
+        "the share must be relayed once"
+    );
+    match validation_rx.try_recv() {
+        Ok(ValidationEvent::ValidateBlockHash(hash)) => assert_eq!(hash, child_hash),
+        _ => panic!("Expected the body queued for full validation"),
+    }
+}
+
+/// A share whose header check fails is dropped before it is stored, so it
+/// is never relayed: the minimum it declares is not the ASERT target its
+/// parent gives. Nothing about relaying is asked of the store.
+#[tokio::test]
+async fn test_a_share_failing_the_header_check_is_not_relayed() {
+    let parent_hash = BlockHash::from_byte_array([0x62; 32]);
+    let parent_header = TestShareBlockBuilder::new()
+        .nonce(0xe9695790)
+        .build()
+        .header;
+
+    let mut mock_store = ChainStoreHandle::default();
+    mock_store
+        .expect_get_candidate_tip_height()
+        .returning(|| Ok(Some(0)));
+    mock_store
+        .expect_all_block_and_uncle_data_available()
+        .returning(|_, _| Ok(true));
+    mock_store
+        .expect_get_block_metadata()
+        .returning(|_| Err(StoreError::NotFound("not found".to_string())));
+    mock_store.expect_get_asert_parent().returning(move |_| {
+        Ok(AsertParent::from_header(
+            &parent_header,
+            0,
+            parent_header.time,
+        ))
+    });
+    mock_store
+        .expect_add_share_block_and_organise_header()
+        .never();
+
+    let mut pool_difficulty = PoolDifficulty::default();
+    pool_difficulty
+        .expect_calculate_target_clamped()
+        .returning(|_| CompactTarget::from_consensus(0x1d00ffff));
+    let mut mock_validator = MockDefaultShareValidator::default();
+    mock_validator.expect_bch_header_rules().return_const(None);
+    mock_validator
+        .expect_pool_difficulty()
+        .return_const(pool_difficulty);
+
+    let (_, event_rx) = create_block_receiver_channel();
+    let (block_fetcher_handle, _block_fetcher_rx) = block_fetcher::create_block_fetcher_channel();
+    let (validation_tx, mut validation_rx) = validation_worker::create_validation_channel();
+    let (relay_tx, mut relay_rx) = mpsc::channel(8);
+    let mut receiver = BlockReceiver::new(
+        event_rx,
+        Arc::new(mock_validator),
+        mock_store,
+        block_fetcher_handle,
+        validation_tx,
+    )
+    .with_relay(relay_tx);
+
+    let mut child_block = TestShareBlockBuilder::new()
+        .prev_share_blockhash(parent_hash.to_string())
+        .nonce(0xe9695791)
+        .build();
+    child_block.header.bits =
+        CompactTarget::from_consensus(crate::shares::share_block::MAX_POOL_TARGET);
+
+    let result = receiver.process_share_block(child_block).await;
+    assert!(result.is_ok());
+    drop(receiver);
+
+    assert!(
+        relay_rx.recv().await.is_none(),
+        "a share whose header fails must never be relayed"
+    );
+    assert!(validation_rx.try_recv().is_err());
+}
+
+/// A copy of a share whose body is already stored, here a second copy that
+/// reached the receiver before the first was stored, is not relayed again:
+/// the first copy's store decided its relay. It is stored and queued for
+/// validation as before.
+#[tokio::test]
+async fn test_a_second_copy_of_a_stored_share_is_not_relayed_again() {
+    let parent_hash = BlockHash::from_byte_array([0x63; 32]);
+    let parent_header = TestShareBlockBuilder::new()
+        .nonce(0xe9695790)
+        .build()
+        .header;
+
+    let mut mock_store = ChainStoreHandle::default();
+    mock_store
+        .expect_get_candidate_tip_height()
+        .returning(|| Ok(Some(0)));
+    mock_store
+        .expect_all_block_and_uncle_data_available()
+        .returning(|_, _| Ok(true));
+    mock_store.expect_get_block_metadata().returning(|_| {
+        Ok(BlockMetadata {
+            expected_height: Some(0),
+            chain_work: bitcoin::Work::from_be_bytes([0u8; 32]),
+            status: Status::HeaderValid,
+            chain: ChainMembership::Candidate,
+        })
+    });
+    mock_store.expect_get_asert_parent().returning(move |_| {
+        Ok(AsertParent::from_header(
+            &parent_header,
+            0,
+            parent_header.time,
+        ))
+    });
+    mock_store
+        .expect_get_share_header()
+        .returning(|_| Ok(TestShareBlockBuilder::new().build().header));
+    mock_store.expect_share_block_exists().returning(|_| true);
+    mock_store.expect_is_current().returning(|| true);
+    mock_store
+        .expect_add_share_block_and_organise_header()
+        .times(1)
+        .returning(|_| Ok(None));
+
+    let mut mock_validator = MockDefaultShareValidator::default();
+    mock_validator.expect_bch_header_rules().return_const(None);
+    mock_validator
+        .expect_validate_uncles()
+        .returning(|_, _| Ok(()));
+    mock_validator
+        .expect_validate_header_timestamp()
+        .returning(|_, _| Ok(()));
+    let mut pool_difficulty = PoolDifficulty::default();
+    pool_difficulty
+        .expect_calculate_target_clamped()
+        .returning(|_| CompactTarget::from_consensus(crate::shares::share_block::MAX_POOL_TARGET));
+    mock_validator
+        .expect_pool_difficulty()
+        .return_const(pool_difficulty);
+
+    let (_, event_rx) = create_block_receiver_channel();
+    let (block_fetcher_handle, _block_fetcher_rx) = block_fetcher::create_block_fetcher_channel();
+    let (validation_tx, mut validation_rx) = validation_worker::create_validation_channel();
+    let (relay_tx, mut relay_rx) = mpsc::channel(8);
+    let mut receiver = BlockReceiver::new(
+        event_rx,
+        Arc::new(mock_validator),
+        mock_store,
+        block_fetcher_handle,
+        validation_tx,
+    )
+    .with_relay(relay_tx);
+
+    let mut child_block = TestShareBlockBuilder::new()
+        .prev_share_blockhash(parent_hash.to_string())
+        .nonce(0xe9695791)
+        .build();
+    child_block.header.bits =
+        CompactTarget::from_consensus(crate::shares::share_block::MAX_POOL_TARGET);
+
+    let result = receiver.process_share_block(child_block).await;
+    assert!(result.is_ok(), "Expected Ok, got: {}", result.unwrap_err());
+    drop(receiver);
+
+    assert!(
+        relay_rx.recv().await.is_none(),
+        "a share must never be relayed twice"
+    );
+    assert!(validation_rx.try_recv().is_ok());
+}
+
+/// A share already marked `Invalid` is dropped on arrival, before any
+/// header check, so it is never relayed.
+#[tokio::test]
+async fn test_a_share_already_found_invalid_is_not_relayed() {
+    let share_block = TestShareBlockBuilder::new().nonce(0xe9695791).build();
+    let block_hash = share_block.block_hash();
+
+    let mut mock_store = ChainStoreHandle::default();
+    mock_store
+        .expect_get_block_metadata()
+        .with(mockall::predicate::eq(block_hash))
+        .returning(|_| {
+            Ok(BlockMetadata {
+                expected_height: Some(1),
+                chain_work: bitcoin::Work::from_be_bytes([0u8; 32]),
+                status: Status::Invalid,
+                chain: ChainMembership::None,
+            })
+        });
+    mock_store
+        .expect_add_share_block_and_organise_header()
+        .never();
+
+    let (_, event_rx) = create_block_receiver_channel();
+    let (block_fetcher_handle, _block_fetcher_rx) = block_fetcher::create_block_fetcher_channel();
+    let (validation_tx, mut validation_rx) = validation_worker::create_validation_channel();
+    let (relay_tx, mut relay_rx) = mpsc::channel(8);
+    let mut receiver = BlockReceiver::new(
+        event_rx,
+        Arc::new(MockDefaultShareValidator::default()),
+        mock_store,
+        block_fetcher_handle,
+        validation_tx,
+    )
+    .with_relay(relay_tx);
+
+    let result = receiver.process_share_block(share_block).await;
+    assert!(result.is_ok());
+    drop(receiver);
+
+    assert!(
+        relay_rx.recv().await.is_none(),
+        "a share already found invalid must never be relayed"
+    );
+    assert!(validation_rx.try_recv().is_err());
+}
+
+/// A share whose parent this node marked `Invalid` is invalid by descent,
+/// so it is not relayed, though its header checks out against the parent's
+/// header. It is stored and queued as before; the organise worker drops it.
+#[tokio::test]
+async fn test_a_share_on_an_invalid_parent_is_not_relayed() {
+    let parent_hash = BlockHash::from_byte_array([0x64; 32]);
+    let parent_header = TestShareBlockBuilder::new()
+        .nonce(0xe9695790)
+        .build()
+        .header;
+
+    let mut mock_store = ChainStoreHandle::default();
+    mock_store
+        .expect_get_candidate_tip_height()
+        .returning(|| Ok(Some(0)));
+    mock_store
+        .expect_all_block_and_uncle_data_available()
+        .returning(|_, _| Ok(true));
+    mock_store
+        .expect_get_block_metadata()
+        .returning(move |hash| {
+            if hash == &parent_hash {
+                Ok(BlockMetadata {
+                    expected_height: Some(0),
+                    chain_work: bitcoin::Work::from_be_bytes([0u8; 32]),
+                    status: Status::Invalid,
+                    chain: ChainMembership::None,
+                })
+            } else {
+                Err(StoreError::NotFound("not found".to_string()))
+            }
+        });
+    mock_store.expect_get_asert_parent().returning(move |_| {
+        Ok(AsertParent::from_header(
+            &parent_header,
+            0,
+            parent_header.time,
+        ))
+    });
+    mock_store
+        .expect_get_share_header()
+        .returning(|_| Ok(TestShareBlockBuilder::new().build().header));
+    mock_store.expect_share_block_exists().returning(|_| false);
+    mock_store.expect_is_current().returning(|| true);
+    mock_store
+        .expect_add_share_block_and_organise_header()
+        .times(1)
+        .returning(|_| Ok(None));
+
+    let mut mock_validator = MockDefaultShareValidator::default();
+    mock_validator.expect_bch_header_rules().return_const(None);
+    mock_validator
+        .expect_validate_uncles()
+        .returning(|_, _| Ok(()));
+    mock_validator
+        .expect_validate_header_timestamp()
+        .returning(|_, _| Ok(()));
+    let mut pool_difficulty = PoolDifficulty::default();
+    pool_difficulty
+        .expect_calculate_target_clamped()
+        .returning(|_| CompactTarget::from_consensus(crate::shares::share_block::MAX_POOL_TARGET));
+    mock_validator
+        .expect_pool_difficulty()
+        .return_const(pool_difficulty);
+
+    let (_, event_rx) = create_block_receiver_channel();
+    let (block_fetcher_handle, _block_fetcher_rx) = block_fetcher::create_block_fetcher_channel();
+    let (validation_tx, _validation_rx) = validation_worker::create_validation_channel();
+    let (relay_tx, mut relay_rx) = mpsc::channel(8);
+    let mut receiver = BlockReceiver::new(
+        event_rx,
+        Arc::new(mock_validator),
+        mock_store,
+        block_fetcher_handle,
+        validation_tx,
+    )
+    .with_relay(relay_tx);
+
+    let mut child_block = TestShareBlockBuilder::new()
+        .prev_share_blockhash(parent_hash.to_string())
+        .nonce(0xe9695791)
+        .build();
+    child_block.header.bits =
+        CompactTarget::from_consensus(crate::shares::share_block::MAX_POOL_TARGET);
+
+    let result = receiver.process_share_block(child_block).await;
+    assert!(result.is_ok(), "Expected Ok, got: {}", result.unwrap_err());
+    drop(receiver);
+
+    assert!(
+        relay_rx.recv().await.is_none(),
+        "a child of an invalid share must not be relayed"
+    );
+}
+
+/// While the chain is not current, as during a sync, a share that passes
+/// the header check is stored and queued for validation but not relayed,
+/// so a node catching up does not relay history.
+#[tokio::test]
+async fn test_a_share_is_not_relayed_while_the_chain_is_not_current() {
+    let parent_hash = BlockHash::from_byte_array([0x65; 32]);
+    let parent_header = TestShareBlockBuilder::new()
+        .nonce(0xe9695790)
+        .build()
+        .header;
+
+    let mut mock_store = ChainStoreHandle::default();
+    mock_store
+        .expect_get_candidate_tip_height()
+        .returning(|| Ok(Some(0)));
+    mock_store
+        .expect_all_block_and_uncle_data_available()
+        .returning(|_, _| Ok(true));
+    mock_store
+        .expect_get_block_metadata()
+        .returning(move |hash| {
+            if hash == &parent_hash {
+                Ok(BlockMetadata {
+                    expected_height: Some(0),
+                    chain_work: bitcoin::Work::from_be_bytes([0u8; 32]),
+                    status: Status::BlockValid,
+                    chain: ChainMembership::Confirmed,
+                })
+            } else {
+                Err(StoreError::NotFound("not found".to_string()))
+            }
+        });
+    mock_store.expect_get_asert_parent().returning(move |_| {
+        Ok(AsertParent::from_header(
+            &parent_header,
+            0,
+            parent_header.time,
+        ))
+    });
+    mock_store
+        .expect_get_share_header()
+        .returning(|_| Ok(TestShareBlockBuilder::new().build().header));
+    mock_store.expect_share_block_exists().returning(|_| false);
+    mock_store.expect_is_current().returning(|| false);
+    mock_store
+        .expect_add_share_block_and_organise_header()
+        .times(1)
+        .returning(|_| Ok(None));
+
+    let mut mock_validator = MockDefaultShareValidator::default();
+    mock_validator.expect_bch_header_rules().return_const(None);
+    mock_validator
+        .expect_validate_uncles()
+        .returning(|_, _| Ok(()));
+    mock_validator
+        .expect_validate_header_timestamp()
+        .returning(|_, _| Ok(()));
+    let mut pool_difficulty = PoolDifficulty::default();
+    pool_difficulty
+        .expect_calculate_target_clamped()
+        .returning(|_| CompactTarget::from_consensus(crate::shares::share_block::MAX_POOL_TARGET));
+    mock_validator
+        .expect_pool_difficulty()
+        .return_const(pool_difficulty);
+
+    let (_, event_rx) = create_block_receiver_channel();
+    let (block_fetcher_handle, _block_fetcher_rx) = block_fetcher::create_block_fetcher_channel();
+    let (validation_tx, mut validation_rx) = validation_worker::create_validation_channel();
+    let (relay_tx, mut relay_rx) = mpsc::channel(8);
+    let mut receiver = BlockReceiver::new(
+        event_rx,
+        Arc::new(mock_validator),
+        mock_store,
+        block_fetcher_handle,
+        validation_tx,
+    )
+    .with_relay(relay_tx);
+
+    let mut child_block = TestShareBlockBuilder::new()
+        .prev_share_blockhash(parent_hash.to_string())
+        .nonce(0xe9695791)
+        .build();
+    child_block.header.bits =
+        CompactTarget::from_consensus(crate::shares::share_block::MAX_POOL_TARGET);
+
+    let result = receiver.process_share_block(child_block).await;
+    assert!(result.is_ok(), "Expected Ok, got: {}", result.unwrap_err());
+    drop(receiver);
+
+    assert!(
+        relay_rx.recv().await.is_none(),
+        "a node that is not current must not relay"
+    );
+    assert!(validation_rx.try_recv().is_ok());
+}

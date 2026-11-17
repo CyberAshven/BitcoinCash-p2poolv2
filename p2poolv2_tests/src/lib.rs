@@ -31,4 +31,6 @@ mod stratum_server_test;
 #[cfg(test)]
 mod test_api_server_health_check;
 #[cfg(test)]
+mod weak_anchor_prune_depth_test;
+#[cfg(test)]
 mod weak_share_pruning_test;

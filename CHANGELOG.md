@@ -7,46 +7,91 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Whole weak shares are pruned one payout depth below the tip, a share-chain
-rule change on the same flag day as the asks: protocol segment
-`weak4-640-100-48-256-320-64-4096-64-32-summary` and store format 11. A
-Bitcoin Cash share's weak root now commits the summary of the weak shares it
-carries, `SHA-256d(leaf root || SHA-256d(summary))`, so a node keeps them
-whole for 121,423 shares (`BCH_PAYOUT_DEPTH` and the pruner's lag) and only
-their leaf root and summary, which the payouts read, until the body goes at
-242,534 shares. A body asked for more than one payout depth deep is served
-with the leaf root and summary in their place, and a syncing node checks
-them against the header. At 32 weak shares a share a node keeps 4.3 GB of
-them instead of 7.4 GB, and 43 GB instead of 74 GB at 320.
-`store.keep_whole_weak_shares = true` keeps them whole to the body prune
-depth, for an explorer or an archive. The Bitcoin Cash node sees no change.
+Whole weak shares are pruned one payout depth below the tip (#129, on #118's
+flag day): protocol segment `weak4-640-100-48-256-320-64-4096-64-32-summary`,
+store format 11. The weak root commits the weak shares' summary, so a deeper
+body is served with the summary and checked against the header; a node keeps
+4.3 GB of weak shares instead of 7.4 at 32 a share.
+`store.keep_whole_weak_shares = true` keeps them whole, for an archive.
 
-The Bitcoin Cash body prune depth gains `WEAK_DEPTH`, 48 shares:
-`BCH_PRUNE_DEPTH` is 242,174 (414 in the sim build). A weak share carried
-by the deepest share a syncing node fully checks is paid from a window that
-reads up to 46 shares below two payout depths; the node never fetched those
-bodies, credited them without their weak shares and could mark an honest
-share invalid. No share-chain rule changes: a node fetches and keeps 48
-more bodies.
+A syncing Bitcoin Cash node no longer marks an honest share invalid over a
+weak share paid from shares it never fetched: the body prune depth adds
+`WEAK_DEPTH` (242,174 shares, 414 in the sim). No share-chain rule change.
 
-Weak shares follow the asks (issue #79, part 6), a flag day: protocol
-segment `weak4-640-100-48-256-320-64-4096-64-32`, store format 10 and new
-genesis shares. A weak share asks when its `wanted_bits` is easier than the
-weak target it met; each Bitcoin Cash share header counts the asking weak
-shares it carries (`weak_asking`, under tag `0x26`, never more than the
-count). While a share carries at most 320 weak shares and more than one in 64
-of them ask, the weak ratio rises, up to 4096; otherwise it steps as before.
-A share may carry 640 weak shares in 960 KiB, but more than 64 only while
-more than one in 64 of them ask (`weak_asking * 64 > weak_count`), and a
-header breaking that does not decode; a node building a share leaves its
-newest weak shares that do not ask for a later share until the count is
-allowed. A new chain starts at a weak ratio of 32, not 256. The P2P message
-limit is 2,144 KiB. A node asks for a miner that would find fewer than 16
-weak shares a month. The
-sim build's `[sim] weak_asks` and the swarm's `WEAK_ASKS` make chosen nodes
-ask, and the sim stats line shows how many weak shares a share carries and
-how many of them ask. `wanted_bits` easier than `bits` no longer makes a share
-invalid.
+Weak shares follow the asks (#118, issue #79 part 6), a flag day: protocol
+segment `weak4-640-100-48-256-320-64-4096-64-32`, store format 10, new
+genesis shares. A share header counts the weak shares it carries that ask
+for an easier target (`weak_asking`); while more than one in 64 ask, the weak
+ratio rises (up to 4096) and a share may carry more than 64 of them (up to
+640). A new chain starts at a weak ratio of 32.
+
+Upstream P2Poolv2 is merged through fdbf85df (its 0.18.0 and two commits
+after it). A node now dials only the host names listed in `dial_peers`, never
+a `/dns` address learned from a peer, and checks `blocked_ips` after it
+resolves a name; a dial that fails later backs off by connection. A
+`d=` difficulty in the password is no longer overridden by the miner's own
+`mining.suggest_difficulty`, as Whatsminer firmware sends right after
+authorizing. Debug logs carry each notify and the address of a stratum
+timeout. Testnet5's new genesis is not taken, as testnet5 is not, and the
+fork stays at 0.0.1-alpha.
+
+A node can take its block templates from a Stratum V2 Template Provider
+behind Tor or I2P. `template_provider_proxy` names a SOCKS5 proxy, Tor's
+SOCKS port for a `.onion` provider or an I2P router's SOCKS proxy for a
+`.b32.i2p` one, and every connection to the provider, a redirected one
+included, goes through it. The provider's name goes to the proxy unresolved
+and nothing is dialed directly, also when the proxy fails. Each connection
+sends its own random SOCKS username, so Tor puts it on its own circuit. A
+provider behind a proxy has 20 seconds to accept a connection and 15 for
+each setup answer (an I2P name 90 and 45), where a direct one has 10 for
+each. A proxy needs the provider's authority key, and a `.onion` or `.i2p`
+address needs a proxy. The Job Declaration page says what a node behind an
+onion service must change: every miner then connects from this computer's
+own address, which the default `sv2_coinbase_only_from` lets declare
+Coinbase-Only jobs.
+
+Both Umbrel apps run Prometheus and Grafana beside the node, as upstream's
+Umbrel app does (`dbf8ae48`), on the repository's Bitcoin Cash dashboards.
+Grafana is on port 3342 (`bch-p2pool`) or 3343 (the external node app),
+open to view, with the admin password the app's Umbrel password. Both
+images are pinned by version and digest; a test keeps each app's copy of the
+dashboards equal to `prometheus/grafana`.
+
+The Umbrel apps' dashboards move from ports 46890 and 46891 to 36890 and
+36891. umbrelOS 2.0 keeps host ports 40000 to 49999 for Umbrel Machines'
+port forwards, and upstream's Umbrel app left 46884 for 36884 for the same
+reason; a test now keeps every app port out of that range. The nightly fuzz
+run also starts from upstream's shared corpus for the same decoder target
+(`p2poolv2/fuzz-corpus`). Upstream's website, docs and difficulty analysis
+repositories have nothing new to port.
+
+The terminal UI follows upstream's PDM through `b7d97c34` (2026-11-04). A
+System tab on P2Pool Status starts, stops and restarts the node when it
+runs as the systemd user service `p2poolv2@<instance>`, from PDM's unit,
+now in `p2poolv2_tui/systemd/user`, with its config at
+`~/.config/p2poolv2/config-<instance>.toml`; `systemctl` runs off the
+screen's thread, since a stop waits for the node to close its store. The
+colours come from PDM's theme, readable on light and dark terminals.
+
+The network and payout simulators model one-minute Bitcoin Cash blocks
+(CHIP-2025-03): a block every minute paying a tenth of a ten-minute block,
+and a tenth of the ABLA floors (3.2 MB on mainnet, 200 kB on chipnet, 25.6
+MB to start on scalenet). Every block-time value is derived from
+`BCH_BLOCK_INTERVAL_SECONDS`. A month's reward and a miner's fair income
+are unchanged, but the PPLNS window, three blocks of the pool's work, is a
+tenth as long, so the 120,960-share cap binds only below about 0.015% of
+Bitcoin Cash; the node default aims a miner at ten times the shares a
+month, so the band changes nothing in a pool at 10% of Bitcoin Cash or
+more; and a coinbase at the default payout level pays at most 1,788
+outputs, while no level reaches the payout tree from the reward alone. The
+documented tables are regenerated, and where a conclusion moved the text
+says so. The study of the weak ratio's path with the asks (#124) is still
+the ten-minute run. No node code changes.
+
+A share a peer sent is relayed once its header checks out, before its body
+is validated, as BIP152 high-bandwidth peers relay compact blocks (#128).
+Uncles are now chosen from fully validated shares only. No share-chain rule,
+message or store change.
 
 P2Poolv2 takes templates from a node that serves no long polling, such as
 Knuth. Every Knuth template failed to parse ("missing field `longpollid`"),
@@ -61,9 +106,11 @@ the share that carries them: a node pushes the ones its miners find to every
 peer and announces the ones it takes by hash, each fetched once. The share
 message still carried every one of them whole, so a node downloaded each
 weak share twice and the share message grew with every weak share in it. On
-1,000 nodes at 10-second shares the network simulation put stale shares at
-5.27% with 32 weak shares a share carried whole, 8.66% with 160 and 14.11%
-with 320, against 4.20% when they travel only beside the shares; the weak
+1,000 nodes at 10-second shares and one-minute blocks the network
+simulation put stale shares at 5.53% with 32 weak shares a share carried
+whole, 9.99% with 160 and 14.99% with 320, against 4.91% when they travel
+only beside the shares (5.27%, 8.66% and 14.11% against 4.20% with
+ten-minute blocks); the weak
 shares that follow the asks (#117, #118) let a share carry 320. A share
 carrying weak shares now goes as `ShareWithWeakHashes`: every weak share it
 carries listed by proof-of-work hash, 32 bytes each, and the ones its peers
@@ -126,24 +173,28 @@ today's. The payout simulator runs it share by share in four tables
 (`weak-asks`, `weak-asks-mixes`, `weak-asks-constants`,
 `weak-asks-attacks`): a pool whose small miners find enough weak shares
 stays near today's count, and one at 30% of a Bitcoin Cash ten times today's
-opens to the ceiling, where a Bitaxe's months without a payment go from 41%
-to 2.7%. An attacker can hold the count at the ceiling or at the floor, no
-further. The section lists what the ceiling costs a node and what has to be
-built first.
+opens to the ceiling, where a Bitaxe's months without a payment go from
+40.5% to 2.8% with one-minute blocks (41% to 2.7% with ten-minute ones). An
+attacker can hold the count at the ceiling or at the floor, no further. The
+section lists what the ceiling costs a node and what has to be built first.
 
 The payout simulator has a `window-cap` table and a `storage` table. The
 first runs pools at 0.01 to 1% of Bitcoin Cash with the PPLNS window capped
-at 14, 30 and 60 days: the cap binds only under about 0.15%, and a longer
-one leaves a miner that keeps mining as often without a payment (63%, 66%
-and 65% of its months at 0.01%), since each block pays it its part of the
-window's work; it only lets more single shares be paid, at the cost of a
-longer payout depth and twice the bodies kept. The 14-day cap stays. The
-second is arithmetic of what a node keeps: the payout level bounds a
-coinbase (17,885 outputs, 608 KB, at the default level, with 100,000 payees
-or 1,000,000); coinbases are most of the store, 8.3 GB for 28 days at 1,000
-payees up to 242 GB when every one is a full 1 MB; stored without their
-payouts they take 0.09 GB; weak shares take 6.2 GB at 32 a share and 62 GB
-at 320, half that kept for one payout depth; headers take 3.15 GB a year.
+at 14, 30 and 60 days: with one-minute blocks the cap binds only under
+about 0.015% (0.15% with ten-minute ones), and a longer one leaves a miner
+that keeps mining as often without a payment (0.9% of its months at 0.01%
+with every cap; 63%, 66% and 65% with ten-minute blocks), since each block
+pays it its part of the window's work; it only lets more single shares be
+paid, at the cost of a longer payout depth and twice the bodies kept. The
+14-day cap stays. The second is arithmetic of what a node
+keeps: the payout level bounds a coinbase (1,788 outputs, 61 KB, at the
+default level, with 10,000 payees or more; 17,885 and 608 KB with
+ten-minute blocks), and even the lowest level, 28,617 outputs, no longer
+reaches the payout tree from the reward alone; coinbases are most of the
+store, 8.3 GB for 28 days at 1,000 payees up to 236 GB at the lowest
+level's ceiling; stored without their payouts they take 0.09 GB; weak
+shares take 6.2 GB at 32 a share and 62 GB at 320, half that kept for one
+payout depth; headers take 3.15 GB a year.
 `Scenario` gains `window_cap_seconds`, 14 days everywhere else.
 
 The payout simulator has a `scale-levers` table for part 5 of the small
@@ -151,7 +202,9 @@ miners design, the dynamic share period: pools at 10 and 30% of a Bitcoin
 Cash at 1, 10, 100 and 270 times today's hashrate, with share periods of 5,
 2 and 1 seconds and with 10-second shares that carry 2, 5 and 10 times the
 weak shares. Both pay a small miner the same, and only the shorter period
-adds stale shares: 7.8%, 17.8% and 30.7% on 1,000 nodes against 4.2%. A
+adds stale shares: 8.0%, 17.9% and 30.4% on 1,000 nodes against 3.8% with
+one-minute Bitcoin Cash blocks (7.8%, 17.8% and 30.7% against 4.2% with
+ten-minute ones). A
 Bitaxe first needs more weak shares when the pool itself holds about 3.7
 EH/s, as much as all of Bitcoin Cash has today. Section 5 of the design page
 records it and stays an outline.

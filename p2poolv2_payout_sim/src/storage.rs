@@ -23,7 +23,10 @@
 //! (`coinbase_budget.rs`, payout levels), so a block pays at most the reward
 //! over `L` outputs however many payees there are. Outputs past the 1,000,000
 //! byte transaction limit go to the payout tree (the straddle rule). Fees are
-//! left out: they add outputs at the same rate as the reward.
+//! left out: they add outputs at the same rate as the reward. A one-minute
+//! block's 0.3125 BCH pays at most 28,617 outputs even at the lowest level,
+//! which the coinbase holds, so the reward alone no longer reaches the tree
+//! (a ten-minute block's 3.125 BCH paid 286,172 there).
 
 use crate::constants::{BLOCK_REWARD_SATOSHIS, DEFAULT_LEVEL, MIN_PAYOUT_LEVEL};
 use crate::levels::level_amount;

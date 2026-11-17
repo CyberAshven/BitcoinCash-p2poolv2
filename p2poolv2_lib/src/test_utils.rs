@@ -470,6 +470,119 @@ impl TestSv2Server {
     }
 }
 
+/// What a client asked a [`TestSocksProxy`] to connect to.
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SocksRequest {
+    /// The request's address type: 1 an IPv4 address, 3 a name, 4 an IPv6
+    /// address.
+    pub address_type: u8,
+    /// The name, or the address's bytes.
+    pub host: Vec<u8>,
+    pub port: u16,
+    /// The username the client sent, when the proxy asked for one.
+    pub username: Option<Vec<u8>>,
+}
+
+/// A SOCKS5 proxy for tests: a stand-in for Tor's SOCKS port, or an I2P
+/// router's. Whatever a `CONNECT` names, the proxy relays the connection to
+/// its `upstream`, as Tor carries an onion name to the service behind it;
+/// without an upstream it answers "connection refused".
+#[cfg(test)]
+pub(crate) struct TestSocksProxy {
+    /// `HOST:PORT` the proxy listens on.
+    pub address: String,
+    requests: mpsc::UnboundedReceiver<SocksRequest>,
+}
+
+#[cfg(test)]
+impl TestSocksProxy {
+    /// Start the proxy. With `ask_username` it picks username/password
+    /// authentication, as Tor does when a client offers it.
+    pub(crate) async fn start(upstream: Option<SocketAddr>, ask_username: bool) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap().to_string();
+        let (requests_tx, requests) = mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            while let Ok((client, _)) = listener.accept().await {
+                let requests_tx = requests_tx.clone();
+                tokio::spawn(Self::serve(client, upstream, ask_username, requests_tx));
+            }
+        });
+        Self { address, requests }
+    }
+
+    /// The next `CONNECT` a client sent.
+    pub(crate) async fn next_request(&mut self) -> SocksRequest {
+        timeout(Duration::from_secs(5), self.requests.recv())
+            .await
+            .expect("no SOCKS5 request reached the test proxy")
+            .expect("the test proxy stopped")
+    }
+
+    async fn serve(
+        mut client: TcpStream,
+        upstream: Option<SocketAddr>,
+        ask_username: bool,
+        requests: mpsc::UnboundedSender<SocksRequest>,
+    ) {
+        let mut greeting = [0u8; 2];
+        client.read_exact(&mut greeting).await.unwrap();
+        let mut methods = vec![0u8; usize::from(greeting[1])];
+        client.read_exact(&mut methods).await.unwrap();
+        let username = if ask_username {
+            assert!(methods.contains(&2), "the client offered no username");
+            client.write_all(&[5, 2]).await.unwrap();
+            let mut header = [0u8; 2];
+            client.read_exact(&mut header).await.unwrap();
+            let mut username = vec![0u8; usize::from(header[1])];
+            client.read_exact(&mut username).await.unwrap();
+            let mut length = [0u8; 1];
+            client.read_exact(&mut length).await.unwrap();
+            let mut password = vec![0u8; usize::from(length[0])];
+            client.read_exact(&mut password).await.unwrap();
+            client.write_all(&[1, 0]).await.unwrap();
+            Some(username)
+        } else {
+            client.write_all(&[5, 0]).await.unwrap();
+            None
+        };
+        let mut request = [0u8; 4];
+        client.read_exact(&mut request).await.unwrap();
+        let address_type = request[3];
+        let length = match address_type {
+            1 => 4,
+            4 => 16,
+            _ => {
+                let mut length = [0u8; 1];
+                client.read_exact(&mut length).await.unwrap();
+                usize::from(length[0])
+            }
+        };
+        let mut host = vec![0u8; length];
+        client.read_exact(&mut host).await.unwrap();
+        let mut port = [0u8; 2];
+        client.read_exact(&mut port).await.unwrap();
+        let _ = requests.send(SocksRequest {
+            address_type,
+            host,
+            port: u16::from_be_bytes(port),
+            username,
+        });
+        let Some(upstream) = upstream else {
+            // Reply 5: connection refused.
+            let _ = client.write_all(&[5, 5, 0, 1, 0, 0, 0, 0, 0, 0]).await;
+            return;
+        };
+        let mut upstream = TcpStream::connect(upstream).await.unwrap();
+        client
+            .write_all(&[5, 0, 0, 1, 0, 0, 0, 0, 0, 0])
+            .await
+            .unwrap();
+        let _ = tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
+    }
+}
+
 /// The `NewTemplate` a Bitcoin Cash Template Provider sends for a BCHN
 /// `template`: the specification's height push as the coinbase prefix, no
 /// required coinbase outputs, and its transactions' merkle path.
