@@ -40,6 +40,14 @@ run also starts from upstream's shared corpus for the same decoder target
 (`p2poolv2/fuzz-corpus`). Upstream's website, docs and difficulty analysis
 repositories have nothing new to port.
 
+The terminal UI follows upstream's PDM through `b7d97c34` (2026-11-04). A
+System tab on P2Pool Status starts, stops and restarts the node when it
+runs as the systemd user service `p2poolv2@<instance>`, from PDM's unit,
+now in `p2poolv2_tui/systemd/user`, with its config at
+`~/.config/p2poolv2/config-<instance>.toml`; `systemctl` runs off the
+screen's thread, since a stop waits for the node to close its store. The
+colours come from PDM's theme, readable on light and dark terminals.
+
 The network and payout simulators model one-minute Bitcoin Cash blocks
 (CHIP-2025-03): a block every minute paying a tenth of a ten-minute block,
 and a tenth of the ABLA floors (3.2 MB on mainnet, 200 kB on chipnet, 25.6
