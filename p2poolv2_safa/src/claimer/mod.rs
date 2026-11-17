@@ -13,7 +13,7 @@ use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
 use crate::cli::{covenant_of, read_json};
-use crate::{Covenant, Vault, decode_state, from_hex};
+use crate::{Covenant, Vault, decode_state, from_hex, network_parameters};
 
 mod chain;
 pub mod config;
@@ -290,10 +290,13 @@ impl<Rpc: ChainRpc> Claimer<Rpc> {
     async fn claim_next(&mut self, vault: &Vault, tip: u32) -> Result<(), String> {
         let height = decode_state(&vault.commitment)?.height;
         self.drop_stale_wins(height)?;
+        // A claim is locked to its coinbase block's ticks: a win waits until
+        // that lock is final in the next block, up to ten one-minute blocks.
+        let claimable = network_parameters(&self.covenant.network)?.last_claimable_height(tip);
         let available = candidates(
             &self.journal.wins,
             height,
-            tip,
+            claimable,
             &self.journal.claimed,
             &self.journal.dropped,
         );
@@ -373,6 +376,7 @@ impl<Rpc: ChainRpc> Claimer<Rpc> {
 
     fn build(&self, win: &Win, vault: &Vault) -> Result<Value, ClaimError> {
         build_win_claim(
+            &self.covenant,
             &self.deployment,
             win,
             &self.journal.vault,

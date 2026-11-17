@@ -767,6 +767,30 @@ pub trait ShareValidator {
         pplns_window: &RwLock<PplnsWindow>,
         cache: &mut WeakPayoutCache,
     ) -> Result<(), ValidationError>;
+
+    /// Rebuild the Bitcoin Cash coinbase of a share relayed without its
+    /// payouts (`ShareWithoutPayouts`): the input of `carried_coinbase`,
+    /// which has no outputs, and every output from `header` and the PPLNS
+    /// window anchored at its parent for the outputs' total
+    /// `coinbase_value`, as a weak share's coinbase is rebuilt
+    /// (`DefaultShareValidator::rebuild_coinbase_paying_window`). `cache`
+    /// keeps the window's payouts between shares on one parent and template.
+    ///
+    /// Returns the coinbase only when its txid is the one the header's
+    /// coinbase proof gives, so it is the coinbase the miner hashed. Any
+    /// error is no verdict on the share: the window may not reach its parent
+    /// yet, and a share relayed before its body was validated may carry a
+    /// coinbase that does not pay its window, which only the whole share
+    /// shows.
+    fn rebuild_coinbase_without_payouts(
+        &self,
+        header: &ShareHeader,
+        carried_coinbase: &Transaction,
+        coinbase_value: u64,
+        chain_store_handle: &ChainStoreHandle,
+        pplns_window: &RwLock<PplnsWindow>,
+        cache: &mut WeakPayoutCache,
+    ) -> Result<Transaction, ValidationError>;
 }
 
 /// Production implementation of ShareValidator.
@@ -1990,6 +2014,43 @@ impl ShareValidator for DefaultShareValidator {
         self.validate_relayed_weak_share(weak_share, chain_store_handle, pplns_window, cache)
     }
 
+    fn rebuild_coinbase_without_payouts(
+        &self,
+        header: &ShareHeader,
+        carried_coinbase: &Transaction,
+        coinbase_value: u64,
+        chain_store_handle: &ChainStoreHandle,
+        pplns_window: &RwLock<PplnsWindow>,
+        cache: &mut WeakPayoutCache,
+    ) -> Result<Transaction, ValidationError> {
+        let coinbase = {
+            let mut window = pplns_window
+                .write()
+                .expect("PPLNS window lock poisoned on write");
+            self.rebuild_coinbase_paying_window(
+                header,
+                carried_coinbase,
+                coinbase_value,
+                chain_store_handle,
+                &mut window,
+                cache,
+            )?
+        };
+        let proof_txid = header
+            .coinbase_proof
+            .coinbase_txid_for(header)
+            .map_err(|error| {
+                ValidationError::consensus(format!("Invalid coinbase proof: {error}"))
+            })?;
+        let coinbase_txid = coinbase.compute_txid();
+        if coinbase_txid != proof_txid {
+            return Err(ValidationError::consensus(format!(
+                "Rebuilt coinbase txid {coinbase_txid} is not the {proof_txid} its header's proof gives"
+            )));
+        }
+        Ok(coinbase)
+    }
+
     fn validate_with_pool_difficulty(
         &self,
         share_header: &ShareHeader,
@@ -2387,6 +2448,16 @@ mockall::mock! {
             pplns_window: &RwLock<PplnsWindow>,
             cache: &mut WeakPayoutCache,
         ) -> Result<(), ValidationError>;
+
+        fn rebuild_coinbase_without_payouts(
+            &self,
+            header: &ShareHeader,
+            carried_coinbase: &Transaction,
+            coinbase_value: u64,
+            chain_store_handle: &ChainStoreHandle,
+            pplns_window: &RwLock<PplnsWindow>,
+            cache: &mut WeakPayoutCache,
+        ) -> Result<Transaction, ValidationError>;
     }
 }
 
@@ -7152,6 +7223,104 @@ mod tests {
         assert!(result.is_ok(), "{}", result.unwrap_err());
         assert_eq!(producer_payouts.outputs.len(), 79);
         assert!(coinbase.total_size() <= 3_072);
+    }
+
+    /// A token share whose window pays 118 miners, the donation key and a
+    /// fee address, relayed without its coinbase's outputs: the rebuild from
+    /// the same window gives back every output, the token root at output 0,
+    /// the payouts, the donation, the fee and the payout tree's output, and
+    /// so the txid its header's coinbase proof commits.
+    #[test]
+    fn a_share_relayed_without_payouts_gets_back_its_coinbase_and_txid() {
+        let donation = crate::config::bitcoin_cash_donation_address(BitcoinCashNetwork::Regtest);
+        let fee_address = PayoutAddress::from(Address::p2pkh(
+            PubkeyHash::from_byte_array([0xfe; 20]),
+            Network::Regtest,
+        ));
+        let mut weights: HashMap<PayoutAddress, u128> = (1..=118u8)
+            .map(|byte| {
+                (
+                    PayoutAddress::from(Address::p2pkh(
+                        PubkeyHash::from_byte_array([byte; 20]),
+                        Network::Regtest,
+                    )),
+                    u128::from(byte) * 1_000,
+                )
+            })
+            .collect();
+        weights.insert(donation.clone(), 2_000);
+        weights.insert(fee_address.clone(), 3_000);
+        let weights = PplnsWeights::without_levels(weights);
+        let root = MergeMiningCommitment {
+            root: [0x44; 32],
+            height: 1,
+            salt: 3,
+        };
+        let share = crate::test_utils::build_test_share_paying(
+            TestShareBlockBuilder::new()
+                .share_owner(ShareOwner::CashP2pkh([0x22; 20]))
+                .donation(donation.clone(), 100)
+                .fee(fee_address.clone(), 200)
+                .build(),
+            &weights,
+            312_500_000,
+            Some(root),
+        );
+        let coinbase = &share.bitcoin_coinbase;
+        let pays = |address: &PayoutAddress| {
+            coinbase
+                .output
+                .iter()
+                .any(|output| output.script_pubkey == address.script_pubkey())
+        };
+        let tree = build_pplns_outputs(
+            312_500_000,
+            &weights,
+            &None,
+            None,
+            &None,
+            None,
+            bch_split_for_commitment(&root),
+        )
+        .unwrap()
+        .tree
+        .unwrap();
+        assert_eq!(
+            MergeMiningCommitment::from_output(&coinbase.output[0]),
+            Ok(root)
+        );
+        assert!(pays(&donation) && pays(&fee_address));
+        assert!(coinbase.output.contains(&tree.root_output()));
+        let mut carried = coinbase.clone();
+        carried.output.clear();
+        let mut window = PplnsWindow::default();
+        window.expect_network().return_const(Network::Regtest);
+        window
+            .expect_get_weights_from_start_hash()
+            .times(1)
+            .returning(move |_, _, _| Ok(weights.clone()));
+
+        let rebuilt = validator()
+            .for_chain(Chain::BitcoinCash)
+            .rebuild_coinbase_without_payouts(
+                &share.header,
+                &carried,
+                312_500_000,
+                &ChainStoreHandle::default(),
+                &RwLock::new(window),
+                &mut WeakPayoutCache::new(),
+            )
+            .unwrap();
+
+        assert_eq!(&rebuilt, coinbase);
+        assert_eq!(
+            rebuilt.compute_txid(),
+            share
+                .header
+                .coinbase_proof
+                .coinbase_txid_for(&share.header)
+                .unwrap()
+        );
     }
 
     /// A pool-built share whose header names another root than its coinbase

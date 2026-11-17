@@ -15,7 +15,7 @@ use crate::accounting::payout::sharechain_pplns::pplns_window::{
 use crate::config::StratumConfig;
 use crate::pool_difficulty;
 use crate::shares::band::{BAND_CAP_UNIT, ParentBand, next_band_cap};
-use crate::shares::bch_asert::BchAsert;
+use crate::shares::bch_asert::{BchAsert, TickSchedule};
 #[cfg(test)]
 #[mockall_double::double]
 use crate::shares::chain::chain_store_handle::ChainStoreHandle;
@@ -379,7 +379,13 @@ fn merge_token_payouts(
         );
         return Ok((output_distribution, None));
     }
-    let merge_tokens = match merge_tokens.at_height(template.height) {
+    // A SAFA vault's claim target eases by the ticks since its state, by
+    // the network's pins, as its covenant counts them.
+    let schedule = context
+        .config
+        .bitcoin_cash_network
+        .map_or(TickSchedule::TEN_MINUTES, TickSchedule::for_network);
+    let merge_tokens = match merge_tokens.at_height(template.height, &schedule) {
         Ok(merge_tokens) => merge_tokens,
         Err(reason) => {
             warn!(

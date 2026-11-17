@@ -14,7 +14,8 @@ use crate::{
     MAX_SPLIT_BPS, MAX_UNLOCKING_BYTES, MIN_FEE_RATE, Nft, NonFungibleTokenCapability, OUTPUT_SATS,
     Output, Proof, REWARD_DIVISOR, Shares, SplitCommitment, State, Token, TransactionCommon,
     claim_target_bits, coinbase_height, decode_header_bits, decode_proof, decode_state,
-    encode_state, hash256, leaf_hash, read_uint32, split_ext, split_preimage, split_shares,
+    encode_state, hash256, leaf_hash, network_parameters, read_uint32, split_ext, split_preimage,
+    split_shares,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -44,6 +45,9 @@ pub struct Outpoint {
 pub struct ClaimLeaf {
     pub state: State,
     pub height_delta: u32,
+    /// The ticks from the state's block to the coinbase's, by the pinned
+    /// switch: what the target eases by.
+    pub tick_delta: u64,
     pub target_bits: u32,
     pub preimage: Vec<u8>,
     pub payout_hash: Vec<u8>,
@@ -77,7 +81,10 @@ pub fn claim_leaf(
         );
     }
     let height_delta = height - state.height;
-    let target_bits = claim_target_bits(state.target_bits, height_delta, covenant.threads)?;
+    let tick_delta = network_parameters(&covenant.network)?
+        .tick_delta(state.height, height)
+        .ok_or("the coinbase is not newer than the thread state")?;
+    let target_bits = claim_target_bits(state.target_bits, tick_delta, covenant.threads)?;
     let preimage = match split {
         None => Vec::with_capacity(0),
         Some(split) => split_preimage(&SplitCommitment {
@@ -108,6 +115,7 @@ pub fn claim_leaf(
     Ok(ClaimLeaf {
         state,
         height_delta,
+        tick_delta,
         target_bits,
         preimage,
         payout_hash,
@@ -307,9 +315,14 @@ pub fn build_claim(
         .and_then(|value| value.checked_sub(OUTPUT_SATS * plan.outputs.len() as u64))
         .filter(|value| *value >= OUTPUT_SATS)
         .ok_or("the vault cannot pay the claim fee and outputs and keep 800 satoshis")?;
-    let locktime = locktime.unwrap_or(plan.height);
-    if locktime < plan.height || locktime >= LOCKTIME_THRESHOLD {
-        return Err("the locktime must be a height at or above the coinbase height".into());
+    // The covenant locks a claim to its coinbase block's ticks in the
+    // 600-tick units of a lock height, rounded up (Function 21).
+    let lock_height = network_parameters(&covenant.network)?.lock_height(plan.height);
+    let locktime = locktime.unwrap_or(lock_height);
+    if locktime < lock_height || locktime >= LOCKTIME_THRESHOLD {
+        return Err(format!(
+            "the locktime must be a lock height at or above {lock_height}, the coinbase block's"
+        ));
     }
     let source_outputs = vec![vault_source_output(covenant, vault)];
     let mut outputs = Vec::with_capacity(1 + plan.outputs.len());
