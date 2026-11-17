@@ -11,6 +11,10 @@ A new share whose coinbase outputs take 50,000 bytes or more is relayed without
 them; peers rebuild them from their PPLNS window or fetch the share whole
 (protocol segment `without-payouts`). No share-chain rule or store change.
 
+A node keeps at least 16 outgoing peers (`[network] target_outgoing_peers`),
+at most one per IPv4 /16 or IPv6 /32, with a 60-second backoff that doubles;
+the sample configs raise `max_established_incoming` from 50 to 128 (#122).
+
 Share-chain rule change on Bitcoin Cash, a flag day: P2Pool follows Bitcoin
 Cash's one-minute blocks (CHIP-2025-03) the way BCHN does (protocol
 segments `bch-prev-1off-ticks` and `mm2-roots-asert8-ticks`, store format

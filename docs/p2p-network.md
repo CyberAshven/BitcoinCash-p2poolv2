@@ -112,6 +112,67 @@ listing alone cut a relayed share message from 23.4 KB to 4.7 KB, but the
 the shares that did not make the chain from 9.69% to 12.37%; the 400 ms of
 prefilled weak shares are there to take that round trip out.
 
+## Outgoing peers
+
+A node keeps at least `[network] target_outgoing_peers` outgoing peers, 16
+by default. An outgoing peer is a connected peer this node dialed: a
+`dial_peers` entry, a peer Kademlia reached in a query, or one dialed for
+the target. While the node has fewer, it dials one more peer a second
+(`p2poolv2_lib/src/node/outgoing_peer_target.rs`):
+
+- **Peers it has heard of.** The node keeps a book of up to 1,000 peers and
+  their addresses, from Kademlia's routing updates and the listen addresses
+  each peer reports through Identify. A peer reached through a DNS seed
+  (Bitcoin only) enters it the same way once connected. Kademlia's own
+  table cannot serve: the node removes a peer from it on disconnect. Only
+  globally routable IPv4 and IPv6 addresses with a TCP port are kept, never
+  a `/dns` name, a loopback or a private address, so nodes on a LAN or on
+  one machine find each other through `dial_peers`. A peer the node has
+  reached over an outgoing connection is verified, and a full book drops a
+  random unverified peer for a new one.
+- **Spread over network groups.** The target picks a network group at
+  random among those with a candidate, then a peer in it. It never dials a
+  peer in an IPv4 /16 or IPv6 /32 where the node already has an outgoing
+  connection, as Bitcoin Cash Node does for its automatic peers
+  (`CConnman::ThreadOpenConnections` and `CNetAddr::GetGroup`). Connections
+  to `dial_peers` hold no group, and the target leaves those peers to the
+  reconnector.
+- **Within the limits.** Outgoing dials in flight count toward the target,
+  and no dial takes the node past `max_established_outgoing`. The target's
+  own dials in flight stay below half of `max_pending_outgoing`, so
+  `dial_peers` and Kademlia keep the other half. Blocked IPs are never
+  dialed.
+- **With backoff.** A peer the target dialed is not dialed again for 60
+  seconds, doubled after each failure. A failure is a dial that fails or a
+  connection that closes within 60 seconds, as a full peer's does. A
+  connection that lasts resets the backoff, and five failures in a row drop
+  the peer from the book.
+
+P2Pool v1 kept 6 outgoing peers by default (`--outgoing-conns`), one per
+IPv4 /16, and Bitcoin Cash Node keeps 8. The share chain's P2P network runs
+on TCP over IPv4 and IPv6 only; it has no onion or I2P addresses. The
+target changes how many connections a node keeps, not which peers a share
+is relayed to or how. `/metrics` reports `p2p_outgoing_peers`,
+`p2p_incoming_peers` and `p2p_outgoing_target_dials_total`
+([Metrics](architecture/metrics.md)).
+
+Why 16: in the network simulation, 1,000 nodes that send shares without
+their payouts and relay them after the header check carry a share every
+4.46 seconds on 16 peers per node against 5.30 seconds on 8, within
+today's stale rate, and at 10-second shares stale shares fall from 2.30%
+to 2.00%. With whole shares more peers alone made propagation slower
+([Network simulation](simulation/network-sim.md), "Where each idea reaches
+the limit"). The simulation counts each node's links in both directions:
+when every node dials 16, the average node has about 32.
+
+Each outgoing peer is another node's inbound peer. When every node keeps
+16, a node takes 16 inbound peers on average if every node accepts inbound
+connections, 32 if half do and 64 if a quarter do, and a node alone in its
+/16 takes more than one in a crowded /16, since the target picks a group
+before a peer. The sample configs set `max_established_incoming` to 128:
+with 1,000 nodes, a quarter of them accepting inbound connections and 30%
+of those in ten cloud /16s, the busiest node takes about 110.
+
 ## One view of the shares
 
 Every node keeps a replica of the share chain, and the nodes agree on it by

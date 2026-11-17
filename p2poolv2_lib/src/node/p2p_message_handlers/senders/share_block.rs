@@ -59,7 +59,9 @@ pub const PREFILL_WEAK_SHARE_MILLIS: u64 = 2 * WEAK_ANNOUNCE_INTERVAL.as_millis(
 ///
 /// The two meet at 30 ms / (0.64 - 0.02) us = 48,387 bytes, about 1,400
 /// P2PKH payees at 34 bytes each: 50,000. Slower uploads or more peers favour
-/// leaving them out sooner; this errs toward the whole share.
+/// leaving them out sooner; this errs toward the whole share. A node keeping
+/// its 16 outgoing peers (`target_outgoing_peers`) saves twice as much a
+/// byte, which would put the meeting point near 24,000 bytes.
 pub const RELAY_WITHOUT_PAYOUTS_MIN_BYTES: usize = 50_000;
 
 /// Share messages a node relayed to peers, their payload bytes, the bytes

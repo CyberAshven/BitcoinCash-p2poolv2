@@ -910,6 +910,11 @@ impl NodeActor {
         // Skip the immediate first tick so we don't reconnect while initial dials are in progress
         reconnect_interval.tick().await;
 
+        let mut outgoing_target_interval = tokio::time::interval(
+            crate::node::outgoing_peer_target::OutgoingPeerTarget::check_interval(),
+        );
+        outgoing_target_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
         const SYNC_RETRY_INTERVAL: u64 = 60;
         let mut sync_retry_interval =
             tokio::time::interval(std::time::Duration::from_secs(SYNC_RETRY_INTERVAL));
@@ -979,6 +984,9 @@ impl NodeActor {
                 }
                 _ = reconnect_interval.tick(), if self.node.peer_reconnector.has_peers() => {
                     self.node.attempt_reconnections();
+                }
+                _ = outgoing_target_interval.tick(), if self.node.outgoing_peer_target.has_target() => {
+                    self.node.dial_toward_outgoing_target();
                 }
                 _ = sync_retry_interval.tick(), if !self.chain_store_handle.is_current() => {
                     self.on_sync_retry_tick();

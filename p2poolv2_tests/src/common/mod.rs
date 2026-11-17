@@ -31,6 +31,7 @@ pub fn default_test_config() -> Config {
             blocked_ips: vec![],
             external_address: None,
             dns_seed: false,
+            target_outgoing_peers: 16,
         },
         bitcoinrpc: BitcoinRpcConfig {
             url: "http://localhost:8332".to_string(),
