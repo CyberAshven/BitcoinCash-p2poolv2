@@ -19,9 +19,10 @@ use crate::model::{
 };
 use crate::network::{self, CashNetwork};
 use crate::remote::Remote;
+use crate::theme;
 use crate::views::{
     PICK_A_CONFIG, alert, field, header_row, muted, remote_lines, remote_message, render_message,
-    tab_bar, tabs_and_content, titled,
+    styled_field, tab_bar, tabs_and_content, titled,
 };
 use ratatui::{
     prelude::*,
@@ -30,7 +31,10 @@ use ratatui::{
 use std::collections::{HashSet, VecDeque};
 
 /// The tabs, in order.
-pub const POOL_TABS: [&str; 5] = ["Overview", "Shares", "Miners", "Blocks", "Peers"];
+pub const POOL_TABS: [&str; 6] = ["Overview", "Shares", "Miners", "Blocks", "Peers", "System"];
+
+/// The tab with the node's systemd user service.
+pub const SYSTEM_TAB: usize = 5;
 
 /// Most rows in the shares table, as in PDM.
 pub const MAX_SHARE_ROWS: usize = 50;
@@ -70,6 +74,27 @@ pub struct PoolScreen<'a> {
     pub live_peer_events: &'a VecDeque<PeerEvent>,
     /// Why the live feed is down, when it is.
     pub live_error: Option<&'a str>,
+    /// The System tab.
+    pub service: ServicePanel<'a>,
+}
+
+/// The System tab: the node's systemd user service.
+pub struct ServicePanel<'a> {
+    /// The service instance, `None` when the node config has none.
+    pub instance: Option<&'a str>,
+    /// Whether it runs.
+    pub status: &'a Remote<bool>,
+    /// Why the last start, stop or restart failed.
+    pub error: Option<&'a str>,
+}
+
+impl ServicePanel<'_> {
+    /// No service, as for a node config outside the user config directory.
+    pub const NONE: ServicePanel<'static> = ServicePanel {
+        instance: None,
+        status: &Remote::Unconfigured,
+        error: None,
+    };
 }
 
 pub fn render(frame: &mut Frame, area: Rect, screen: &PoolScreen) {
@@ -80,7 +105,8 @@ pub fn render(frame: &mut Frame, area: Rect, screen: &PoolScreen) {
         1 => render_shares(frame, content_area, screen),
         2 => render_miners(frame, content_area, screen),
         3 => render_blocks(frame, content_area, screen),
-        _ => render_peers(frame, content_area, screen),
+        4 => render_peers(frame, content_area, screen),
+        _ => render_system(frame, content_area, screen),
     }
 }
 
@@ -178,7 +204,7 @@ fn render_hashrate_history(frame: &mut Frame, area: Rect, hashrate: &Remote<Hash
     let sparkline = Sparkline::default()
         .block(block)
         .data(&samples)
-        .style(Style::default().fg(Color::Green));
+        .style(theme::SUCCESS);
     frame.render_widget(sparkline, area);
 }
 
@@ -319,7 +345,7 @@ fn render_miners_table(frame: &mut Frame, area: Rect, screen: &PoolScreen, miner
     let border_style = if screen.miners_focused {
         Style::default()
     } else {
-        Style::default().fg(Color::DarkGray)
+        theme::MUTED
     };
     let table = Table::new(rows, widths)
         .block(titled(&title).border_style(border_style))
@@ -332,7 +358,7 @@ fn render_miners_table(frame: &mut Frame, area: Rect, screen: &PoolScreen, miner
             "Payout",
         ]))
         .column_spacing(1)
-        .row_highlight_style(Style::default().bg(Color::DarkGray))
+        .row_highlight_style(theme::HIGHLIGHT)
         .highlight_symbol("> ");
     let mut state = TableState::default();
     if screen.miners_focused {
@@ -497,6 +523,44 @@ fn peer_row(peer: &Peer) -> Row<'static> {
     ])
 }
 
+/// The System tab, PDM's: the node's systemd user service, whether it
+/// runs, and the keys that start, stop and restart it.
+fn render_system(frame: &mut Frame, area: Rect, screen: &PoolScreen) {
+    let service = &screen.service;
+    let lines = match (service.error, service.instance) {
+        (Some(error), _) => vec![
+            alert("Service action failed"),
+            Line::from(""),
+            Line::from(error.to_string()),
+        ],
+        (None, Some(instance)) => {
+            let status = match service.status {
+                Remote::Ready(true) => Span::styled("Running", theme::SUCCESS),
+                Remote::Ready(false) => Span::styled("Stopped", theme::ERROR),
+                Remote::Failed(_) => Span::styled("Unavailable", theme::WARNING),
+                Remote::Unconfigured | Remote::Loading => Span::styled("Unknown", theme::MUTED),
+            };
+            vec![
+                field("Instance", instance),
+                styled_field("Service status", status),
+                Line::from(""),
+                Line::from("[s] Start    [x] Stop    [r] Restart"),
+            ]
+        }
+        (None, None) => vec![
+            Line::from(Span::styled("Service controls unavailable", theme::WARNING)),
+            Line::from(""),
+            Line::from("Pick a node config in the user config directory,"),
+            Line::from("~/.config/p2poolv2/config-<instance>.toml, which the"),
+            Line::from("p2poolv2@<instance> user service runs."),
+        ],
+    };
+    let paragraph = Paragraph::new(lines)
+        .block(titled(" System "))
+        .wrap(Wrap { trim: true });
+    frame.render_widget(paragraph, area);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -552,6 +616,7 @@ mod tests {
                     peers: &Remote::Unconfigured,
                     live_peer_events: &VecDeque::new(),
                     live_error: None,
+                    service: ServicePanel::NONE,
                 },
             );
         });
@@ -584,6 +649,7 @@ mod tests {
                     peers: &Remote::Unconfigured,
                     live_peer_events: &VecDeque::new(),
                     live_error: Some("connection refused"),
+                    service: ServicePanel::NONE,
                 },
             );
         });
@@ -625,6 +691,7 @@ mod tests {
                     peers: &Remote::Unconfigured,
                     live_peer_events: &VecDeque::new(),
                     live_error: None,
+                    service: ServicePanel::NONE,
                 },
             );
         });
@@ -658,6 +725,7 @@ mod tests {
                     peers: &Remote::Unconfigured,
                     live_peer_events: &VecDeque::new(),
                     live_error: None,
+                    service: ServicePanel::NONE,
                 },
             );
         });
@@ -690,6 +758,7 @@ mod tests {
                     peers: &Remote::Unconfigured,
                     live_peer_events: &VecDeque::new(),
                     live_error: None,
+                    service: ServicePanel::NONE,
                 },
             );
         });
@@ -722,6 +791,7 @@ mod tests {
                     peers: &Remote::Unconfigured,
                     live_peer_events: &VecDeque::new(),
                     live_error: None,
+                    service: ServicePanel::NONE,
                 },
             );
         });
@@ -761,9 +831,87 @@ mod tests {
                     peers: &peers,
                     live_peer_events: &events,
                     live_error: None,
+                    service: ServicePanel::NONE,
                 },
             );
         });
         insta::assert_snapshot!(text);
+    }
+
+    /// The System tab drawn with `service`.
+    fn system_tab(service: ServicePanel) -> String {
+        screen_text(80, 16, |frame| {
+            let area = frame.area();
+            super::render(
+                frame,
+                area,
+                &PoolScreen {
+                    tab: SYSTEM_TAB,
+                    expected: Some(CashNetwork::Chipnet),
+                    api_url: None,
+                    now: NOW,
+                    site: &Remote::Unconfigured,
+                    chain_info: &Remote::Unconfigured,
+                    hashrate: &Remote::Unconfigured,
+                    shares: &Remote::Unconfigured,
+                    live_shares: &VecDeque::new(),
+                    miners: &Remote::Unconfigured,
+                    miners_focused: false,
+                    miners_selected: 0,
+                    miner: &Remote::Unconfigured,
+                    found_blocks: &Remote::Unconfigured,
+                    peers: &Remote::Unconfigured,
+                    live_peer_events: &VecDeque::new(),
+                    live_error: None,
+                    service,
+                },
+            );
+        })
+    }
+
+    /// PDM's System tab: why there are no controls, the service's state
+    /// and keys, or why the last action failed.
+    #[test]
+    fn test_system_tab_shows_the_service() {
+        let unavailable = system_tab(ServicePanel::NONE);
+        assert!(unavailable.contains("System"), "{unavailable}");
+        assert!(
+            unavailable.contains("Service controls unavailable"),
+            "{unavailable}"
+        );
+        assert!(
+            unavailable.contains("config-<instance>.toml"),
+            "{unavailable}"
+        );
+        assert!(!unavailable.contains("[s] Start"), "{unavailable}");
+
+        for (status, shown) in [
+            (Remote::Ready(true), "Running"),
+            (Remote::Ready(false), "Stopped"),
+            (Remote::Failed("no systemd".into()), "Unavailable"),
+            (Remote::Loading, "Unknown"),
+        ] {
+            let text = system_tab(ServicePanel {
+                instance: Some("chipnet"),
+                status: &status,
+                error: None,
+            });
+            assert!(text.contains("Instance"), "{text}");
+            assert!(text.contains(": chipnet"), "{text}");
+            assert!(text.contains(&format!(": {shown}")), "{text}");
+            assert!(
+                text.contains("[s] Start    [x] Stop    [r] Restart"),
+                "{text}"
+            );
+        }
+
+        let failed = system_tab(ServicePanel {
+            instance: Some("chipnet"),
+            status: &Remote::Ready(false),
+            error: Some("Start failed: systemctl --user start p2poolv2@chipnet failed: denied"),
+        });
+        assert!(failed.contains("Service action failed"), "{failed}");
+        assert!(failed.contains("denied"), "{failed}");
+        assert!(!failed.contains("[s] Start"), "{failed}");
     }
 }

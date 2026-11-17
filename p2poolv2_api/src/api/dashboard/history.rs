@@ -39,7 +39,8 @@ pub(crate) const POOL_HASHRATE_SHARES: u32 = 120;
 /// never collapses to zero.
 pub(crate) const MAX_SHARE_GAP_SECS: u32 = 3600;
 
-/// Expected seconds between Bitcoin Cash blocks, for network hashrate.
+/// Expected seconds between Bitcoin Cash blocks before the node knows its
+/// tip's header: ten minutes.
 const BLOCK_INTERVAL_SECONDS: f64 = 600.0;
 
 /// Hashes a difficulty-1 share takes on average.
@@ -171,16 +172,35 @@ pub(crate) fn share_chain_hashrate(shares: &[(u32, CompactTarget)], now: u64) ->
     Some(rate * staleness_decay(newest.0, now))
 }
 
-/// Network hashrate implied by a block difficulty.
-pub(crate) fn network_hashrate(difficulty: f64) -> f64 {
-    difficulty * HASHES_PER_DIFFICULTY / BLOCK_INTERVAL_SECONDS
+/// Network hashrate implied by a block difficulty, for blocks
+/// `interval_seconds` apart.
+pub(crate) fn network_hashrate(difficulty: f64, interval_seconds: f64) -> f64 {
+    difficulty * HASHES_PER_DIFFICULTY / interval_seconds
 }
 
 /// Block difficulty implied by a network hashrate, the inverse of
 /// [`network_hashrate`], so a hashrate-only fallback sample can still
 /// show a difficulty the way the wasm dashboard does.
-pub(crate) fn difficulty_from_network_hashrate(hashes_per_second: f64) -> f64 {
-    hashes_per_second * BLOCK_INTERVAL_SECONDS / HASHES_PER_DIFFICULTY
+pub(crate) fn difficulty_from_network_hashrate(
+    hashes_per_second: f64,
+    interval_seconds: f64,
+) -> f64 {
+    hashes_per_second * interval_seconds / HASHES_PER_DIFFICULTY
+}
+
+/// Seconds between Bitcoin Cash blocks now: the interval of a block on the
+/// node's best tip, from its known header (CHIP-2025-03: 600 before a
+/// network's switch to one-minute blocks, 60 after), or ten minutes before
+/// the node knows its tip.
+pub(crate) fn block_interval_seconds(state: &AppState) -> f64 {
+    let store = state.chain_store_handle.store_handle().store();
+    store
+        .get_bch_best_tip()
+        .ok()
+        .flatten()
+        .and_then(|height| store.get_bch_best_hash(height).ok().flatten())
+        .and_then(|hash| store.get_bch_header(&hash).ok().flatten())
+        .map_or(BLOCK_INTERVAL_SECONDS, |tip| tip.next_interval as f64)
 }
 
 /// Whether a share's Bitcoin Cash header met its own block target.
@@ -223,10 +243,11 @@ pub(crate) fn pool_hashrate(state: &AppState, now: u64) -> Option<f64> {
 /// Record one sample.
 async fn tick(state: &Arc<AppState>, history: &Arc<HashrateHistory>) {
     let time = unix_now();
+    let interval = block_interval_seconds(state);
     let network = state
         .tracker_handle
         .get_network_difficulty()
-        .map(network_hashrate);
+        .map(|difficulty| network_hashrate(difficulty, interval));
     // This node's hashrate from the metrics actor's sliding window of
     // accepted submissions: an async channel read, before the store read.
     let local = state
@@ -486,14 +507,18 @@ mod tests {
     }
 
     #[test]
-    fn network_hashrate_spreads_difficulty_over_ten_minutes() {
-        assert!((network_hashrate(600.0) - HASHES_PER_DIFFICULTY).abs() < 1.0);
+    fn network_hashrate_spreads_difficulty_over_the_block_interval() {
+        assert!((network_hashrate(600.0, 600.0) - HASHES_PER_DIFFICULTY).abs() < 1.0);
+        // One-minute blocks: the same difficulty takes ten times the hashrate.
+        assert!((network_hashrate(600.0, 60.0) - 10.0 * HASHES_PER_DIFFICULTY).abs() < 1.0);
     }
 
     #[test]
     fn difficulty_from_network_hashrate_inverts_the_rate_estimate() {
-        let rate = network_hashrate(600.0);
-        assert!((difficulty_from_network_hashrate(rate) - 600.0).abs() < 1e-9);
+        for interval in [600.0, 60.0] {
+            let rate = network_hashrate(600.0, interval);
+            assert!((difficulty_from_network_hashrate(rate, interval) - 600.0).abs() < 1e-9);
+        }
     }
 
     #[test]

@@ -24,8 +24,10 @@
 //!   [`MAX_CARRIED_BCH_HEADERS`].
 //! - **Receiving.** Headers already known are skipped. Each other header
 //!   needs its parent, known or earlier in the table, and must pass
-//!   `BchHeaderRules::check`. The first failure stops the table; a header
-//!   whose parent is unknown is set aside for a later try.
+//!   `BchHeaderRules::check`, which also gives it its ticks and next
+//!   interval from its parent and ancestors, known or earlier in the table.
+//!   The first failure stops the table; a header whose parent is unknown is
+//!   set aside for a later try.
 //!
 //! The headers are not part of a share's hash: the proof of work commits to
 //! the BCH prev, and each header's own hash commits to its parent, so a
@@ -39,9 +41,13 @@ use bitcoin::hashes::Hash;
 use std::collections::{HashMap, HashSet};
 
 /// The longest path back a single share carries. A hostile fork's blocks
-/// past the first are never paid, and BCHN refuses a reorg deeper than 10
-/// blocks, so 32 covers every honest share.
-pub const MAX_PATH_HEADERS: usize = 32;
+/// past the first are never paid, and BCHN refuses a reorg deeper than
+/// 6,000 ticks (`-maxreorgticks`, CHIP-2025-03): 10 ten-minute blocks or 100
+/// one-minute blocks. 100 covers every honest share on one-minute blocks and
+/// fits one message's [`MAX_CARRIED_BCH_HEADERS`], so the wire format stays.
+/// A later switch to shorter blocks needs more than one message holds, a
+/// wire change.
+pub const MAX_PATH_HEADERS: usize = 100;
 
 /// The most BCH headers one message carries.
 pub const MAX_CARRIED_BCH_HEADERS: usize = 128;
@@ -145,15 +151,13 @@ pub fn accept_carried(
         if learned.contains_key(&hash) || known(&hash).is_some() {
             continue;
         }
-        let parent = learned
-            .get(&header.prev_blockhash)
-            .copied()
-            .or_else(|| known(&header.prev_blockhash));
-        let Some(parent) = parent else {
+        // A header earlier in the table, or one the node knows.
+        let lookup = |hash: &BlockHash| learned.get(hash).copied().or_else(|| known(hash));
+        let Some(parent) = lookup(&header.prev_blockhash) else {
             outcome.unlinked.push(*header);
             continue;
         };
-        match rules.check(header, &parent, now) {
+        match rules.check(header, &parent, lookup, now) {
             Ok(checked) => {
                 learned.insert(hash, checked);
                 outcome.accepted.push(checked);

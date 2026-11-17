@@ -9,9 +9,11 @@
 **Status on Bitcoin Cash: built on 2026-10-30, not yet run on chipnet.**
 Upstream designed this defense for Bitcoin; this fork built it before mainnet
 ([Requirements](../requirements.md#functional)). It is a share-chain rule
-change shipped as a flag day: the protocol strings end in `bch-prev-1off`,
+change shipped as a flag day: the protocol strings carry `bch-prev-1off`,
 so nodes from before cannot peer, and every Bitcoin Cash node must upgrade
-together. The parts:
+together. Since 2026-11-15 the segment is `bch-prev-1off-ticks`, another
+flag day: known headers carry their one-minute-block ticks (see
+[One-minute blocks](#one-minute-blocks)). The parts:
 
 - the header check (`p2poolv2_lib/src/shares/bch_headers.rs`), which
   requires each header's exact aserti3-2d nBits from its known parent;
@@ -19,9 +21,10 @@ together. The parts:
   which a worker fills from the node's own BCHN
   (`p2poolv2_lib/src/node/bch_header_feeder.rs`): every 5 seconds it walks
   back from BCHN's best block to a known header, a new node first learns
-  8,400 headers, about 58 days (about a minute over Tailscale to a Start9
-  BCHN, before the node dials peers), and each new template's previous
-  block is learned before jobs are built on it;
+  about 58 days of headers counted in ticks (8,400 ten-minute or 84,000
+  one-minute blocks, stored in chunks from the tip down, before the node
+  dials peers), and each new template's previous block is learned before
+  jobs are built on it;
 - carried headers (`p2poolv2_lib/src/shares/bch_carried_headers.rs`): share
   messages carry the BCH headers a receiver needs;
 - the known BCH prev: a node stores a peer's share body only once it knows
@@ -101,7 +104,7 @@ holds three expected blocks' worth of work
 difficulty Bitcoin Cash requires of the block after the paying share's BCH
 prev, which every node computes from that known header. Before this rule it
 was the nBits the paying share's header claims, which only a found block has
-to get right. The test networks' 20-minute rule is left out, so a late
+to get right. The test networks' minimum-difficulty rule is left out, so a late
 chipnet block does not shrink the window.
 
 A share whose window pays no one, because none of its window's work is on its
@@ -142,8 +145,9 @@ Each node checks carried headers itself, without asking BCHN:
   fixed anchor block and the parent's height and timestamp, with a two-day
   half-life on mainnet
   ([specification](https://upgradespecs.bitcoincashnode.org/2020-11-15-asert/)).
-  On chipnet and the other test networks, a block whose time is more than 20
-  minutes after its parent's uses the minimum difficulty. This fork checks it
+  On chipnet and the other test networks, a block whose time is more than
+  twice its interval after its parent's (20 minutes for a ten-minute block,
+  2 for a one-minute block) uses the minimum difficulty. This fork checks it
   with its own Rust aserti3-2d validator and each network's anchor, the same
   integer formula the share chain uses for its own targets
   ([Share difficulty: ASERT](../difficulty_adjustment/asert.md)). Scalenet
@@ -155,15 +159,56 @@ Each node checks carried headers itself, without asking BCHN:
   fake branch could pick times that ease its bits.
 
 A header that passes cost a full block of real proof of work. Upstream's
-design keeps about 8,400 headers. This fork's node first learns 8,400 back
-from its BCHN's tip, about 58 days, then follows BCHN's best block and adds
-the carried headers that pass.
+design keeps about 8,400 headers. This fork's node first learns about 58
+days back from its BCHN's tip, counted in ticks, then follows BCHN's best
+block and adds the carried headers that pass.
 
 BCHN's finalization helps but does not replace the rule. By default BCHN
-refuses a reorg deeper than 10 blocks (`DEFAULT_MAX_REORG_DEPTH` in its
-`src/validation.h`), which limits how long a hostile fork can stay
+refuses a reorg deeper than 6,000 ticks (`-maxreorgticks`, 10 ten-minute or
+100 one-minute blocks), which limits how long a hostile fork can stay
 competitive for the node's own BCHN. It says nothing about which block a peer's
 share builds on.
+
+## One-minute blocks
+
+Bitcoin Cash moves to one-minute blocks with CHIP-2025-03: chipnet on
+2026-11-15 (block 332,450 is its last ten-minute block), mainnet, testnet,
+scalenet and regtest at median time past 1810382400 (2027-05-15 12:00 UTC).
+A block's **ticks** are the sum of the target intervals up to it. ASERT
+counts ticks from its anchor and gives a one-minute block a target ten times
+easier, and the test networks' minimum-difficulty gap is twice the new
+block's interval.
+
+Each known header carries its ticks and the interval of a block built on it,
+as BCHN keeps them in its block index:
+
+- its ticks are its parent's ticks plus its parent's next interval;
+- its next interval is 60 once its own median time past (it and its ten
+  ancestors) has reached the network's activation time, else 600. The
+  networks' switches are a list of timed switches, each an interval the CHIP
+  allows.
+
+A header gets them when it becomes known: from the node's own BCHN, or from a
+peer after the header check, from its known parent and ancestors. So every
+node that knows a branch gives its blocks the same values, and the nBits it
+requires of a header, the nBits that size a window and a token share's ASERT
+band follow the branch, also across a reorg onto a branch that switched at
+another block. Where fewer than ten ancestors are known, as for the oldest
+headers of a new store, the network's pinned activation block answers by
+height (chipnet's is 332,450, and the tests check that the median-time-past
+rule switches there); mainnet's has no pin yet.
+
+The node's own BCHN reports `ticks`, `target_time` and `next_target_time`
+for its blocks. A new store's first walk counts ticks down from the tip's
+reported ticks; everywhere else the reports only cross-check P2Pool's own
+values, and a disagreement is logged as an error, never followed.
+
+Until 2026-11-15 a node learned the switch while running, from its own
+BCHN. Nodes learned it at different moments, or not at all, forgot it on
+restart, and kept it across a reorg onto a branch that switched elsewhere,
+so they could require different nBits of one header and split the share
+chain. The values now live in the store (format 12), and nodes on the old
+rule cannot peer.
 
 ## What it costs
 

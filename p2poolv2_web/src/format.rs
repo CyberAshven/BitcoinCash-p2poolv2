@@ -18,7 +18,10 @@ const MONTHS: [&str; 12] = [
 /// Hashes a difficulty-1 share takes on average.
 pub const HASHES_PER_DIFFICULTY: f64 = 4_294_967_296.0;
 
-/// Seconds between Bitcoin Cash blocks the network difficulty targets.
+/// Seconds between Bitcoin Cash blocks the network difficulty targets when
+/// the node does not say: ten minutes. A node sends its own,
+/// `block_interval_secs`, which is 60 after a network's switch to
+/// one-minute blocks (CHIP-2025-03).
 pub const BLOCK_INTERVAL_SECONDS: f64 = 600.0;
 
 /// Shown where a value is not known.
@@ -265,10 +268,11 @@ pub fn weak_difficulty(bits: &str) -> String {
     optional(difficulty, fmt_difficulty)
 }
 
-/// Block difficulty implied by a network hashrate, the inverse of how the
-/// node estimates the hashrate from the difficulty.
-pub fn difficulty_from_network_hashrate(hashes_per_second: f64) -> f64 {
-    hashes_per_second * BLOCK_INTERVAL_SECONDS / HASHES_PER_DIFFICULTY
+/// Block difficulty implied by a network hashrate, for blocks
+/// `interval_seconds` apart: the inverse of how the node estimates the
+/// hashrate from the difficulty.
+pub fn difficulty_from_network_hashrate(hashes_per_second: f64, interval_seconds: f64) -> f64 {
+    hashes_per_second * interval_seconds / HASHES_PER_DIFFICULTY
 }
 
 #[cfg(test)]
@@ -390,6 +394,12 @@ mod tests {
     #[test]
     fn test_network_difficulty_inverts_the_hashrate_estimate() {
         let hashrate = 2.0 * HASHES_PER_DIFFICULTY / BLOCK_INTERVAL_SECONDS;
-        assert!((difficulty_from_network_hashrate(hashrate) - 2.0).abs() < 1e-12);
+        assert!(
+            (difficulty_from_network_hashrate(hashrate, BLOCK_INTERVAL_SECONDS) - 2.0).abs()
+                < 1e-12
+        );
+        // One-minute blocks: the same hashrate meets a tenth of the
+        // difficulty.
+        assert!((difficulty_from_network_hashrate(hashrate, 60.0) - 0.2).abs() < 1e-12);
     }
 }

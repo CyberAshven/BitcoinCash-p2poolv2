@@ -26,7 +26,7 @@ use crate::shares::auxpow::{
     AuxError, AuxProof, AuxiliaryTree, DisclosedLeaf, Disclosure, MAX_TOKEN_TARGET_BITS,
     TokenBranch, TokenLeaf, TokenSplit, TreeLayout, encode_token_target, expand_token_target,
 };
-use crate::shares::bch_asert::{BchAsert, U256};
+use crate::shares::bch_asert::{BchAsert, TickInfo, U256};
 use crate::shares::merge_mining::{
     MAX_MERGE_MINING_TREE_HEIGHT, MERGE_MINING_OUTPUT_LENGTH, MergeMiningCommitment,
 };
@@ -474,14 +474,17 @@ impl MinerTokenJob {
     ///
     /// Each proof is checked as a covenant would check it, the ASERT format
     /// check included where `asert` names the network's anchor, before it
-    /// is handed out. A proof that cannot be built (a block deeper than the
-    /// proof format's 25 levels) or does not verify is logged and left out.
+    /// is handed out: on `parent`, the tick info of the block `header`
+    /// builds on, when its header is known, else by the network's pins. A
+    /// proof that cannot be built (a block deeper than the proof format's 25
+    /// levels) or does not verify is logged and left out.
     pub fn wins(
         &self,
         header: &Header,
         coinbase: &Transaction,
         coinbase_branch: &[TxMerkleNode],
         asert: Option<BchAsert>,
+        parent: Option<TickInfo>,
     ) -> Vec<TokenWin> {
         let block_hash = header.block_hash();
         self.entries
@@ -496,7 +499,7 @@ impl MinerTokenJob {
                     &entry.branch,
                 )
                 .and_then(|proof| {
-                    proof.verify(&entry.leaf, entry.max_height, asert)?;
+                    proof.verify(&entry.leaf, entry.max_height, asert, parent)?;
                     proof.to_bytes()
                 });
                 match proof {

@@ -14,6 +14,12 @@
 //! `asertAnchorParams` and `nASERTHalfLife`). The tests run the aserti3-2d
 //! specification's twelve vector runs and real mainnet and chipnet headers.
 //!
+//! CHIP-2025-03 counts block time in ticks: ASERT reads the parent's ticks
+//! and the new block's interval ([`TickInfo`]), which each known header
+//! carries (`shares::bch_headers::KnownBchHeader`) and [`TickSchedule`] works
+//! out from a block's median time past, as BCHN's `GetPowTargetSpacing`
+//! does. The tests also run the CHIP's ASERT and tick vectors.
+//!
 //! The header check is a format check, not block validation: P2Pool has
 //! only the header and its coinbase height, not the parent block, so the
 //! header's own time stands in for its parent's and the computed target gets
@@ -36,8 +42,369 @@ mod u256 {
 }
 pub use u256::U256;
 
-/// Every Bitcoin Cash network's block spacing, `nPowTargetSpacing`: 600 s.
+/// The interval, in ticks (seconds of target time), of every Bitcoin Cash
+/// block before a network's first interval switch, and of the ASERT anchor
+/// block on every network: 600.
 pub const BCH_BLOCK_SPACING: i64 = 600;
+
+/// The blocks a median time past reads: a block and its ten ancestors
+/// (`nMedianTimeSpan` in BCHN's `src/chain.h`).
+pub const MEDIAN_TIME_SPAN: usize = 11;
+
+/// The most switches pinned to blocks that one schedule holds: one-minute
+/// blocks, and room for later switches.
+const MAX_SWITCHES: usize = 4;
+
+/// A change of a network's block interval by time (CHIP-2025-03): a block
+/// whose median time past is at or after `activation_time` has a next block
+/// of `interval` ticks, as BCHN's `IsUpgrade2027Enabled` decides it.
+///
+/// The CHIP keeps a switch on the 600-tick grid: the block a switch follows
+/// has ticks that are a multiple of 600. A switch from ten-minute blocks
+/// always is, since every block's ticks are `600 * height` before it. A later
+/// switch from shorter blocks needs an activation that keeps to the grid,
+/// which its upgrade defines; it is added here with that rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TimedSwitch {
+    /// Median time past at which the switch activates.
+    pub activation_time: i64,
+    /// The interval, in ticks, of a block built on one that reached it.
+    pub interval: i64,
+}
+
+/// One-minute blocks on mainnet, testnet3, testnet4, scalenet and regtest:
+/// 2027-05-15 12:00 UTC, BCHN's `upgrade2027ActivationTime`.
+const MAINNET_SWITCHES: &[TimedSwitch] = &[TimedSwitch {
+    activation_time: 1_810_382_400,
+    interval: 60,
+}];
+
+/// One-minute blocks on chipnet: 2026-11-15 12:00 UTC.
+const CHIPNET_SWITCHES: &[TimedSwitch] = &[TimedSwitch {
+    activation_time: 1_794_744_000,
+    interval: 60,
+}];
+
+/// A switch pinned to a block: every block after `height` has `interval`
+/// ticks, until the next switch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IntervalSwitch {
+    /// The last block with the old interval.
+    pub height: u32,
+    /// The interval, in ticks, of every block after it.
+    pub interval: i64,
+}
+
+/// Why an interval switch cannot join a schedule.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ScheduleError {
+    /// CHIP-2025-03 allows intervals from 1 to 600 ticks that divide 600.
+    #[error("interval {0} does not divide 600")]
+    Interval(i64),
+    /// Switches come in ascending height order.
+    #[error("switch at height {height} is not above the last switch, at {last}")]
+    Order { height: u32, last: u32 },
+    /// A switch sits where a block's ticks are a multiple of 600.
+    #[error("switch at height {height} has ticks {ticks}, not a multiple of 600")]
+    Grid { height: u32, ticks: i64 },
+    /// The schedule is full.
+    #[error("a schedule holds at most {MAX_SWITCHES} switches")]
+    Full,
+}
+
+/// A block's place in CHIP-2025-03's ticks, as BCHN keeps it in its block
+/// index (`CBlockIndex::tickInfo`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TickInfo {
+    /// The block's ticks: the sum of the target intervals of the blocks up
+    /// to it. The chain's first block has none.
+    pub ticks: i64,
+    /// The target interval, in ticks, of a block built on it.
+    pub next_interval: i64,
+}
+
+impl TickInfo {
+    /// The ticks of a block built on this one (BCHN's `GetNextBlockTicks`).
+    pub fn next_ticks(&self) -> i64 {
+        self.ticks + self.next_interval
+    }
+
+    /// How long after this block a test network block built on it may take
+    /// the proof-of-work limit: more than twice the new block's interval, 20
+    /// minutes for a ten-minute block and 2 for a one-minute one.
+    pub fn min_difficulty_gap(&self) -> u32 {
+        (2 * self.next_interval) as u32
+    }
+
+    /// Whether a coinbase in a block with `coin_ticks` can be spent in a
+    /// block built on this one: that block is at least
+    /// [`BCH_COINBASE_MATURITY_TICKS`] past the coinbase's, as BCHN's
+    /// `CheckTxInputs` requires.
+    pub fn coinbase_spendable_in_next_block(&self, coin_ticks: i64) -> bool {
+        self.next_ticks() - coin_ticks >= BCH_COINBASE_MATURITY_TICKS
+    }
+}
+
+/// BCHN's `GetMedianTimePast` over `times`: the middle one once sorted.
+/// `None` for no times.
+pub fn median_time_past(times: &[u32]) -> Option<i64> {
+    let mut sorted = times.to_vec();
+    sorted.sort_unstable();
+    sorted.get(sorted.len() / 2).map(|time| i64::from(*time))
+}
+
+/// A network's block intervals under CHIP-2025-03.
+///
+/// A block's ticks are the sum of the target intervals of the blocks up to
+/// it. Every block has 600 ticks until the first switch. A switch is timed
+/// ([`TimedSwitch`]): a block whose own median time past (it and its ten
+/// ancestors) has reached the switch's time has a next block of the
+/// switch's interval, as BCHN decides it for each block it adds to its
+/// index. Each known header carries the ticks and next interval worked out
+/// that way (`shares::bch_headers::KnownBchHeader`), so every node that knows
+/// a branch gives its blocks the same ticks, and a reorg onto a branch that
+/// switched at another block follows that branch.
+///
+/// The schedule also pins switches to the blocks they follow, where a
+/// network's switch has happened: chipnet's last ten-minute block is
+/// 332,450. A pin answers by height where no median time past can be worked
+/// out (a header with fewer than ten known ancestors, such as the oldest of a
+/// new store) or no header is known at all; the tests check that the timed
+/// rule switches at the pinned block. Before any switch a block's ticks are
+/// `600 * height`, so every rule counted in ticks is the old rule there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TickSchedule {
+    /// The switches by time, in activation order.
+    timed: &'static [TimedSwitch],
+    /// The switches pinned to blocks, in height order.
+    pinned: [Option<IntervalSwitch>; MAX_SWITCHES],
+}
+
+impl TickSchedule {
+    /// Ten-minute blocks only: no switch.
+    pub const TEN_MINUTES: Self = Self {
+        timed: &[],
+        pinned: [None; MAX_SWITCHES],
+    };
+
+    /// Mainnet (also testnet3, testnet4, scalenet and regtest, as in BCHN):
+    /// one-minute blocks from 2027-05-15 12:00 UTC, no block pinned yet.
+    /// The header gate checks token shares by the pins, so pinning the
+    /// switch block changes its verdicts: a share-chain rule change, with a
+    /// new protocol segment, never a quiet update.
+    const MAINNET: Self = Self {
+        timed: MAINNET_SWITCHES,
+        pinned: [None; MAX_SWITCHES],
+    };
+
+    /// Chipnet: one-minute blocks from 2026-11-15 12:00 UTC, after block
+    /// 332,450, whose median time past, 1,794,744,504, was the first at or
+    /// after it.
+    const CHIPNET: Self = Self {
+        timed: CHIPNET_SWITCHES,
+        pinned: [
+            Some(IntervalSwitch {
+                height: 332_450,
+                interval: 60,
+            }),
+            None,
+            None,
+            None,
+        ],
+    };
+
+    /// The schedule of `network`.
+    pub fn for_network(network: BitcoinCashNetwork) -> Self {
+        match network {
+            BitcoinCashNetwork::Chipnet => Self::CHIPNET,
+            BitcoinCashNetwork::Mainnet
+            | BitcoinCashNetwork::Regtest
+            | BitcoinCashNetwork::Scalenet => Self::MAINNET,
+        }
+    }
+
+    /// This schedule with `switch` pinned, refused when the CHIP does not
+    /// allow it here.
+    pub fn with_switch(mut self, switch: IntervalSwitch) -> Result<Self, ScheduleError> {
+        self.check_switch(switch)?;
+        let slot = self
+            .pinned
+            .iter_mut()
+            .find(|slot| slot.is_none())
+            .ok_or(ScheduleError::Full)?;
+        *slot = Some(switch);
+        Ok(self)
+    }
+
+    /// Whether `switch` may follow this schedule's pinned switches.
+    fn check_switch(&self, switch: IntervalSwitch) -> Result<(), ScheduleError> {
+        if !divides_600(switch.interval) {
+            return Err(ScheduleError::Interval(switch.interval));
+        }
+        if let Some(last) = self.switches().last()
+            && switch.height <= last.height
+        {
+            return Err(ScheduleError::Order {
+                height: switch.height,
+                last: last.height,
+            });
+        }
+        let ticks = self.ticks(switch.height);
+        if ticks % BCH_BLOCK_SPACING != 0 {
+            return Err(ScheduleError::Grid {
+                height: switch.height,
+                ticks,
+            });
+        }
+        Ok(())
+    }
+
+    /// The pinned switches, in height order.
+    pub fn switches(&self) -> impl DoubleEndedIterator<Item = IntervalSwitch> + '_ {
+        self.pinned.iter().flatten().copied()
+    }
+
+    /// The switches by time, in activation order.
+    pub fn timed_switches(&self) -> &'static [TimedSwitch] {
+        self.timed
+    }
+
+    /// The interval of a block built on one whose median time past is
+    /// `median_time_past`: the latest timed switch it has reached, or 600
+    /// (BCHN's `GetPowTargetSpacing`).
+    pub fn interval_reached(&self, median_time_past: i64) -> i64 {
+        self.timed
+            .iter()
+            .rev()
+            .find(|switch| switch.activation_time <= median_time_past)
+            .map_or(BCH_BLOCK_SPACING, |switch| switch.interval)
+    }
+
+    /// The interval of a block built on the one at `height`, whose own time
+    /// and its ancestors' are `times`, newest first: the interval its median
+    /// time past reaches ([`Self::interval_reached`]). A median time past
+    /// reads the block and its ten ancestors, or every block down to the
+    /// chain's first for a block below height 10. With fewer times than that
+    /// the pins answer by height ([`Self::interval_after`]).
+    pub fn next_interval(&self, height: u32, times: &[u32]) -> i64 {
+        let span = usize::try_from(height)
+            .map_or(MEDIAN_TIME_SPAN, |height| MEDIAN_TIME_SPAN.min(height + 1));
+        match times.get(..span).and_then(median_time_past) {
+            Some(median_time_past) => self.interval_reached(median_time_past),
+            None => self.interval_after(height),
+        }
+    }
+
+    /// The tick info of the block at `height` built on a block with
+    /// `parent`'s, whose own time and its ancestors' are `times`, newest
+    /// first: its ticks follow its parent's, and its next interval is the one
+    /// its median time past reaches ([`Self::next_interval`]). This is how
+    /// BCHN sets a block's ticks when it adds the block to its index
+    /// (`AddToBlockIndex`).
+    pub fn tick_info_on(&self, parent: TickInfo, height: u32, times: &[u32]) -> TickInfo {
+        TickInfo {
+            ticks: parent.next_ticks(),
+            next_interval: self.next_interval(height, times),
+        }
+    }
+
+    /// The tick info the pins give the block at `height`, for where no
+    /// header is known or a header's parent is not.
+    pub fn tick_info(&self, height: u32) -> TickInfo {
+        TickInfo {
+            ticks: self.ticks(height),
+            next_interval: self.interval_after(height),
+        }
+    }
+
+    /// The ticks the pins give the block at `height`: 600 for each block up
+    /// to the first switch, then each switch's interval for the blocks after
+    /// it. Genesis has none.
+    pub fn ticks(&self, height: u32) -> i64 {
+        let height = i64::from(height);
+        let (mut ticks, mut from, mut interval) = (0, 0, BCH_BLOCK_SPACING);
+        for switch in self.switches() {
+            let switch_height = i64::from(switch.height);
+            if height <= switch_height {
+                break;
+            }
+            ticks += (switch_height - from) * interval;
+            from = switch_height;
+            interval = switch.interval;
+        }
+        ticks + (height - from) * interval
+    }
+
+    /// The target interval, in ticks, the pins give the block at `height`.
+    /// Genesis reports 600.
+    pub fn interval_of(&self, height: u32) -> i64 {
+        self.switches()
+            .rev()
+            .find(|switch| switch.height < height)
+            .map_or(BCH_BLOCK_SPACING, |switch| switch.interval)
+    }
+
+    /// The target interval, in ticks, the pins give the block after the one
+    /// at `height`.
+    pub fn interval_after(&self, height: u32) -> i64 {
+        self.interval_of(height.saturating_add(1))
+    }
+
+    /// The highest block height whose ticks, by the pins, are at most
+    /// `ticks`.
+    fn height_at_or_below(&self, ticks: i64) -> u32 {
+        let ticks = ticks.max(0);
+        let (mut from, mut from_ticks, mut interval) = (0, 0, BCH_BLOCK_SPACING);
+        for switch in self.switches() {
+            let switch_height = i64::from(switch.height);
+            let switch_ticks = from_ticks + (switch_height - from) * interval;
+            if ticks < switch_ticks {
+                break;
+            }
+            (from, from_ticks, interval) = (switch_height, switch_ticks, switch.interval);
+        }
+        u32::try_from(from + (ticks - from_ticks) / interval).unwrap_or(u32::MAX)
+    }
+
+    /// Whether the coinbase of the block at `height`, with `confirmations`
+    /// on the node's chain, can be spent in the next block, by the pins:
+    /// that block's ticks are at least [`BCH_COINBASE_MATURITY_TICKS`] past
+    /// the coinbase's. That is 100 ten-minute blocks or 1,000 one-minute
+    /// blocks. Where both blocks' headers are known,
+    /// [`TickInfo::coinbase_spendable_in_next_block`] reads their own ticks.
+    pub fn coinbase_spendable_in_next_block(&self, height: u32, confirmations: i64) -> bool {
+        let Some(next) = i64::from(height)
+            .checked_add(confirmations)
+            .and_then(|next| u32::try_from(next).ok())
+        else {
+            return false;
+        };
+        confirmations > 0 && self.ticks(next) - self.ticks(height) >= BCH_COINBASE_MATURITY_TICKS
+    }
+
+    /// The first block height at which a transaction locked to height
+    /// `lock_height` (`nLockTime`, or `OP_CHECKLOCKTIMEVERIFY`'s operand) is
+    /// final, by the pins.
+    ///
+    /// CHIP-2025-03 keeps a lock height in 600-tick units: it is final in a
+    /// block whose ticks are past `600 * lock_height`. That is block
+    /// `lock_height + 1` while blocks are ten minutes, and later after a
+    /// switch to shorter blocks: ten one-minute blocks per unit.
+    pub fn first_block_after_lock_height(&self, lock_height: u32) -> u32 {
+        self.height_at_or_below(i64::from(lock_height) * BCH_BLOCK_SPACING)
+            .saturating_add(1)
+    }
+}
+
+/// Whether `interval` is one CHIP-2025-03 allows: 1 to 600 ticks, dividing
+/// 600.
+pub fn divides_600(interval: i64) -> bool {
+    (1..=BCH_BLOCK_SPACING).contains(&interval) && BCH_BLOCK_SPACING % interval == 0
+}
+
+/// Bitcoin Cash coinbase maturity in ticks, CHIP-2025-03: 60,000, which is
+/// 100 ten-minute blocks or 1,000 one-minute blocks.
+pub const BCH_COINBASE_MATURITY_TICKS: i64 = 60_000;
 
 /// The proof-of-work limit of mainnet, testnet3, testnet4, chipnet and
 /// scalenet: `00000000ffff...ff`, 2^224 - 1. Its compact form is
@@ -90,6 +457,9 @@ pub struct BchAsert {
     pub easy_numerator: u32,
     /// See [`Self::easy_numerator`].
     pub easy_denominator: u32,
+    /// The network's block intervals (CHIP-2025-03), for a header whose
+    /// parent is not known.
+    pub tick_schedule: TickSchedule,
 }
 
 impl BchAsert {
@@ -104,6 +474,7 @@ impl BchAsert {
         hard_divisor: MAINNET_HARD_DIVISOR,
         easy_numerator: MAINNET_EASY.0,
         easy_denominator: MAINNET_EASY.1,
+        tick_schedule: TickSchedule::MAINNET,
     };
 
     /// Chipnet (`CChipNetParams`), which shares testnet4's anchor
@@ -118,10 +489,15 @@ impl BchAsert {
         hard_divisor: TEST_NETWORK_HARD_DIVISOR,
         easy_numerator: TEST_NETWORK_EASY.0,
         easy_denominator: TEST_NETWORK_EASY.1,
+        tick_schedule: TickSchedule::CHIPNET,
     };
 
-    /// Testnet4: the same anchor and half-life as chipnet.
-    pub const TESTNET4: Self = Self::CHIPNET;
+    /// Testnet4: the same anchor and half-life as chipnet, and mainnet's
+    /// activation time.
+    pub const TESTNET4: Self = Self {
+        tick_schedule: TickSchedule::MAINNET,
+        ..Self::CHIPNET
+    };
 
     /// The parameters for a network P2Pool runs on. Regtest has no anchor in
     /// BCHN (nor does scalenet), so it has none here and its headers are not
@@ -134,35 +510,46 @@ impl BchAsert {
         }
     }
 
-    /// The target ASERT requires of the block after one at `parent_height`
-    /// and `parent_time`, as `GetNextASERTWorkRequired` computes it (before
-    /// a test network's minimum-difficulty rule). `None` below the anchor,
-    /// where ASERT does not govern.
-    pub fn next_target(&self, parent_height: u32, parent_time: u32) -> Option<U256> {
-        let height_diff = i64::from(parent_height.checked_sub(self.anchor_height)?);
+    /// The target ASERT requires of a block on a parent with tick info
+    /// `parent`, dated `parent_time`, as `GetNextASERTWorkRequired` computes
+    /// it (before a test network's minimum-difficulty rule). `None` below the
+    /// anchor, where ASERT does not govern.
+    ///
+    /// The tick difference is the parent's ticks less the anchor's, `600 *
+    /// anchor_height` (every anchor is a ten-minute block), and the new
+    /// block's interval is the parent's next interval: after a switch to
+    /// one-minute blocks the target is ten times easier, for a block ten
+    /// times as frequent.
+    pub fn next_target(&self, parent: TickInfo, parent_time: u32) -> Option<U256> {
+        let tick_delta = parent.ticks - i64::from(self.anchor_height) * BCH_BLOCK_SPACING;
+        if tick_delta < 0 {
+            return None;
+        }
         let time_diff = i64::from(parent_time) - self.anchor_parent_time;
         let reference = set_compact(self.anchor_bits)?;
         calculate_asert(
             reference,
             time_diff,
-            height_diff,
+            tick_delta,
+            BCH_BLOCK_SPACING,
+            parent.next_interval,
             self.half_life,
             bch_pow_limit(),
         )
     }
 
     /// [`Self::next_target`] in compact form: the nBits BCHN requires.
-    pub fn next_bits(&self, parent_height: u32, parent_time: u32) -> Option<CompactTarget> {
-        self.next_target(parent_height, parent_time)
-            .map(get_compact)
+    pub fn next_bits(&self, parent: TickInfo, parent_time: u32) -> Option<CompactTarget> {
+        self.next_target(parent, parent_time).map(get_compact)
     }
 
     /// The ASERT format check of a header at `height` (its coinbase's BIP34
-    /// height) with nBits `bits` and time `header_time`.
+    /// height) with nBits `bits` and time `header_time`, on a parent with
+    /// tick info `parent` when the parent's header is known.
     ///
     /// The header's own time stands in for its parent's, so the target is
-    /// computed as ASERT would from a parent at `height - 1` dated
-    /// `header_time`, and the header's target must lie in the agreed band:
+    /// computed as ASERT would from that parent dated `header_time`, and the
+    /// header's target must lie in the agreed band:
     ///
     /// - mainnet: `computed / 2 <= header_target <= computed * 1.05`;
     /// - test networks: `computed / 8 <= header_target <= computed * 8`, or
@@ -174,13 +561,26 @@ impl BchAsert {
     /// its parent, which BCHN accepts when the parent is dated ahead: a
     /// factor of about 1.029 on mainnet, 4 on the test networks' one-hour
     /// half-life. `computed / d` is floored and the easy side is compared
-    /// exactly (`target * 100 <= computed * 105` on mainnet). The bands are
-    /// the SAFA covenant's (`p2poolv2_safa`), number for number.
+    /// exactly (`target * 100 <= computed * 105` on mainnet).
+    ///
+    /// The parent's ticks and the new block's interval are the parent's own
+    /// (`KnownBchHeader`) when it is known. Without it (`None`) they come
+    /// from the pins by height ([`TickSchedule::tick_info`]), which match the
+    /// header's own values on chipnet's chain but give ten-minute blocks on a
+    /// network whose switch is not pinned yet, as mainnet's is not.
+    ///
+    /// The bands are the SAFA covenant's (`p2poolv2_safa`), number for
+    /// number, but the covenant still computes ASERT by height with ten-minute
+    /// blocks: after a network's switch to one-minute blocks it computes a
+    /// target ten times harder than this check, so a token share this check
+    /// accepts would fail the covenant's band. Open before any token
+    /// deployment: the covenant needs the parent's ticks and interval too.
     pub fn check_header_bits(
         &self,
         bits: CompactTarget,
         header_time: u32,
         height: u64,
+        parent: Option<TickInfo>,
     ) -> Result<(), String> {
         let bits = bits.to_consensus();
         let target = set_compact(bits).ok_or_else(|| format!("invalid nBits {bits:#010x}"))?;
@@ -196,14 +596,13 @@ impl BchAsert {
             .checked_sub(1)
             .and_then(|height| u32::try_from(height).ok())
             .ok_or_else(|| format!("height {height} has no ASERT parent"))?;
-        let computed = self
-            .next_target(parent_height, header_time)
-            .ok_or_else(|| {
-                format!(
-                    "height {height} is not above the ASERT anchor {}",
-                    self.anchor_height
-                )
-            })?;
+        let parent = parent.unwrap_or_else(|| self.tick_schedule.tick_info(parent_height));
+        let computed = self.next_target(parent, header_time).ok_or_else(|| {
+            format!(
+                "height {height} is not above the ASERT anchor {}",
+                self.anchor_height
+            )
+        })?;
         let hard_floor = computed / U256::from(self.hard_divisor);
         if target < hard_floor {
             return Err(format!(
@@ -224,24 +623,62 @@ impl BchAsert {
         }
         Ok(())
     }
+
+    /// [`Self::check_header_bits`] as every peer applies it to a token
+    /// share: by the pins, as the header gate does without a store, and by
+    /// `known_parent`, the tick info of the block the header builds on, as
+    /// block validation does once that block is known. A share must pass
+    /// both, so a token job or a token win is only worth handing a miner
+    /// when it does.
+    pub fn check_header_bits_for_peers(
+        &self,
+        bits: CompactTarget,
+        header_time: u32,
+        height: u64,
+        known_parent: Option<TickInfo>,
+    ) -> Result<(), String> {
+        self.check_header_bits(bits, header_time, height, None)?;
+        match known_parent {
+            Some(parent) => self.check_header_bits(bits, header_time, height, Some(parent)),
+            None => Ok(()),
+        }
+    }
 }
 
-/// BCHN's `CalculateASERT`: `reference * 2^((time_diff - 600 *
-/// (height_diff + 1)) / half_life)` in 16.16 fixed point, clamped to
+/// BCHN's `CalculateASERT` with CHIP-2025-03's ticks: `reference *
+/// 2^((time_diff - (tick_delta + anchor_interval)) / half_life) *
+/// anchor_interval / next_interval` in 16.16 fixed point, clamped to
 /// `pow_limit` and to at least 1.
 ///
+/// `tick_delta` is the parent's ticks less the anchor's, `600 *
+/// height_diff` on a chain that has not activated one-minute blocks.
+/// `anchor_interval` is the anchor block's interval in ticks, 600 on every
+/// Bitcoin Cash network ([`BCH_BLOCK_SPACING`]), and `next_interval` the new
+/// block's, 600 or 60. Scaling by the ratio of the two can pass 2^256; the
+/// CHIP's reference then returns the limit, not the wrapped value, and so
+/// does this.
+///
 /// `None` where BCHN asserts instead: a zero reference or one above the
-/// limit, a negative height difference, a non-positive half-life, or a time
-/// so far off schedule that the fixed-point exponent would overflow
-/// (`|time_diff - 600 * height_diff| >= 2^47`).
+/// limit, a negative tick difference, a non-positive half-life, an
+/// interval that does not divide 600, or a time so far off schedule that
+/// the fixed-point exponent would overflow (`|time_diff - tick_delta| >=
+/// 2^47`).
 pub fn calculate_asert(
     reference: U256,
     time_diff: i64,
-    height_diff: i64,
+    tick_delta: i64,
+    anchor_interval: i64,
+    next_interval: i64,
     half_life: i64,
     pow_limit: U256,
 ) -> Option<U256> {
-    if reference.is_zero() || reference > pow_limit || height_diff < 0 || half_life <= 0 {
+    if reference.is_zero() || reference > pow_limit || tick_delta < 0 || half_life <= 0 {
+        return None;
+    }
+    let divides_600 = |interval: i64| {
+        (1..=BCH_BLOCK_SPACING).contains(&interval) && BCH_BLOCK_SPACING % interval == 0
+    };
+    if !divides_600(anchor_interval) || !divides_600(next_interval) {
         return None;
     }
     // BCHN needs leading zero bits in the limit to detect overflow; every
@@ -249,12 +686,12 @@ pub fn calculate_asert(
     if !(pow_limit >> 224).is_zero() {
         return None;
     }
-    let span = time_diff.checked_sub(BCH_BLOCK_SPACING.checked_mul(height_diff)?)?;
+    let span = time_diff.checked_sub(tick_delta)?;
     if span.unsigned_abs() >= 1 << (63 - 16) {
         return None;
     }
     // C++ and Rust both truncate toward zero in integer division.
-    let exponent = (span - BCH_BLOCK_SPACING) * 65_536 / half_life;
+    let exponent = (span - anchor_interval) * 65_536 / half_life;
     // `>>` on a negative i64 is arithmetic in both: it floors, so the
     // fraction below is always in 0..65536.
     let mut shifts = exponent >> 16;
@@ -283,6 +720,15 @@ pub fn calculate_asert(
     } else {
         next <<= shifts as usize;
     }
+    // The interval ratio, a whole number from 1 to 600 either way. A
+    // product past 2^256 is the limit (the CHIP's `ratio_guard_wrap_low`
+    // vector).
+    next = if anchor_interval >= next_interval {
+        next.checked_mul(U256::from((anchor_interval / next_interval) as u64))
+            .unwrap_or(pow_limit)
+    } else {
+        next / U256::from((next_interval / anchor_interval) as u64)
+    };
     if next.is_zero() {
         next = U256::one();
     } else if next > pow_limit {

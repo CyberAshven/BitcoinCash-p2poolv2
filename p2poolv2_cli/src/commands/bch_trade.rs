@@ -26,6 +26,7 @@ use bitcoin::{
 use clap::{Args, Subcommand, ValueEnum};
 use p2poolv2_lib::address::bch_share::{self, encode_p2sh32_cashaddr};
 use p2poolv2_lib::config::{BitcoinCashNetwork, Chain, parse_payout_address};
+use p2poolv2_lib::shares::bch_asert::TickSchedule;
 use p2poolv2_lib::shares::bch_htlc::{HtlcContract, SECRET_LENGTH, secret_hash};
 use p2poolv2_lib::shares::bch_script::dust_threshold;
 use p2poolv2_lib::shares::bch_trade::{
@@ -85,8 +86,11 @@ pub enum TradeCommand {
         /// Address that takes the coins back after the refund height
         #[arg(long)]
         refund_address: String,
-        /// Height (share height on the share chain, block height on Bitcoin
-        /// Cash) from which the refund is valid
+        /// Height from which the refund is valid: a share height on the share
+        /// chain, a lock height on Bitcoin Cash. Since one-minute blocks
+        /// (CHIP-2025-03) a Bitcoin Cash lock height counts ten-minute units,
+        /// so it opens later than the block of that height; `refund` prints
+        /// the first block it is valid in
         #[arg(long)]
         refund_height: u32,
     },
@@ -393,7 +397,17 @@ fn refund(
         fee_rate.unwrap_or(default_fee_rate(chain.chain)),
     )?;
     let mut summary = spend_summary(&transaction, coin);
-    summary["valid_from_height"] = json!(contract.refund_height + 1);
+    // A Bitcoin Cash lock height counts ten-minute units after one-minute
+    // blocks (CHIP-2025-03); a share height is a share height. The CLI has
+    // no known headers, so the network's pinned switches place the block:
+    // exact on chipnet, ten-minute blocks on mainnet until its switch is
+    // pinned.
+    let valid_from_height = match chain.chain {
+        TradeChain::Share => contract.refund_height.saturating_add(1),
+        TradeChain::Bch => TickSchedule::for_network(chain.network)
+            .first_block_after_lock_height(contract.refund_height),
+    };
+    summary["valid_from_height"] = json!(valid_from_height);
     Ok(summary)
 }
 

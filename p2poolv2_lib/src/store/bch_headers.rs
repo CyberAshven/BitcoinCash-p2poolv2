@@ -3,9 +3,10 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 //! The Bitcoin Cash headers this node knows, keyed by block hash, each with
-//! its height (`KnownBchHeader`). A header gets here from this node's own
-//! BCHN, or from a peer after `BchHeaderRules::check`. Kept forever: about
-//! 52,560 headers a year at 84 bytes each, 4.4 MB.
+//! its height, ticks and next interval (`KnownBchHeader`, CHIP-2025-03). A
+//! header gets here from this node's own BCHN, or from a peer after
+//! `BchHeaderRules::check`. Kept forever: 100 bytes each, 52,560 headers a
+//! year on ten-minute blocks (5.3 MB), 525,600 on one-minute blocks (53 MB).
 //!
 //! Beside them, an index of the node's own BCHN best chain, height to hash,
 //! with the tip height under its own key. A sender uses it to tell which
@@ -115,6 +116,9 @@ mod tests {
     use bitcoin::hashes::Hash;
     use tempfile::tempdir;
 
+    /// A restart keeps each header's ticks and next interval as they were
+    /// worked out, here a one-minute block's that its height alone would not
+    /// give: nothing is learned again.
     #[test]
     fn a_known_header_is_found_by_its_hash_after_a_reopen() {
         let directory = tempdir().unwrap();
@@ -122,6 +126,8 @@ mod tests {
         let known = KnownBchHeader {
             height: MAINNET_PAIRS[0].0,
             header: header(MAINNET_PAIRS[0].1),
+            ticks: 199_470_060,
+            next_interval: 60,
         };
         let store = Store::new(path.clone(), false).unwrap();
         assert_eq!(store.get_bch_header(&known.block_hash()).unwrap(), None);

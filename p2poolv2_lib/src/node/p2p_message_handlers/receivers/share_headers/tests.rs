@@ -1890,10 +1890,11 @@ fn test_validate_dag_refuses_a_minimum_other_than_the_asert_target() {
     ));
 }
 
-/// A header whose node wanted a target easier than its own is refused at
-/// header sync.
+/// A header whose node wanted a target easier than its own is accepted at
+/// header sync: `wanted_bits` is a signal only, and easier it asks for an
+/// easier weak target (`shares::weak::weak_share_asks`).
 #[test]
-fn test_validate_dag_refuses_wanted_bits_easier_than_bits() {
+fn test_validate_dag_accepts_wanted_bits_easier_than_bits() {
     let parent = TestShareBlockBuilder::new()
         .share_owner(ShareOwner::CashP2pkh([0x22; 20]))
         .bits(CompactTarget::from_consensus(0x1c40_0000))
@@ -1956,11 +1957,5 @@ fn test_validate_dag_refuses_wanted_bits_easier_than_bits() {
         0,
     );
 
-    assert!(matches!(
-        result,
-        Err(HeaderSyncError::OutsideBand {
-            error: BandError::WantedEasierThanBits { .. },
-            ..
-        })
-    ));
+    assert!(result.is_ok(), "Expected Ok, got: {}", result.unwrap_err());
 }

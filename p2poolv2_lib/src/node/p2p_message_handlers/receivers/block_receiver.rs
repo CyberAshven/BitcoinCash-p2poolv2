@@ -39,11 +39,12 @@ pub const MAX_PENDING_BLOCKS: usize = 1_024;
 
 /// Most bytes, by consensus encoding, the pending buffer holds before it
 /// evicts the oldest: 32 MiB, at least 160 blocks of the largest Bitcoin
-/// share (`BLOCK_TXS_SIZE_LIMIT`, 200 KiB, plus header and merkle branches)
-/// and at least 26 of the largest Bitcoin Cash share
-/// (`BCH_SHARE_BODY_SIZE_LIMIT`, a 1,000,000-byte coinbase and 200 KiB of
-/// share transactions), more than one peer's 16 requests in flight. Honest
-/// Bitcoin Cash shares are far smaller (about 35 KB at 1,000 payees), and a
+/// share (`BLOCK_TXS_SIZE_LIMIT`, 200 KiB, plus header and merkle branches),
+/// more than one peer's 16 requests in flight, and at least 15 of the
+/// largest Bitcoin Cash share (`BCH_SHARE_BODY_SIZE_LIMIT`, a 1,000,000-byte
+/// coinbase and 200 KiB of share transactions, beside `WEAK_BYTES`, 960 KiB
+/// of weak shares). Honest Bitcoin Cash shares are far smaller (about 35 KB
+/// at 1,000 payees, and about 300 KB more carrying 320 weak shares), and a
 /// block evicted early is fetched again.
 pub const MAX_PENDING_BYTES: usize = 32 * 1024 * 1024;
 
@@ -390,6 +391,24 @@ impl BlockReceiver {
         }
     }
 
+    /// Whether a share at `known_height` sits at least one payout depth below
+    /// the candidate tip, below the zone where shares are fully validated:
+    /// the only place a body whose weak shares were pruned is stored. Those
+    /// bodies come from peers that pruned them one payout depth and an hour
+    /// below their confirmed tip, so a node whose headers are synced always
+    /// finds them below its zone; a node whose tip lags further drops them,
+    /// and the hash stays fetchable. False when the height or the tip is not
+    /// known.
+    fn below_payout_depth(&self, known_height: Option<u32>) -> bool {
+        let Some(height) = known_height else {
+            return false;
+        };
+        match self.chain_store_handle.get_candidate_tip_height() {
+            Ok(Some(tip_height)) => !self.depths.is_within_payout_depth(height, tip_height),
+            Ok(None) | Err(_) => false,
+        }
+    }
+
     /// Whether the block's parent and uncles have the data validation needs.
     ///
     /// Each must have its block body stored, not merely its header.
@@ -677,6 +696,13 @@ impl BlockReceiver {
         let prune_height = self.current_prune_height();
         if known_height.is_some_and(|height| height < prune_height) {
             debug!("Dropping block {block_hash}: below prune height {prune_height}");
+            self.remove_from_pending(&block_hash);
+            return Ok(());
+        }
+        if share_block.pruned_weak_shares.is_some() && !self.below_payout_depth(known_height) {
+            debug!(
+                "Dropping block {block_hash}: its weak shares were pruned, and within the payout depth a body is stored only with them whole"
+            );
             self.remove_from_pending(&block_hash);
             return Ok(());
         }
