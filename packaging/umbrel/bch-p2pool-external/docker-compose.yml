@@ -42,3 +42,42 @@ services:
       - P2POOL_STRATUM__PORT=3341
       - P2POOL_NETWORK__LISTEN_ADDRESS=/ip4/0.0.0.0/tcp/6891
       - P2POOL_API__PORT=46884
+
+  # Prometheus and Grafana for this node, as upstream's app has them
+  # (p2poolv2/umbrel-app dbf8ae48), on the repository's Bitcoin Cash
+  # dashboards (prometheus/grafana, copied into grafana/ here). Grafana is
+  # published on 3343: anyone on the network sees the dashboards without a
+  # login, and the admin login is admin with this app's Umbrel password.
+  # Prometheus reads the node's /metrics, which needs no login here.
+  prometheus:
+    # Pinned by version and digest, as docker/docker-compose.metrics.yml.
+    image: prom/prometheus:v3.15.1@sha256:fa3302279710be2f21a8301ec17a8b4f2301fd829bd113839b3b6b02b6f191a2
+    user: "1000:1000"
+    restart: on-failure
+    volumes:
+      - ${APP_DATA_DIR}/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ${APP_DATA_DIR}/data/prometheus:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+
+  grafana:
+    # Pinned by version and digest; the dashboards were made on Grafana 12.
+    image: grafana/grafana:12.4.13@sha256:41bbc1b5e04416f81891806076db2a2ff60a5d4da5f78d36a88b033a8c199185
+    user: "1000:1000"
+    restart: on-failure
+    depends_on:
+      - prometheus
+    ports:
+      - "3343:3000"
+    volumes:
+      - ${APP_DATA_DIR}/data/grafana:/var/lib/grafana
+      - ${APP_DATA_DIR}/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ${APP_DATA_DIR}/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=${APP_PASSWORD}
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
+      - GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH=/var/lib/grafana/dashboards/pool-provision.json
