@@ -839,10 +839,11 @@ fn the_safa_covenants_lock_height_opens_after_the_coinbases_block() {
     let chipnet = TickSchedule::for_network(BitcoinCashNetwork::Chipnet);
     let parameters = p2poolv2_safa::network_parameters("chipnet").unwrap();
     let library = p2poolv2_safa::compile_library("chipnet", "").unwrap();
-    let lock_in_vm = |height: u32| {
+    // Function `function` of the covenant on a height, in the VM.
+    let in_vm = |function: u64, height: u32| {
         let stack = p2poolv2_safa::evaluate_function(
             &library,
-            21,
+            function,
             &[libauth::big_int_to_vm_number(
                 &p2poolv2_safa::BigInt::from_u64(u64::from(height)),
             )],
@@ -851,14 +852,25 @@ fn the_safa_covenants_lock_height_opens_after_the_coinbases_block() {
         libauth::vm_number_to_big_int(stack.last().unwrap(), None, Some(true))
             .unwrap()
             .to_u64()
-            .unwrap() as u32
+            .unwrap()
     };
+    let lock_in_vm = |height: u32| in_vm(21, height) as u32;
+    // The covenant's own ticks (Function 22), which its band, lock height
+    // and easing count, are the schedule's.
+    for height in [0, 1, 16_844, 332_449, 332_450, 332_451, 332_460, 432_451] {
+        assert_eq!(
+            in_vm(22, height) as i64,
+            chipnet.ticks(height),
+            "height {height}"
+        );
+    }
     let mut waits_after_the_switch = std::collections::BTreeSet::new();
     for height in (332_430..=332_490).chain([333_800, 340_000, 432_451]) {
         let lock = lock_in_vm(height);
         assert_eq!(lock, parameters.lock_height(height), "height {height}");
         // The block's ticks in 600-tick units, rounded up.
         let ticks = chipnet.ticks(height);
+        assert_eq!(in_vm(22, height) as i64, ticks, "height {height}");
         assert_eq!(ticks, parameters.ticks(height) as i64, "height {height}");
         assert!(
             i64::from(lock) * BCH_BLOCK_SPACING >= ticks,

@@ -540,9 +540,11 @@ pub fn raw_claim(
         ref_bits: block_bits(),
     })
     .unwrap();
-    let target_bits =
-        safa::claim_target_bits(0x2000_ffff, height.saturating_sub(state_height).max(1), 4)
-            .unwrap();
+    // The ticks the covenant eases by; a refused height above or at the
+    // state's gets one ten-minute block's.
+    let chipnet = safa::network_parameters("chipnet").unwrap();
+    let tick_delta = chipnet.tick_delta(state_height, height).unwrap_or(600);
+    let target_bits = safa::claim_target_bits(0x2000_ffff, tick_delta, 4).unwrap();
     let mut wire_category = category();
     wire_category.reverse();
     let leaf = Leaf {

@@ -205,6 +205,7 @@ pub(crate) fn leaf(covenant: &Covenant, deployment: &Value, job: &Value) -> Resu
         "ext": hex::encode(info.leaf.ext),
         "split_preimage": hex::encode(info.preimage),
         "height_delta": info.height_delta,
+        "tick_delta": info.tick_delta,
     }))
 }
 

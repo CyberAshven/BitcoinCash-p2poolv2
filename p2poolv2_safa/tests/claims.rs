@@ -476,36 +476,61 @@ chipnet_claim!(
     true
 );
 // The covenant deployed on chipnet on 2026-10-29 counts every block as ten
-// minutes and locks a claim to its coinbase's block height. Locked to that
-// height, it takes a claim on the last ten-minute block and on a
-// minimum-difficulty block after it, and refuses one on blocks 332,452 and
-// 332,460, whose nBits it finds more than eight times too easy.
-chipnet_claim!(
+// minutes: it locks a claim to its coinbase's block height and eases the
+// target by the blocks since the state. With the lock and leaf it expects,
+// it takes a claim on the last ten-minute block and on a minimum-difficulty
+// block after it, and refuses one on blocks 332,452 and 332,460, whose
+// nBits it finds more than eight times too easy: the band is the only
+// check those claims fail.
+macro_rules! deployed_claim {
+    ($name:ident,$height:expr,$accepted:expr) => {
+        #[test]
+        fn $name() {
+            let options = chipnet_block_claim(deployed_covenant(), $height);
+            // Ten blocks since the state, each eased as a ten-minute block,
+            // in the leaf and in the next state.
+            let blocks = $height - options.state.height;
+            let target_bits = safa::claim_target_bits(
+                options.state.target_bits,
+                600 * u64::from(blocks),
+                options.covenant.threads,
+            )
+            .unwrap();
+            let options = ScenarioOptions {
+                locktime: Some($height),
+                leaf_target_bits: Some(target_bits),
+                ..options
+            };
+            let mut claim = scenario(options).unwrap().claim;
+            let mut next_state = claim.plan.next_state.clone();
+            next_state[8..12].copy_from_slice(&target_bits.to_le_bytes());
+            *commitment_mut(&mut claim.transaction.outputs[0]) = next_state;
+            if $accepted {
+                accepts(&claim);
+            } else {
+                refuses(&claim);
+            }
+        }
+    };
+}
+deployed_claim!(
     deployed_covenant_takes_a_claim_on_the_last_ten_minute_block,
-    deployed_covenant(),
     332_450,
-    Some(332_450),
     true
 );
-chipnet_claim!(
+deployed_claim!(
     deployed_covenant_takes_a_minimum_difficulty_claim_after_the_switch,
-    deployed_covenant(),
     332_451,
-    Some(332_451),
     true
 );
-chipnet_claim!(
+deployed_claim!(
     deployed_covenant_refuses_a_claim_on_the_first_asert_one_minute_block,
-    deployed_covenant(),
     332_452,
-    Some(332_452),
     false
 );
-chipnet_claim!(
+deployed_claim!(
     deployed_covenant_refuses_a_claim_on_a_later_one_minute_block,
-    deployed_covenant(),
     332_460,
-    Some(332_460),
     false
 );
 /// A claim is locked to its coinbase block's ticks in the 600-tick units of
@@ -923,6 +948,125 @@ easing_case!(target_eases_after_four, 4u32);
 easing_case!(target_eases_after_100, 100u32);
 easing_case!(target_eases_after_288, 288u32);
 easing_case!(target_easing_caps_at_288, 5000u32);
+/// A claim on a chipnet header at `height`, dated a minute a block from
+/// block 332,460 and carrying the nBits ASERT gives it there, on a state at
+/// `state_height`.
+fn one_minute_claim(state_height: u32, height: u32) -> ScenarioOptions {
+    let (_, time_332_460, _) = CHIPNET_AROUND_ACTIVATION[21];
+    let time = (i64::from(time_332_460) + 60 * (i64::from(height) - 332_460)) as u32;
+    let bits = safa::get_compact(
+        &safa::asert_target("chipnet", height, time)
+            .unwrap()
+            .unwrap(),
+    );
+    let mut options = ScenarioOptions {
+        height,
+        time,
+        bits,
+        ..Default::default()
+    };
+    options.state.height = state_height;
+    options
+}
+/// After chipnet's switch the target eases by the ticks since the state's
+/// block, 60 a block, with the cap at 288 ten-minute blocks' worth (172,800
+/// ticks): a claim a minute after the last eases by a tenth of what one ten
+/// minutes after it does, and the target holds still at one claim per
+/// `threads x 600` ticks, as it did at one per `threads` ten-minute blocks.
+macro_rules! easing_after_switch {
+    ($name:ident,$state_height:expr,$height:expr,$ticks:expr) => {
+        #[test]
+        fn $name() {
+            let chipnet = safa::network_parameters("chipnet").unwrap();
+            assert_eq!(chipnet.tick_delta($state_height, $height), Some($ticks));
+            let mut options = one_minute_claim($state_height, $height);
+            options.state.target_bits = 0x1f00_ffff;
+            let scenario = scenario(options).unwrap();
+            accepts(&scenario.claim);
+            let ticks: u64 = $ticks;
+            let factor = number((ticks.min(172_800) * 5000 / (4 * 600) + 5000) as i64);
+            let expected = safa::expand_token_target(0x1f00_ffff)
+                .unwrap()
+                .mul(&factor)
+                .div_mod(&number(10000))
+                .0;
+            assert_eq!(
+                scenario.claim.plan.target_bits,
+                safa::encode_token_target(&expected).unwrap()
+            );
+        }
+    };
+}
+easing_after_switch!(target_eases_one_minute_block_after, 332_450, 332_451, 60);
+easing_after_switch!(
+    target_eases_ten_one_minute_blocks_after,
+    332_450,
+    332_460,
+    600
+);
+easing_after_switch!(
+    target_holds_after_threads_times_600_ticks,
+    332_450,
+    332_490,
+    2_400
+);
+easing_after_switch!(
+    target_eases_across_the_switch,
+    332_440,
+    332_460,
+    10 * 600 + 10 * 60
+);
+easing_after_switch!(
+    target_easing_caps_at_172800_ticks,
+    332_450,
+    335_330,
+    172_800
+);
+easing_after_switch!(
+    target_easing_cap_holds_far_after,
+    332_450,
+    340_000,
+    7_550 * 60
+);
+/// A leaf eased by blocks instead of ticks, as the covenant did before, is
+/// refused: one one-minute block is not a ten-minute block's easing.
+#[test]
+fn leaf_eased_by_blocks_after_the_switch_is_refused() {
+    let mut options = one_minute_claim(332_450, 332_451);
+    options.leaf_target_bits = Some(safa::claim_target_bits(0x2000_ffff, 600, 4).unwrap());
+    assert_ne!(
+        options.leaf_target_bits,
+        Some(safa::claim_target_bits(0x2000_ffff, 60, 4).unwrap())
+    );
+    refuses(&scenario(options).unwrap().claim);
+}
+/// After chipnet's switch the fallback band opens 4,032 ten-minute blocks'
+/// worth of ticks after the state's block: 40,320 one-minute blocks, not
+/// 4,032 of them.
+macro_rules! fallback_after_switch {
+    ($name:ident,$height:expr,$accepted:expr) => {
+        #[test]
+        fn $name() {
+            let mut options = ScenarioOptions {
+                height: $height,
+                bits: 0x1b04_04cb,
+                ..Default::default()
+            };
+            options.state.height = 332_450;
+            options.state.ref_bits = 0x1b40_4cb0;
+            assert!(!safa::asert_band_ok("chipnet", 0x1b04_04cb, options.time, $height).unwrap());
+            let claim = scenario(options).unwrap().claim;
+            if $accepted {
+                accepts(&claim);
+            } else {
+                refuses(&claim);
+            }
+        }
+    };
+}
+fallback_after_switch!(fallback_opens_40320_one_minute_blocks_after, 372_770, true);
+fallback_after_switch!(fallback_closed_one_block_before, 372_769, false);
+fallback_after_switch!(fallback_closed_4032_one_minute_blocks_after, 336_482, false);
 #[test]
 fn leaf_cannot_claim_easier_target() {
     refuses(
@@ -992,7 +1136,7 @@ fn full_10000_byte_unlock_passes() {
     );
     // The largest coinbase a claim carries at the deepest branches.
     let proof = safa::decode_proof(&scenario.proof).unwrap();
-    assert_eq!(proof.head.len() + 53 + proof.tail.len(), 7110);
+    assert_eq!(proof.head.len() + 53 + proof.tail.len(), 7100);
     accepts(&scenario.claim);
 }
 #[test]
@@ -1007,7 +1151,7 @@ fn metrics_empty_branches() {
         ..Default::default()
     })
     .unwrap();
-    metrics(&scenario.claim, (1658, 126_521, 1_359_200, 41, 849));
+    metrics(&scenario.claim, (1668, 130_270, 1_367_200, 41, 854));
     assert!(scenario.covenant.redeem_script.len() < 1500);
 }
 #[test]
@@ -1020,7 +1164,7 @@ fn metrics_split() {
         })
         .unwrap()
         .claim,
-        (1792, 140_812, 1_466_400, 54, 916),
+        (1802, 144_561, 1_474_400, 54, 921),
     );
 }
 #[test]
@@ -1034,7 +1178,7 @@ fn metrics_deepest() {
         })
         .unwrap()
         .claim,
-        (3040, 262_415, 2_464_800, 154, 1540),
+        (3050, 266_164, 2_472_800, 154, 1545),
     );
 }
 #[test]
@@ -1050,13 +1194,13 @@ fn metrics_deepest_fallback() {
     options.state.ref_bits = 0x1b04_04cb;
     metrics(
         &scenario(options).unwrap().claim,
-        (3040, 272_024, 2_464_800, 154, 1540),
+        (3050, 275_774, 2_472_800, 154, 1545),
     );
 }
 #[test]
 fn metrics_full_unlock() {
     metrics(
         &full_unlock(10000).unwrap().claim,
-        (10000, 373_824, 8_032_800, 263, 5020),
+        (10000, 377_444, 8_032_800, 263, 5020),
     );
 }

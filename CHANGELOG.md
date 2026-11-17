@@ -94,15 +94,25 @@ switch at median time past 1810382400 (2027-05-15 12:00 UTC), as in BCHN.
   blocks after it. The claim builder sets it and the claimer tries a win
   once it is final in the next block. P2Pool's tests check the covenant's
   lock heights against `TickSchedule::first_block_after_lock_height`.
-- The covenant's bytes changed with both (chipnet: a 1,427-byte redeem
-  script, K 2,007, another address). The tSAFA deployment made on chipnet
-  on 2026-10-29 keeps the earlier covenant, which since block 332,451
-  accepts only minimum-difficulty blocks; chipnet needs a new deployment,
-  and the fixtures recorded from the old one are replayed against its
-  recorded bytes until then (`p2poolv2_safa/README.md`).
-- Open before any token deployment: the token's rules counted in blocks
-  (easing, fallback, one claim per thread per block) run ten times faster
-  on one-minute blocks and are not changed here. Mainnet's activation block is not pinned yet, in the
+- The covenant's claim target eases by the ticks since the thread's state,
+  not the blocks: `min(dt, 288 x 600) * 5000 / (threads x 600)`, and the
+  fallback band opens 4,032 x 600 ticks after it. Counted in blocks, a
+  one-minute block eased the target as much as a ten-minute one, so claims
+  and the token's emission ran ten times faster in wall time and the
+  fallback opened after under three days instead of four weeks. On
+  ten-minute blocks every target is the same as before. Node-local: a
+  token job's SAFA leaf target eases the same way, counted by the
+  network's pins (`TokenSet::at_height`), and P2Pool's tests compare it
+  with `p2poolv2_safa`'s over every thread count and with the covenant's
+  leaf after chipnet's switch. A thread still takes one claim per block,
+  so a height is never claimed twice.
+- The covenant's bytes changed with all three (chipnet: a 1,437-byte
+  redeem script, K 2,017, another address). The tSAFA deployment made on
+  chipnet on 2026-10-29 keeps the earlier covenant, which since block
+  332,451 accepts only minimum-difficulty blocks; chipnet needs a new
+  deployment, and the fixtures recorded from the old one are replayed
+  against its recorded bytes until then (`p2poolv2_safa/README.md`).
+- Open before any token deployment: Mainnet's activation block is not pinned yet, in the
   gate or the covenant, so until a release pins it the header gate refuses
   mainnet token shares after the switch. Pinning it changes the gate's
   verdicts, so it is a share-chain rule change of its own, with a new

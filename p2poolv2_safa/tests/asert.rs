@@ -640,19 +640,20 @@ fn fallback_band_edges_and_height_gate() {
         ),
         number(0)
     );
-    assert!(safa::fallback_band_ok(
-        safa::get_compact(&hard),
-        0x1804_dafe,
-        4032
-    ));
-    assert!(!safa::fallback_band_ok(
-        safa::get_compact(&hard),
-        0x1804_dafe,
-        4031
-    ));
-    assert!(safa::fallback_band_ok(
-        safa::get_compact(&hard),
-        0x1804_dafe,
-        100000
-    ));
+    // From 4,032 ten-minute blocks' worth of ticks: 4,032 ten-minute blocks,
+    // or 40,320 one-minute ones.
+    for (tick_delta, applies) in [
+        (4_032 * 600, true),
+        (4_031 * 600, false),
+        (40_320 * 60, true),
+        (40_319 * 60, false),
+        (4_032 * 60, false),
+        (100_000 * 600, true),
+    ] {
+        assert_eq!(
+            safa::fallback_band_ok(safa::get_compact(&hard), 0x1804_dafe, tick_delta),
+            applies,
+            "{tick_delta} ticks"
+        );
+    }
 }

@@ -7,7 +7,7 @@
 use libauth::big_int_to_vm_number;
 
 use crate::{
-    BCH_BLOCK_SPACING, BigInt, EASE_CAP, FALLBACK_DELTA, MAX_THREADS, NetworkParameters,
+    BCH_BLOCK_SPACING, BigInt, EASE_CAP_TICKS, FALLBACK_TICKS, MAX_THREADS, NetworkParameters,
     network_parameters,
 };
 
@@ -221,10 +221,12 @@ pub fn asert_band_ok_for(
             .is_gt())
 }
 
-/// Check the fallback band after at least 4,032 blocks without a claim.
-pub fn fallback_band_ok(bits: u32, reference_bits: u32, height_delta: u32) -> bool {
+/// Check the fallback band once a claim is at least [`FALLBACK_TICKS`] (4,032
+/// ten-minute blocks' worth) after the state's block, `tick_delta` being the
+/// ticks between them ([`NetworkParameters::tick_delta`]).
+pub fn fallback_band_ok(bits: u32, reference_bits: u32, tick_delta: u64) -> bool {
     match (decode_header_bits(bits), decode_header_bits(reference_bits)) {
-        (Some(target), Some(reference)) if height_delta >= FALLBACK_DELTA => {
+        (Some(target), Some(reference)) if tick_delta >= FALLBACK_TICKS => {
             !target.cmp(&reference.shr(4)).is_lt()
                 && !target
                     .mul(&BigInt::from_u64(10))
@@ -235,14 +237,21 @@ pub fn fallback_band_ok(bits: u32, reference_bits: u32, height_delta: u32) -> bo
     }
 }
 
-/// Ease a thread's target by min(height_delta, 288) / threads.
-pub fn claim_target_bits(state_bits: u32, height_delta: u32, threads: u32) -> Result<u32, String> {
+/// Ease a thread's target by the ticks since its state, `tick_delta`
+/// ([`NetworkParameters::tick_delta`]): `target * (min(tick_delta, 288 *
+/// 600) * 5000 / (threads * 600) + 5000) / 10000`, each division floored.
+/// While blocks are ten minutes `tick_delta` is 600 a block and this is
+/// `min(dh, 288) * 5000 / threads`, the SAFA draft's rule; on one-minute
+/// blocks a claim eases by the same amount per minute of chain time.
+pub fn claim_target_bits(state_bits: u32, tick_delta: u64, threads: u32) -> Result<u32, String> {
     if !(1..=MAX_THREADS).contains(&threads) {
         return Err(format!(
             "threads must be an integer from 1 to {MAX_THREADS}"
         ));
     }
-    let factor = u64::from(height_delta.min(EASE_CAP)) * 5_000 / u64::from(threads) + 5_000;
+    let factor = tick_delta.min(EASE_CAP_TICKS) * 5_000
+        / (u64::from(threads) * u64::from(BCH_BLOCK_SPACING))
+        + 5_000;
     let target = expand_token_target(state_bits)?
         .mul(&BigInt::from_u64(factor))
         .div_mod(&BigInt::from_u64(10_000))

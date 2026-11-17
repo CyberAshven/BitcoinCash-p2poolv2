@@ -268,15 +268,18 @@ tallest tree its covenant accepts (16 when left out).
 A SAFA vault gives its thread instead of `state_hash` and `target_bits`:
 `"safa": {"threads": 63, "state": "<16-byte NFT commitment in hex>"}`.
 The SAFA covenant rebuilds a claim's leaf with the state's target eased by
-the blocks since the state (`min(dh, 288) / threads`), so a fixed target
-would only match a claim 288 blocks after the last. The node therefore
-computes each job's leaf from the thread, at the job's coinbase height:
-`state_hash` is `HASH256` of the state and `target_bits` is the SAFA
-tool's `claim_target_bits` (`p2poolv2_safa`), integer for integer
-(`safa_claim_target_bits`; tests compare the two over every thread count
-and pin vectors printed by the former Node tool's `claimTargetBits` and
-`claimLeaf`). A template at or below the state's height is mined without
-tokens.
+the ticks since the state's block (`min(dt, 288 x 600) / (threads x 600)`,
+CHIP-2025-03's ticks by the network's pinned switch; on ten-minute blocks
+`min(dh, 288) / threads`), so a fixed target would only match a claim 288
+ten-minute blocks' worth after the last. The node therefore computes each
+job's leaf from the thread, at the job's coinbase height: `state_hash` is
+`HASH256` of the state and `target_bits` is the SAFA tool's
+`claim_target_bits` (`p2poolv2_safa`), integer for integer
+(`safa_claim_target_bits`, counting ticks with the network's
+`TickSchedule` pins; tests compare the two over every thread count, pin
+vectors printed by the former Node tool's `claimTargetBits`, and match the
+tool's leaf after chipnet's switch). A template at or below the state's
+height is mined without tokens.
 
 At most 16 tokens,
 one per category; the set must fit one tree no taller than the lowest
@@ -466,7 +469,8 @@ claim's payout and target, and the split's `ext`), folds both branches,
 checks the header's work against the token's target and its nBits against
 ASERT at the coinbase's BIP34 height (the corrected band above, counted in
 CHIP-2025-03's ticks from the same pinned switch as the header gate, with
-a fallback after 4,032 blocks without a claim), binds that height with
+a fallback after 4,032 ten-minute blocks' worth of ticks without a claim),
+eases the token's target by the ticks since the last claim, binds that height with
 `OP_CHECKLOCKTIMEVERIFY` on the block's lock height (its ticks in 600-tick
 units, rounded up), and pays the split to scripts of at most 35
 bytes. The vault is the claim's only input: it pays the fee from its own
@@ -478,9 +482,11 @@ prepared but not deployed. The v1 variant passed a real regtest withdrawal
 on 2026-10-16; the v2 covenant has not yet run against BCHN.
 
 Deployment compilation and the genesis CLI accept only 2 to 63 threads.
-With one thread a claim's age is at least one block, so the easing factor
-is never below 1 and the target can never harden; two threads are the
-fewest that harden it (×0.75 for back-to-back claims).
+With one thread on ten-minute blocks a claim's age is at least one block,
+600 ticks, so the easing factor is never below 1 and the target can never
+harden; two threads are the fewest that harden it (×0.75 for back-to-back
+claims, ×0.525 for claims a one-minute block apart; on one-minute blocks one
+thread would harden it too, ×0.55, but two stays the minimum).
 At 288 or more, the age cap prevents the target from ever easing above its
 previous value. The stricter bound preserves room to recover before that
 cap. Both fixes must precede genesis because the deployed covenant is

@@ -127,10 +127,9 @@
 // standing in for its parent's: computed / HARD_DIVISOR <= target <=
 // computed * EASY_NUMERATOR / EASY_DENOMINATOR: mainnet /2 to x1.05,
 // test networks /8 to x8, or (test networks) nBits exactly powLimit's.
-// The parent's ticks and the header's interval follow the pinned switch, as
-// P2Pool's header gate counts them: a block has 600 ticks up to
-// SWITCH_HEIGHT and SWITCH_INTERVAL after it, and the header's interval is
-// SWITCH_INTERVAL once its parent is at SWITCH_HEIGHT or above. A network
+// The parent's ticks (Function 22) and the header's interval follow the
+// pinned switch, as P2Pool's header gate counts them: the header's interval
+// is SWITCH_INTERVAL once its parent is at SWITCH_HEIGHT or above. A network
 // without a pinned switch has SWITCH_INTERVAL 600.
 // [nbits4 time4 height] -> [ok]
 <
@@ -144,11 +143,10 @@
         <{{ANCHOR_TARGET}}> OP_SWAP
         <3> OP_ROLL
         // target reference time_diff height: the parent's ticks from the anchor's.
-        OP_1SUB OP_DUP <{{SWITCH_HEIGHT}}> OP_MIN
-        OP_TUCK OP_SUB <{{SWITCH_INTERVAL}}> OP_MUL
-        OP_OVER <{{ANCHOR_HEIGHT}}> OP_SUB <{{ANCHOR_INTERVAL}}> OP_MUL OP_ADD
+        OP_1SUB OP_DUP <22> OP_INVOKE <{{ANCHOR_TICKS}}> OP_SUB
         OP_DUP OP_0 OP_GREATERTHANOREQUAL OP_VERIFY
-        OP_SWAP <{{SWITCH_HEIGHT}}> OP_NUMEQUAL
+        // ... parent tick_delta: the header's interval.
+        OP_SWAP <{{SWITCH_HEIGHT}}> OP_GREATERTHANOREQUAL
         OP_IF <{{SWITCH_INTERVAL}}> OP_ELSE <{{ANCHOR_INTERVAL}}> OP_ENDIF
         <{{HALF_LIFE}}> <{{ANCHOR_INTERVAL}}> OP_ROT
         <6> OP_INVOKE
@@ -158,8 +156,9 @@
 > <7> OP_DEFINE
 
 // Function 8: the DAA-change fallback band around the state's reference,
-// ref >> 4 <= target <= ref * 1.1. It applies only from dh = 4,032, where
-// min(dh / 288, 4) is always 4.
+// ref >> 4 <= target <= ref * 1.1. It applies only once the claim is
+// 4,032 x 600 ticks after the state's block, where min(ticks / (288 x 600), 4)
+// is always 4.
 // [nbits4 ref_bits4] -> [ok]
 <
     <5> OP_INVOKE
@@ -316,18 +315,25 @@
 // Function 21: the lock height of a claim on a coinbase at a block height.
 // CHIP-2025-03 counts a lock height in units of 600 ticks: a transaction
 // locked to L is final in the first block whose ticks pass 600 * L. This is
-// the coinbase block's ticks in those units, rounded up, by the pinned
-// switch: the block height itself up to SWITCH_HEIGHT, and one unit for
-// every 600 / SWITCH_INTERVAL blocks after it. The claim is then never final
-// in the coinbase's own block or before it, and is final at most
+// the coinbase block's ticks (Function 22) in those units, rounded up: the
+// block height itself up to SWITCH_HEIGHT, and one unit for every
+// 600 / SWITCH_INTERVAL blocks after it. The claim is then never final in
+// the coinbase's own block or before it, and is final at most
 // 600 / SWITCH_INTERVAL blocks after it.
 // [height] -> [lock_height]
 <
+    <22> OP_INVOKE <599> OP_ADD <600> OP_DIV
+> <21> OP_DEFINE
+
+// Function 22: a block's ticks by the pinned switch (CHIP-2025-03), the sum
+// of the target intervals of the blocks up to it: 600 for each block up to
+// SWITCH_HEIGHT, then SWITCH_INTERVAL for each block after it.
+// [height] -> [ticks]
+<
     OP_DUP <{{SWITCH_HEIGHT}}> OP_MIN
     OP_TUCK OP_SUB <{{SWITCH_INTERVAL}}> OP_MUL
-    <599> OP_ADD <600> OP_DIV
-    OP_ADD
-> <21> OP_DEFINE
+    OP_SWAP <{{ANCHOR_INTERVAL}}> OP_MUL OP_ADD
+> <22> OP_DEFINE
 
 // == main ==
 // Every spend returns the vault: the same locking bytecode, category and
@@ -355,14 +361,17 @@ OP_ELSE
     // ... H: the claim is locked to its coinbase block's ticks.
     OP_DUP <21> OP_INVOKE OP_CHECKLOCKTIMEVERIFY OP_DROP
     OP_0 OP_UTXOTOKENCOMMITMENT <4> OP_SPLIT OP_NIP <4> OP_SPLIT OP_DROP <0x00> OP_CAT OP_BIN2NUM
-    OP_OVER OP_SWAP OP_SUB
-    OP_DUP OP_0 OP_GREATERTHAN OP_VERIFY
-    // ... H dh: the claim target eases by min(dh, 288) / threads.
-    OP_DUP <288> OP_MIN <5000> OP_MUL <{{THREADS}}> OP_DIV <5000> OP_ADD
+    // ... H state_height: a height is never claimed twice, and dt is the
+    // ticks from the state's block to the coinbase's.
+    OP_2DUP OP_GREATERTHAN OP_VERIFY
+    <22> OP_INVOKE OP_OVER <22> OP_INVOKE OP_SWAP OP_SUB
+    // ... H dt: the claim target eases by min(dt, 288 x 600) / (threads x 600),
+    // 288 ten-minute blocks' worth of ticks at most.
+    OP_DUP <172800> OP_MIN <5000> OP_MUL <{{THREAD_TICKS}}> OP_DIV <5000> OP_ADD
     OP_0 OP_UTXOTOKENCOMMITMENT <8> OP_SPLIT OP_NIP <4> OP_SPLIT OP_DROP <3> OP_INVOKE
     OP_MUL <10000> OP_DIV OP_1 OP_MAX <{{MAX_TOKEN_TARGET}}> OP_MIN
     <4> OP_INVOKE
-    // ... H dh bits: rebuild the leaf from introspection.
+    // ... H dt bits: rebuild the leaf from introspection.
     <11> OP_PICK <15> OP_INVOKE OP_2DROP OP_2DROP
     OP_0 OP_UTXOTOKENCATEGORY <32> OP_SPLIT OP_DROP
     OP_0 OP_UTXOBYTECODE OP_HASH256
@@ -375,7 +384,7 @@ OP_ELSE
     <8> OP_ROLL <10> OP_INVOKE
     <8> OP_ROLL <8> OP_ROLL <11> OP_INVOKE
     <6> OP_ROLL OP_SWAP <6> OP_ROLL <6> OP_ROLL <12> OP_INVOKE
-    // split payout header H dh bits merkle
+    // split payout header H dt bits merkle
     <4> OP_PICK <36> OP_SPLIT OP_NIP <32> OP_SPLIT OP_DROP OP_EQUALVERIFY
     OP_3 OP_PICK OP_OVER <3> OP_INVOKE <13> OP_INVOKE
     // BCH only: the header's nBits in the ASERT band, or the fallback band.
@@ -384,7 +393,8 @@ OP_ELSE
     <4> OP_PICK
     <7> OP_INVOKE
     OP_NOTIF
-        OP_OVER <4032> OP_GREATERTHANOREQUAL OP_VERIFY
+        // 4,032 ten-minute blocks' worth of ticks since the state's block.
+        OP_OVER <2419200> OP_GREATERTHANOREQUAL OP_VERIFY
         OP_3 OP_PICK <72> OP_SPLIT OP_NIP OP_4 OP_SPLIT OP_DROP
         OP_0 OP_UTXOTOKENCOMMITMENT <12> OP_SPLIT OP_NIP
         <8> OP_INVOKE OP_VERIFY

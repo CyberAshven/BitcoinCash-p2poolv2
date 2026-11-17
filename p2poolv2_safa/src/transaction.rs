@@ -45,6 +45,9 @@ pub struct Outpoint {
 pub struct ClaimLeaf {
     pub state: State,
     pub height_delta: u32,
+    /// The ticks from the state's block to the coinbase's, by the pinned
+    /// switch: what the target eases by.
+    pub tick_delta: u64,
     pub target_bits: u32,
     pub preimage: Vec<u8>,
     pub payout_hash: Vec<u8>,
@@ -78,7 +81,10 @@ pub fn claim_leaf(
         );
     }
     let height_delta = height - state.height;
-    let target_bits = claim_target_bits(state.target_bits, height_delta, covenant.threads)?;
+    let tick_delta = network_parameters(&covenant.network)?
+        .tick_delta(state.height, height)
+        .ok_or("the coinbase is not newer than the thread state")?;
+    let target_bits = claim_target_bits(state.target_bits, tick_delta, covenant.threads)?;
     let preimage = match split {
         None => Vec::with_capacity(0),
         Some(split) => split_preimage(&SplitCommitment {
@@ -109,6 +115,7 @@ pub fn claim_leaf(
     Ok(ClaimLeaf {
         state,
         height_delta,
+        tick_delta,
         target_bits,
         preimage,
         payout_hash,

@@ -66,9 +66,9 @@ impl NetworkParameters {
         })
     }
 
-    /// The ticks of the block at `height` by the pinned switch: 600 for each
-    /// block up to the switch block, then the switch's interval for each
-    /// block after it.
+    /// The ticks of the block at `height` by the pinned switch, as the
+    /// covenant counts them (Function 22): 600 for each block up to the
+    /// switch block, then the switch's interval for each block after it.
     pub fn ticks(&self, height: u32) -> u64 {
         let switch = self.switch_constants();
         let before_switch = height.min(switch.height);
@@ -85,12 +85,14 @@ impl NetworkParameters {
     /// never final in the coinbase's own block or before it, and is final at
     /// most `600 / interval` blocks after it.
     pub fn lock_height(&self, height: u32) -> u32 {
-        let switch = self.switch_constants();
-        let before_switch = height.min(switch.height);
-        let ticks_after = u64::from(switch.interval) * u64::from(height - before_switch);
-        before_switch.saturating_add(
-            u32::try_from(ticks_after.div_ceil(u64::from(BCH_BLOCK_SPACING))).unwrap_or(u32::MAX),
-        )
+        u32::try_from(self.ticks(height).div_ceil(u64::from(BCH_BLOCK_SPACING))).unwrap_or(u32::MAX)
+    }
+
+    /// The ticks from the block at `state_height` to the one at `height`, as
+    /// a claim's easing and fallback count them. `None` unless `height` is
+    /// above `state_height`: a height is never claimed twice.
+    pub fn tick_delta(&self, state_height: u32, height: u32) -> Option<u64> {
+        (height > state_height).then(|| self.ticks(height) - self.ticks(state_height))
     }
 
     /// The highest coinbase height whose claim can be mined in the block
@@ -211,7 +213,10 @@ fn library_source(parameters: &NetworkParameters) -> Result<String, String> {
                 "ALLOW_POW_LIMIT",
                 u8::from(parameters.allow_pow_limit).to_string(),
             ),
-            ("ANCHOR_HEIGHT", parameters.anchor_height.to_string()),
+            (
+                "ANCHOR_TICKS",
+                (u64::from(parameters.anchor_height) * u64::from(BCH_BLOCK_SPACING)).to_string(),
+            ),
             (
                 "ANCHOR_PARENT_TIME",
                 parameters.anchor_parent_time.to_string(),
@@ -323,7 +328,11 @@ pub fn create_covenant(network: &str, threads: u32, virtual_sats: u64) -> Result
             main,
             &[
                 ("FEE_K", fee_k.to_string()),
-                ("THREADS", threads.to_string()),
+                // The easing divides by threads x 600 ticks (`claim_target_bits`).
+                (
+                    "THREAD_TICKS",
+                    (u64::from(threads) * u64::from(BCH_BLOCK_SPACING)).to_string(),
+                ),
                 ("VIRTUAL_SATS", virtual_sats.to_string()),
                 ("MAX_TOKEN_TARGET", max_token_target().to_string()),
             ],
