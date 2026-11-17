@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Share-chain rule change on Bitcoin Cash, a flag day: P2Pool follows Bitcoin
 Cash's one-minute blocks (CHIP-2025-03) the way BCHN does (protocol
 segments `bch-prev-1off-ticks` and `mm2-roots-asert8-ticks`, store format
-10). Nodes start from fresh stores: delete the share-chain store directory
+12). Nodes start from fresh stores: delete the share-chain store directory
 and restart. Chipnet activated one-minute blocks on 2026-11-15; block
 332,450 is its last ten-minute block. Mainnet, testnet, scalenet and regtest
 switch at median time past 1810382400 (2027-05-15 12:00 UTC), as in BCHN.
@@ -113,6 +113,72 @@ switch at median time past 1810382400 (2027-05-15 12:00 UTC), as in BCHN.
 The CHIP's ASERT and tick vectors pass, and real chipnet headers 332,429 to
 332,460 fed through the header path get the ticks and next intervals Knuth
 reports and require each block's real nBits.
+
+Whole weak shares are pruned one payout depth below the tip (#129, on #118's
+flag day): protocol segment `weak4-640-100-48-256-320-64-4096-64-32-summary`,
+store format 11. The weak root commits the weak shares' summary, so a deeper
+body is served with the summary and checked against the header; a node keeps
+4.3 GB of weak shares instead of 7.4 at 32 a share.
+`store.keep_whole_weak_shares = true` keeps them whole, for an archive.
+
+A syncing Bitcoin Cash node no longer marks an honest share invalid over a
+weak share paid from shares it never fetched: the body prune depth adds
+`WEAK_DEPTH` (242,174 shares, 414 in the sim). No share-chain rule change.
+
+Weak shares follow the asks (#118, issue #79 part 6), a flag day: protocol
+segment `weak4-640-100-48-256-320-64-4096-64-32`, store format 10, new
+genesis shares. A share header counts the weak shares it carries that ask
+for an easier target (`weak_asking`); while more than one in 64 ask, the weak
+ratio rises (up to 4096) and a share may carry more than 64 of them (up to
+640). A new chain starts at a weak ratio of 32.
+
+Upstream P2Poolv2 is merged through fdbf85df (its 0.18.0 and two commits
+after it). A node now dials only the host names listed in `dial_peers`, never
+a `/dns` address learned from a peer, and checks `blocked_ips` after it
+resolves a name; a dial that fails later backs off by connection. A
+`d=` difficulty in the password is no longer overridden by the miner's own
+`mining.suggest_difficulty`, as Whatsminer firmware sends right after
+authorizing. Debug logs carry each notify and the address of a stratum
+timeout. Testnet5's new genesis is not taken, as testnet5 is not, and the
+fork stays at 0.0.1-alpha.
+
+A node can take its block templates from a Stratum V2 Template Provider
+behind Tor or I2P. `template_provider_proxy` names a SOCKS5 proxy, Tor's
+SOCKS port for a `.onion` provider or an I2P router's SOCKS proxy for a
+`.b32.i2p` one, and every connection to the provider, a redirected one
+included, goes through it. The provider's name goes to the proxy unresolved
+and nothing is dialed directly, also when the proxy fails. Each connection
+sends its own random SOCKS username, so Tor puts it on its own circuit. A
+provider behind a proxy has 20 seconds to accept a connection and 15 for
+each setup answer (an I2P name 90 and 45), where a direct one has 10 for
+each. A proxy needs the provider's authority key, and a `.onion` or `.i2p`
+address needs a proxy. The Job Declaration page says what a node behind an
+onion service must change: every miner then connects from this computer's
+own address, which the default `sv2_coinbase_only_from` lets declare
+Coinbase-Only jobs.
+
+Both Umbrel apps run Prometheus and Grafana beside the node, as upstream's
+Umbrel app does (`dbf8ae48`), on the repository's Bitcoin Cash dashboards.
+Grafana is on port 3342 (`bch-p2pool`) or 3343 (the external node app),
+open to view, with the admin password the app's Umbrel password. Both
+images are pinned by version and digest; a test keeps each app's copy of the
+dashboards equal to `prometheus/grafana`.
+
+The Umbrel apps' dashboards move from ports 46890 and 46891 to 36890 and
+36891. umbrelOS 2.0 keeps host ports 40000 to 49999 for Umbrel Machines'
+port forwards, and upstream's Umbrel app left 46884 for 36884 for the same
+reason; a test now keeps every app port out of that range. The nightly fuzz
+run also starts from upstream's shared corpus for the same decoder target
+(`p2poolv2/fuzz-corpus`). Upstream's website, docs and difficulty analysis
+repositories have nothing new to port.
+
+The terminal UI follows upstream's PDM through `b7d97c34` (2026-11-04). A
+System tab on P2Pool Status starts, stops and restarts the node when it
+runs as the systemd user service `p2poolv2@<instance>`, from PDM's unit,
+now in `p2poolv2_tui/systemd/user`, with its config at
+`~/.config/p2poolv2/config-<instance>.toml`; `systemctl` runs off the
+screen's thread, since a stop waits for the node to close its store. The
+colours come from PDM's theme, readable on light and dark terminals.
 
 The network and payout simulators model one-minute Bitcoin Cash blocks
 (CHIP-2025-03): a block every minute paying a tenth of a ten-minute block,

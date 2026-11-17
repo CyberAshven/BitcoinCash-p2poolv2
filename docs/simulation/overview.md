@@ -81,7 +81,7 @@ or no-ops in production builds (zero overhead). Key overrides:
   | `PAYOUT_DEPTH` (Bitcoin) | 127,008 | 100 |
   | `PRUNE_DEPTH` (Bitcoin) | 254,016 | 200 |
   | `BCH_PAYOUT_DEPTH` (Bitcoin Cash) | 121,063 | 183 |
-  | `BCH_PRUNE_DEPTH` (Bitcoin Cash) | 242,126 | 366 |
+  | `BCH_PRUNE_DEPTH` (Bitcoin Cash) | 242,174 | 414 |
   | `PRUNE_INTERVAL` | 360 | 20 |
   | window eviction buffer | 1,210 | 51 |
   | `BACKGROUND_TASK_INTERVAL` (node) | 6 h | 30 s |
@@ -105,7 +105,7 @@ or no-ops in production builds (zero overhead). Key overrides:
   is paid only 100 shares deep, and a payout walk reaches 100 + 80 shares
   below the paying share, plus at most 3 for an uncle: the sim
   `BCH_PAYOUT_DEPTH`, 183, from which Bitcoin Cash's output expiry,
-  full-validation zone, reorg limit and prune depth (366) follow, as in
+  full-validation zone, reorg limit and prune depth (414) follow, as in
   production (since the share-chain rule batch of 2026-10-24; before it the
   Bitcoin Cash sim used Bitcoin's 100 and 200). The node logs the depths it
   uses (`Sim depths: ...`), and the prune scenarios read them from there.

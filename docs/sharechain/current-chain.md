@@ -207,7 +207,7 @@ Until 2026-11-15 a node learned the switch while running, from its own
 BCHN. Nodes learned it at different moments, or not at all, forgot it on
 restart, and kept it across a reorg onto a branch that switched elsewhere,
 so they could require different nBits of one header and split the share
-chain. The values now live in the store (format 10), and nodes on the old
+chain. The values now live in the store (format 12), and nodes on the old
 rule cannot peer.
 
 ## What it costs

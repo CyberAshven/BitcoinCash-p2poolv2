@@ -99,6 +99,7 @@ pub fn build(network: BchShareNetwork) -> Result<ShareBlock, Box<dyn Error + Sen
         payout_level: GENESIS_PAYOUT_LEVEL,
         weak_ratio: GENESIS_WEAK_RATIO,
         weak_count: 0,
+        weak_asking: 0,
         weak_root: empty_weak_root(),
     };
     let bitcoin_coinbase = anchor
@@ -112,6 +113,7 @@ pub fn build(network: BchShareNetwork) -> Result<ShareBlock, Box<dyn Error + Sen
         template_merkle_branches: vec![],
         bitcoin_coinbase,
         weak_shares: Vec::new(),
+        pruned_weak_shares: None,
     })
 }
 
@@ -266,13 +268,16 @@ mod tests {
     /// its payout level (`accounting::payout::payout_levels`) and its weak
     /// ratio and weak shares (`shares::weak`), each of which changed every
     /// Bitcoin Cash genesis hash in a flag day. Pinned again on 2026-11-12:
-    /// the genesis weak ratio is `R_MAX`, which fell from 4096 to 256.
+    /// the genesis weak ratio is `R_MAX`, which fell from 4096 to 256. Pinned
+    /// again on 2026-11-15: the header gained `weak_asking`, how many of the
+    /// weak shares a share carries ask (`shares::weak`), none at genesis.
+    /// Pinned again on 2026-11-16: the genesis weak ratio is 32, not `R_MAX`.
     #[test]
     fn mainnet_mini_genesis_hash_is_pinned() {
         let genesis = build(BchShareNetwork::Mainnet).unwrap();
         assert_eq!(
             genesis.block_hash().to_string(),
-            "df703cef47857216d5bf1257ce357a57b72f02fa887842142f17f754f8932e6d"
+            "e51d6c0a6a7a83abcfcdbf08617c2f5c395fafde2e0fa24dd4a87accf72bd093"
         );
     }
 
@@ -281,7 +286,7 @@ mod tests {
         let genesis = build(BchShareNetwork::Chipnet).unwrap();
         assert_eq!(
             genesis.block_hash().to_string(),
-            "0962cfac33968f9cd9eba335b2c935fc934a419e226586ea1455f68eea7a90f2"
+            "ebfe6801d28d5b0222d99a38f1c133bbcc3019318ee02f60c289d05f8877f26e"
         );
     }
 
@@ -290,7 +295,7 @@ mod tests {
         let genesis = build(BchShareNetwork::Regtest).unwrap();
         assert_eq!(
             genesis.block_hash().to_string(),
-            "4471f7ad680fc0c740a86a19e33f27a3a581ea48822f992a1780efbea0a5611a"
+            "08a272275a0de2efd36299bcd94cfe60c7f0c34777483624cdfbdac575024c02"
         );
     }
 

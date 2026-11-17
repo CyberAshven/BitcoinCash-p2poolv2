@@ -231,6 +231,7 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
         Store::new(config.store.path.clone(), false)
             .unwrap()
             .with_chain(config.stratum.chain)
+            .with_whole_weak_shares_kept(config.store.keep_whole_weak_shares)
             .with_script_history(config.electrum.enabled)
             .unwrap(),
     );
