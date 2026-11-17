@@ -2110,7 +2110,10 @@ async fn a_winning_share_sends_its_miner_the_token_proof() {
         &hex::decode(proof.params[2].as_str().unwrap()).unwrap(),
     )
     .unwrap();
-    assert_eq!(aux_proof.verify(&tokens.entries[0].leaf, 16, None), Ok(()));
+    assert_eq!(
+        aux_proof.verify(&tokens.entries[0].leaf, 16, None, None),
+        Ok(())
+    );
     assert_eq!(
         proof.params[3],
         hex::encode(tokens.entries[0].split.preimage())

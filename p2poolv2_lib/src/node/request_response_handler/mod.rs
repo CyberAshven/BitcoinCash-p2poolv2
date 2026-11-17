@@ -12,6 +12,10 @@ use crate::node::SwarmSend;
 use crate::node::behaviour::request_response::RequestResponseEvent;
 use crate::node::messages::{GetData, InventoryMessage, Message};
 use crate::node::p2p_message_handlers::receivers::block_receiver::BlockReceiverHandle;
+use crate::node::p2p_message_handlers::receivers::share_without_payouts::{
+    CoinbaseRebuilder, RebuildCounts,
+};
+use crate::node::p2p_message_handlers::senders::share_block::ShareRelayBytes;
 use crate::node::request_sender::RequestSender;
 use crate::node::response_worker::{ResponseWorkerEvent, ResponseWorkerSender};
 use crate::node::validation_worker::ValidationSender;
@@ -27,6 +31,7 @@ use crate::shares::chain::chain_store_handle::ChainStoreHandle;
 use crate::shares::chain::chain_store_handle::ChainStoreHandle;
 use crate::shares::transaction_pool::ShareTransactionPool;
 use crate::shares::validation::ShareValidator;
+use crate::shares::weak_pool::WeakPool;
 use crate::utils::time_provider::SystemTimeProvider;
 use libp2p::PeerId;
 use libp2p::request_response::ResponseChannel;
@@ -71,12 +76,18 @@ pub struct RequestResponseHandler<C: Send + Sync> {
     inbound_failures_total: u64,
     /// Responses dropped on a full or closed worker queue, for P2P health metrics.
     responses_dropped_total: u64,
+    /// Share messages this node relayed and their bytes, for P2P health
+    /// metrics.
+    share_relay: ShareRelayBytes,
     /// Bitcoin Cash: the pool relayed share transactions go to. `None` on
     /// Bitcoin, which ignores them.
     share_transaction_pool: Option<ShareTransactionPool>,
     /// Bitcoin Cash P2Pool: where relayed weak shares go to be checked
     /// (`node::weak_share_worker`). `None` on Bitcoin and in Hydrapool mode.
     weak_share_tx: Option<WeakShareEventSender>,
+    /// Bitcoin Cash: what rebuilds the coinbase of a share relayed without
+    /// its payouts. `None` on Bitcoin.
+    coinbase_rebuilder: Option<CoinbaseRebuilder>,
 }
 
 /// Implementation of ResponseChannel<Message>, used in production.
@@ -110,9 +121,17 @@ impl RequestResponseHandler<ResponseChannel<Message>> {
             outbound_failures_total: 0,
             inbound_failures_total: 0,
             responses_dropped_total: 0,
+            share_relay: ShareRelayBytes::default(),
             share_transaction_pool,
             weak_share_tx: None,
+            coinbase_rebuilder: None,
         }
+    }
+
+    /// Rebuild the coinbases of shares peers relay without their payouts
+    /// with `coinbase_rebuilder`. Without it such a share is asked for whole.
+    pub fn set_coinbase_rebuilder(&mut self, coinbase_rebuilder: CoinbaseRebuilder) {
+        self.coinbase_rebuilder = Some(coinbase_rebuilder);
     }
 
     /// Send the weak shares peers relay to `weak_share_tx`, the weak share
@@ -243,6 +262,32 @@ impl<C: Send + Sync + 'static> RequestResponseHandler<C> {
         self.responses_dropped_total
     }
 
+    /// Add what one share broadcast sent to the totals since start.
+    pub fn record_share_relay(&mut self, sent: ShareRelayBytes) {
+        self.share_relay += sent;
+    }
+
+    /// Share messages relayed and their bytes, since start.
+    pub fn share_relay(&self) -> ShareRelayBytes {
+        self.share_relay
+    }
+
+    /// How the rebuilds of shares relayed without their payouts went, since
+    /// start; none on Bitcoin.
+    pub fn share_rebuilds(&self) -> RebuildCounts {
+        self.coinbase_rebuilder
+            .as_ref()
+            .map(CoinbaseRebuilder::counts)
+            .unwrap_or_default()
+    }
+
+    /// The weak pool relayed weak shares go to, which a share about to be
+    /// relayed asks how long it has held each weak share. `None` on Bitcoin
+    /// and in Hydrapool mode.
+    pub fn weak_pool(&self) -> Option<WeakPool> {
+        self.weak_share_tx.as_ref().map(WeakShareEventSender::pool)
+    }
+
     /// Responses waiting in the response worker queue.
     pub fn response_queue_depth(&self) -> u64 {
         (self.response_worker_handle.max_capacity() - self.response_worker_handle.capacity()) as u64
@@ -290,6 +335,14 @@ impl<C: Send + Sync + 'static> RequestResponseHandler<C> {
                 self.peer_block_knowledge
                     .record_block_known(peer, block.block_hash());
             }
+            Message::ShareWithWeakHashes(share, _) => {
+                self.peer_block_knowledge
+                    .record_block_known(peer, share.block_hash());
+            }
+            Message::ShareWithoutPayouts(share, _) => {
+                self.peer_block_knowledge
+                    .record_block_known(peer, share.block_hash());
+            }
             _ => {}
         }
     }
@@ -330,6 +383,7 @@ impl<C: Send + Sync + 'static> RequestResponseHandler<C> {
             share_validator: self.share_validator.clone(),
             share_transaction_pool: self.share_transaction_pool.clone(),
             weak_share_tx: self.weak_share_tx.clone(),
+            coinbase_rebuilder: self.coinbase_rebuilder.clone(),
         };
 
         let peer_handle = match self.peer_handles.get(&peer) {
@@ -394,6 +448,18 @@ impl<C: Send + Sync + 'static> RequestResponseHandler<C> {
         response: Message,
     ) -> Result<(), Box<dyn Error>> {
         self.record_peer_knowledge(&peer, &response);
+
+        // The weak shares a share relayed by hash lacked go to the share
+        // waiting for them, not to the response worker.
+        let response = match (response, self.weak_share_tx.as_ref()) {
+            (Message::CarriedWeakShares(share_hash, weak_shares), Some(sender)) => {
+                if !sender.fill().answer(peer, share_hash, weak_shares) {
+                    debug!("No share waits for weak shares of {share_hash} from {peer}");
+                }
+                return Ok(());
+            }
+            (response, _) => response,
+        };
 
         // A weak-share fetch is a queue send, not a header walk, so it does
         // not go to the response worker. A node with no weak pool leaves the

@@ -31,6 +31,11 @@ pub fn default_test_config() -> Config {
             blocked_ips: vec![],
             external_address: None,
             dns_seed: false,
+            node_key_path: None,
+            ephemeral_node_key: true,
+            nostr_relays: vec![],
+            nostr_announce: false,
+            target_outgoing_peers: 16,
         },
         bitcoinrpc: BitcoinRpcConfig {
             url: "http://localhost:8332".to_string(),
@@ -41,6 +46,7 @@ pub fn default_test_config() -> Config {
         store: StoreConfig {
             path: "test_chain.db".to_string(),
             pplns_ttl_days: 3,
+            keep_whole_weak_shares: false,
         },
         stratum: StratumConfig::new_for_test_default(),
         logging: LoggingConfig {

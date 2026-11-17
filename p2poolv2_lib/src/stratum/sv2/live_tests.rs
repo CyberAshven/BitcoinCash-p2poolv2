@@ -365,7 +365,7 @@ async fn bchn_declared_jobs_reach_both_real_nodes_over_noise() {
                 branch,
             )
             .unwrap();
-            proof.verify(leaf, 16, None).unwrap();
+            proof.verify(leaf, 16, None, None).unwrap();
             hex::encode(proof.to_bytes().unwrap())
         })
         .collect::<Vec<_>>();

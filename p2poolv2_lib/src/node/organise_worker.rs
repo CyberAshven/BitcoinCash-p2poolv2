@@ -49,10 +49,11 @@ use pending_buffer::{BufferLimits, BufferOutcome, PendingBuffer};
 ///
 /// Both this channel and the pending buffer hold whole `ShareBlock`s, which
 /// `handle_share_block` bounds at `BLOCK_TXS_SIZE_LIMIT` (200 KB) each on
-/// Bitcoin and at `BCH_SHARE_BODY_SIZE_LIMIT` (1.2 MB) on Bitcoin Cash. By
-/// count alone, 512 of the largest Bitcoin Cash shares, which have passed
-/// validation and so carry valid proof of work, would be about 620 MB, so
-/// the channel is bounded in bytes too (`ORGANISE_CHANNEL_BYTES`).
+/// Bitcoin and at `BCH_SHARE_BODY_SIZE_LIMIT` (1.2 MB) on Bitcoin Cash,
+/// beside up to `WEAK_BYTES` (960 KiB) of weak shares. By count alone, 512
+/// of the largest Bitcoin Cash shares, which have passed validation and so
+/// carry valid proof of work, would be about 1.1 GB, so the channel is
+/// bounded in bytes too (`ORGANISE_CHANNEL_BYTES`).
 ///
 /// Both bounds are kept small deliberately: this channel is pure
 /// backpressure between the parallel validation tasks and the serial
@@ -69,11 +70,12 @@ const ORGANISE_CHANNEL_CAPACITY: usize = 512;
 ///
 /// Honest shares meet the count bound first: 512 shares of up to 128 KiB
 /// fit, and a Bitcoin Cash share paying 1,000 miners directly is about
-/// 35 KB. The budget still holds at least 51 of the largest shares a peer
-/// can send (`MAX_P2P_MESSAGE_SIZE`, 1.25 MiB, above the 1,204,800-byte
-/// Bitcoin Cash body limit) and over 300 of the largest Bitcoin ones
-/// (200 KiB), more than one round of the parallel validation tasks on an
-/// ordinary machine. The worst case falls from about 620 MB to 64 MiB.
+/// 35 KB. The budget still holds at least 30 of the largest shares a peer
+/// can send (`MAX_P2P_MESSAGE_SIZE`, 2,144 KiB, above the 1,204,800-byte
+/// Bitcoin Cash body limit and the 960 KiB of weak shares beside it) and
+/// over 300 of the largest Bitcoin ones (200 KiB), more than one round of
+/// the parallel validation tasks on an ordinary machine. The worst case
+/// falls from about 1.1 GB to 64 MiB.
 pub const ORGANISE_CHANNEL_BYTES: usize = 64 * 1024 * 1024;
 
 /// Maximum number of blocks buffered while waiting for ancestor
@@ -89,9 +91,9 @@ const PENDING_BLOCKS_CAPACITY: usize = 2 * ORGANISE_CHANNEL_CAPACITY;
 
 /// Most bytes, by consensus encoding, the pending buffer holds: 128 MiB,
 /// twice the channel's budget for the same reason the count is twice the
-/// channel's. It holds at least 102 of the largest shares a peer can send;
+/// channel's. It holds at least 61 of the largest shares a peer can send;
 /// by count alone, 1,024 of the largest Bitcoin Cash shares would be about
-/// 1.2 GB.
+/// 2.2 GB.
 pub const PENDING_BLOCKS_BYTES: usize = 2 * ORGANISE_CHANNEL_BYTES;
 
 /// Upper bound on how many stranded blocks the startup re-validation seed
@@ -565,6 +567,13 @@ impl OrganiseWorker {
     /// depth -- can confirm them. Returns `Advanced(height)` when the
     /// block becomes BlockValid or is promoted, so its dependents can
     /// be drained.
+    ///
+    /// A block already BlockValid passed these checks when it was marked, as
+    /// `validate_share_block` already takes it in the validation worker: a
+    /// block delivered again, or drained again from the buffer, goes straight
+    /// to promotion, which may still advance the confirmed chain, without its
+    /// chain-context checks, the coinbases of its weak shares among them,
+    /// running again.
     async fn validate_mark_promote(
         &mut self,
         share_block: ShareBlock,
@@ -574,37 +583,45 @@ impl OrganiseWorker {
         let blockhash = share_block.block_hash();
         debug!("Organising block: {blockhash:?}");
 
-        let in_pplns_zone =
-            match check_pplns_zone(&blockhash, &self.chain_store_handle, self.depths) {
-                Ok(result) => result,
-                Err(error_message) => {
-                    error!("Error checking for zone, will retry {blockhash}: {error_message}");
-                    self.buffer_block(parent_height, share_block, content_validated);
-                    return Ok(ProcessOutcome::NotAdvanced);
-                }
-            };
-
-        let validation_result = if !in_pplns_zone {
+        let validation_result = if self
+            .chain_store_handle
+            .has_status(&blockhash, Status::BlockValid)
+        {
+            debug!("Block {blockhash} is already BlockValid, promoting it without checking again");
             Ok(())
-        } else if content_validated {
-            self.share_validator.validate_with_chain_context(
-                &share_block,
-                &self.chain_store_handle,
-                Arc::clone(&self.pplns_window),
-            )
         } else {
-            // The candidate tip shortened back across the boundary since stage
-            // 1 tiered this block below the zone. Run the content checks it
-            // skipped before the chain-context ones.
-            self.share_validator
-                .validate_share_block(&share_block, &self.chain_store_handle)
-                .and_then(|()| {
-                    self.share_validator.validate_with_chain_context(
-                        &share_block,
-                        &self.chain_store_handle,
-                        Arc::clone(&self.pplns_window),
-                    )
-                })
+            let in_pplns_zone =
+                match check_pplns_zone(&blockhash, &self.chain_store_handle, self.depths) {
+                    Ok(result) => result,
+                    Err(error_message) => {
+                        error!("Error checking for zone, will retry {blockhash}: {error_message}");
+                        self.buffer_block(parent_height, share_block, content_validated);
+                        return Ok(ProcessOutcome::NotAdvanced);
+                    }
+                };
+
+            if !in_pplns_zone {
+                Ok(())
+            } else if content_validated {
+                self.share_validator.validate_with_chain_context(
+                    &share_block,
+                    &self.chain_store_handle,
+                    Arc::clone(&self.pplns_window),
+                )
+            } else {
+                // The candidate tip shortened back across the boundary since stage
+                // 1 tiered this block below the zone. Run the content checks it
+                // skipped before the chain-context ones.
+                self.share_validator
+                    .validate_share_block(&share_block, &self.chain_store_handle)
+                    .and_then(|()| {
+                        self.share_validator.validate_with_chain_context(
+                            &share_block,
+                            &self.chain_store_handle,
+                            Arc::clone(&self.pplns_window),
+                        )
+                    })
+            }
         };
 
         if let Err(validation_error) = validation_result {
@@ -966,6 +983,7 @@ impl OrganiseWorker {
             timestamp: header.time,
             bits: header.bits,
             weak_count: header.weak_count,
+            weak_asking: header.weak_asking,
             uncles: uncle_infos,
         };
         let event = MonitoringEvent::Share(share_info);

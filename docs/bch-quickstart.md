@@ -146,7 +146,9 @@ address (dynamic DNS) stays reachable. A Bitcoin Cash node
 never uses DNS seeds: the seeds built into P2Poolv2 are Bitcoin nodes, and
 there are no Bitcoin Cash seeds yet. `dns_seed` is ignored and always off on
 `chain = "bitcoin-cash"`, so without `dial_peers` the node only waits for
-peers to dial it.
+peers to dial it. Once connected, it dials more of the peers its peers tell
+it of until it has `target_outgoing_peers` outgoing peers, 16 by default,
+spread over network groups ([P2P network](p2p-network.md#outgoing-peers)).
 
 `wait_for_chain_sync` in `[stratum]` decides when the Stratum port opens.
 With `true`, the default when the line is missing, it opens only once the
@@ -252,6 +254,39 @@ so only the block size limit bounds a template; the log says `granted the
 large templates extension`. Any other provider is asked for each template's
 transactions, and a template is then limited to 65,535 transactions in one
 16 MiB message.
+
+#### A Template Provider over Tor or I2P
+
+A provider behind a Tor onion service or an I2P server tunnel is reached
+through that network's SOCKS5 proxy on this computer:
+
+```toml
+template_source = "sv2"
+template_provider_address = "<56 characters>.onion:3335"
+template_provider_authority_public_key = "9b..."
+template_provider_proxy = "127.0.0.1:9050"   # Tor's SOCKS port
+```
+
+For I2P, give the provider's `.b32.i2p` name with the port of its server
+tunnel, and the router's SOCKS proxy (i2pd: `127.0.0.1:4447`).
+
+- The provider's name goes to the proxy as a name. It is never resolved on
+  this computer, and when the proxy cannot reach the provider the node does
+  not connect directly: it waits and tries the proxy again.
+- Each connection brings its own SOCKS username, so Tor puts it on its own
+  circuit and a reconnect does not ride the circuit that just failed.
+- The authority public key is always required with a proxy.
+- A redirect (`Reconnect`) from the provider is followed through the proxy
+  too.
+- The provider has 20 seconds to accept a connection through the proxy and
+  15 seconds for each setup answer; an I2P name has 90 and 45 seconds. A
+  provider the node connects to directly has 10 seconds for each.
+
+The provider needs no setting for this. Its operator points an onion
+service (`HiddenServicePort 3335 127.0.0.1:3335` in `torrc`) or an i2pd
+server tunnel at its Template Distribution port.
+
+`[bitcoinrpc]` still names a node this computer reaches itself.
 
 ## 4. Point miners at the node
 

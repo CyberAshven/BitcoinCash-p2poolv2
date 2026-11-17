@@ -13,8 +13,9 @@ use crate::api::{
 use crate::app::{Ctx, ctx, polled};
 use crate::chart::{HashrateChart, SharechainChart};
 use crate::format::{
-    UNKNOWN, agent_version, difficulty_from_bits, difficulty_from_network_hashrate, fmt_ago,
-    fmt_difficulty, fmt_duration, fmt_effort, fmt_hashrate, fmt_latency, optional,
+    BLOCK_INTERVAL_SECONDS, UNKNOWN, agent_version, difficulty_from_bits,
+    difficulty_from_network_hashrate, fmt_ago, fmt_difficulty, fmt_duration, fmt_effort,
+    fmt_hashrate, fmt_latency, optional,
 };
 use crate::layout::{KpiCard, Tone, ago_cell, loading, miner_link, share_link};
 use crate::route::{Route, Tab};
@@ -122,6 +123,25 @@ pub fn capped_history(mut history: Vec<HashratePoint>) -> Vec<HashratePoint> {
     let excess = history.len().saturating_sub(MAX_HISTORY_POINTS);
     history.drain(..excess);
     history
+}
+
+/// The network difficulty `hashrate` implies: its current network hashrate,
+/// else the newest sampled one, over the node's block interval, ten minutes
+/// from a node that sends none.
+pub fn implied_network_difficulty(hashrate: &Hashrate) -> Option<f64> {
+    let interval = hashrate
+        .block_interval_secs
+        .unwrap_or(BLOCK_INTERVAL_SECONDS);
+    hashrate
+        .network_hashrate
+        .or_else(|| {
+            hashrate
+                .history
+                .iter()
+                .rev()
+                .find_map(|point| point.network_hashrate)
+        })
+        .map(|rate| difficulty_from_network_hashrate(rate, interval))
 }
 
 fn share_row_view(row: ShareRow) -> impl IntoView {
@@ -435,26 +455,13 @@ pub fn OverviewPage() -> impl IntoView {
         .unwrap_or_else(|| UNKNOWN.to_string())
     });
     let network_notes = Signal::derive(move || {
-        let network_difficulty = loaded(&hashrate, |hashrate| {
-            hashrate
-                .network_hashrate
-                .map(difficulty_from_network_hashrate)
-                .or_else(|| {
-                    hashrate
-                        .history
-                        .iter()
-                        .rev()
-                        .find_map(|point| point.network_hashrate)
-                        .map(difficulty_from_network_hashrate)
-                })
-        })
-        .flatten();
+        let network_difficulty = loaded(&hashrate, implied_network_difficulty).flatten();
         vec![
             format!(
                 "Difficulty {}",
                 optional(network_difficulty, fmt_difficulty)
             ),
-            "Est. from diff. 10-min blocks".to_string(),
+            "Est. from diff. and block time".to_string(),
         ]
     });
     let pool_notes = Signal::derive(move || vec!["Confirmed shares, last hour".to_string()]);
@@ -481,19 +488,9 @@ pub fn OverviewPage() -> impl IntoView {
         // difficulty, live first, then inverted from the sampled network
         // hashrate (the same fallback the difficulty card uses).
         let effort = loaded(&hashrate, |hashrate| {
-            let difficulty = hashrate.network_difficulty.or_else(|| {
-                hashrate
-                    .network_hashrate
-                    .map(difficulty_from_network_hashrate)
-                    .or_else(|| {
-                        hashrate
-                            .history
-                            .iter()
-                            .rev()
-                            .find_map(|point| point.network_hashrate)
-                            .map(difficulty_from_network_hashrate)
-                    })
-            });
+            let difficulty = hashrate
+                .network_difficulty
+                .or_else(|| implied_network_difficulty(hashrate));
             fmt_effort(hashrate.work_since_last_block, difficulty)
         });
         vec![

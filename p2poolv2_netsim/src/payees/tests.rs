@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 use super::*;
+use crate::constants::{BCH_BLOCK_INTERVAL_SECONDS, BCH_PPLNS_WINDOW_BLOCKS};
 
 #[test]
 fn one_miner_is_one_payee() {
@@ -57,20 +58,30 @@ fn a_millionth_of_the_pool_waits_116_days_for_a_share() {
 }
 
 #[test]
-fn a_pool_with_a_tenth_of_bch_has_an_1800_share_window() {
-    // payout-distribution.md: "10% | about 1,800 shares".
-    assert_eq!(pplns_window_shares(0.1, 10.0), 1_800);
+fn the_window_is_three_blocks_of_shares_over_the_pools_fraction() {
+    // K * (block interval / share interval) / f shares.
+    let shares_per_block = BCH_BLOCK_INTERVAL_SECONDS / 10.0;
+    let expected = (BCH_PPLNS_WINDOW_BLOCKS * shares_per_block / 0.1).round() as u64;
+    assert_eq!(pplns_window_shares(0.1, 10.0), expected);
 }
 
 #[test]
-fn a_pool_with_one_percent_of_bch_has_an_18000_share_window() {
-    assert_eq!(pplns_window_shares(0.01, 10.0), 18_000);
+fn a_pool_with_a_tenth_of_bch_has_a_180_share_window() {
+    // Three one-minute blocks of six 10-second shares each over 0.1.
+    // (`payout-distribution.md` gives 1,800 for ten-minute blocks.)
+    assert_eq!(pplns_window_shares(0.1, 10.0), 180);
 }
 
 #[test]
-fn a_pool_under_about_0_15_percent_of_bch_reaches_the_cap() {
-    assert_eq!(pplns_window_shares(0.001, 10.0), 120_960);
-    assert_eq!(pplns_window_shares(0.0015, 10.0), 120_000);
+fn a_pool_with_one_percent_of_bch_has_an_1800_share_window() {
+    assert_eq!(pplns_window_shares(0.01, 10.0), 1_800);
+}
+
+#[test]
+fn a_pool_under_about_0_015_percent_of_bch_reaches_the_cap() {
+    // 18 / f shares reach 120,960 at f = 0.0149%.
+    assert_eq!(pplns_window_shares(0.0001, 10.0), 120_960);
+    assert_eq!(pplns_window_shares(0.00015, 10.0), 120_000);
 }
 
 #[test]
@@ -80,7 +91,10 @@ fn a_pool_of_unknown_size_gets_the_full_window() {
 
 #[test]
 fn slower_shares_shorten_the_window_in_shares() {
-    assert_eq!(pplns_window_shares(0.1, 30.0), 600);
+    assert_eq!(
+        pplns_window_shares(0.1, 30.0),
+        pplns_window_shares(0.1, 10.0) / 3
+    );
 }
 
 #[test]

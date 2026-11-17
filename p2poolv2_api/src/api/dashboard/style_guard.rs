@@ -550,9 +550,11 @@ fn share_output(uncles: Vec<String>) -> ShareLookupOutput {
         transactions: None,
         pruned: false,
         weak_count: 0,
+        weak_asking: 0,
         weak_ratio: 1024,
         weak_root: "00".repeat(32),
         weak_shares: Vec::new(),
+        weak_summary: None,
     }
 }
 

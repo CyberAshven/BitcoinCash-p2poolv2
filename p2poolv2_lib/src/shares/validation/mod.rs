@@ -9,7 +9,8 @@ mod weak_shares;
 
 use crate::shares::weak::WeakShare;
 pub use weak_shares::WeakPayoutCache;
-use weak_shares::{check_weak_shares_match_header, check_weak_shares_size};
+pub(crate) use weak_shares::check_weak_shares_match_header;
+use weak_shares::check_weak_shares_size;
 
 use super::share_block::{MAX_POOL_TARGET, ShareHeader};
 use crate::accounting::CoinbasePayouts;
@@ -38,7 +39,7 @@ use crate::pool_difficulty::PoolDifficulty;
 #[cfg(not(test))]
 use crate::pool_difficulty::PoolDifficulty;
 use crate::shares::band::{ParentBand, check_share_band};
-use crate::shares::bch_asert::BchAsert;
+use crate::shares::bch_asert::{BchAsert, TickInfo};
 use crate::shares::bch_headers::BchHeaderRules;
 use crate::shares::bch_script;
 #[cfg(test)]
@@ -766,6 +767,30 @@ pub trait ShareValidator {
         pplns_window: &RwLock<PplnsWindow>,
         cache: &mut WeakPayoutCache,
     ) -> Result<(), ValidationError>;
+
+    /// Rebuild the Bitcoin Cash coinbase of a share relayed without its
+    /// payouts (`ShareWithoutPayouts`): the input of `carried_coinbase`,
+    /// which has no outputs, and every output from `header` and the PPLNS
+    /// window anchored at its parent for the outputs' total
+    /// `coinbase_value`, as a weak share's coinbase is rebuilt
+    /// (`DefaultShareValidator::rebuild_coinbase_paying_window`). `cache`
+    /// keeps the window's payouts between shares on one parent and template.
+    ///
+    /// Returns the coinbase only when its txid is the one the header's
+    /// coinbase proof gives, so it is the coinbase the miner hashed. Any
+    /// error is no verdict on the share: the window may not reach its parent
+    /// yet, and a share relayed before its body was validated may carry a
+    /// coinbase that does not pay its window, which only the whole share
+    /// shows.
+    fn rebuild_coinbase_without_payouts(
+        &self,
+        header: &ShareHeader,
+        carried_coinbase: &Transaction,
+        coinbase_value: u64,
+        chain_store_handle: &ChainStoreHandle,
+        pplns_window: &RwLock<PplnsWindow>,
+        cache: &mut WeakPayoutCache,
+    ) -> Result<Transaction, ValidationError>;
 }
 
 /// Production implementation of ShareValidator.
@@ -893,18 +918,21 @@ impl DefaultShareValidator {
     /// block, builds on it, and any other share that does is invalid. Shares
     /// below the payout zone are not checked (`validate_below_pplns_depth`),
     /// so a new node syncs old shares its header store does not reach.
+    ///
+    /// Returns the BCH prev's tick info, `None` on a Bitcoin node and for
+    /// the chain's first share.
     fn validate_bch_prev_known(
         &self,
         share_header: &ShareHeader,
         chain_store_handle: &ChainStoreHandle,
-    ) -> Result<(), ValidationError> {
+    ) -> Result<Option<TickInfo>, ValidationError> {
         if self.bch_header_rules.is_none() {
-            return Ok(());
+            return Ok(None);
         }
         let prev = share_header.bitcoin_header.prev_blockhash;
         if prev == BlockHash::all_zeros() {
             if share_header.prev_share_blockhash == BlockHash::all_zeros() {
-                return Ok(());
+                return Ok(None);
             }
             return Err(ValidationError::consensus(format!(
                 "Share {} builds on no Bitcoin Cash block",
@@ -912,7 +940,7 @@ impl DefaultShareValidator {
             )));
         }
         match chain_store_handle.get_bch_header(&prev) {
-            Ok(Some(_)) => Ok(()),
+            Ok(Some(known)) => Ok(Some(known.tick_info())),
             Ok(None) => Err(ValidationError::recoverable(format!(
                 "Bitcoin Cash block {prev} that share {} builds on is not known yet",
                 share_header.block_hash()
@@ -986,15 +1014,24 @@ impl DefaultShareValidator {
     }
 
     /// The ASERT format check of a token share's bitcoin header: its nBits
-    /// must be what BCH's aserti3-2d gives at the share's BIP34 height,
-    /// within the band agreed for merge-mining proofs
-    /// ([`BchAsert::check_header_bits`]). A token claim's covenant checks the
-    /// same band, so a token share outside it could not be claimed; the
-    /// share chain refuses it at the header. No-token shares are not
-    /// checked: BCHN alone judges their blocks.
+    /// must be what BCH's aserti3-2d gives after its BCH prev, within the
+    /// band agreed for merge-mining proofs ([`BchAsert::check_header_bits`]).
+    /// A token claim's covenant checks a band too, so a token share outside
+    /// it could not be claimed; the share chain refuses it at the header.
+    /// No-token shares are not checked: BCHN alone judges their blocks.
+    ///
+    /// `bch_prev` is the tick info of the share's BCH prev when its header
+    /// is known: block validation has it, since a share in the payout zone
+    /// waits for its BCH prev (`validate_bch_prev_known`). The header gate
+    /// has no store and passes `None`, so there the network's pins give the
+    /// ticks and interval by the share's height. On chipnet they match every
+    /// header on its chain; on mainnet, whose switch is not pinned yet, the
+    /// gate computes ten-minute blocks and refuses token shares after the
+    /// switch until a release pins it.
     fn validate_token_share_asert(
         &self,
         share_header: &ShareHeader,
+        bch_prev: Option<TickInfo>,
     ) -> Result<(), ValidationError> {
         let Some(asert) = self.bch_asert else {
             return Ok(());
@@ -1007,6 +1044,7 @@ impl DefaultShareValidator {
                 share_header.bitcoin_header.bits,
                 share_header.bitcoin_header.time,
                 share_header.bitcoin_height,
+                bch_prev,
             )
             .map_err(|error| {
                 ValidationError::consensus(format!(
@@ -1976,6 +2014,43 @@ impl ShareValidator for DefaultShareValidator {
         self.validate_relayed_weak_share(weak_share, chain_store_handle, pplns_window, cache)
     }
 
+    fn rebuild_coinbase_without_payouts(
+        &self,
+        header: &ShareHeader,
+        carried_coinbase: &Transaction,
+        coinbase_value: u64,
+        chain_store_handle: &ChainStoreHandle,
+        pplns_window: &RwLock<PplnsWindow>,
+        cache: &mut WeakPayoutCache,
+    ) -> Result<Transaction, ValidationError> {
+        let coinbase = {
+            let mut window = pplns_window
+                .write()
+                .expect("PPLNS window lock poisoned on write");
+            self.rebuild_coinbase_paying_window(
+                header,
+                carried_coinbase,
+                coinbase_value,
+                chain_store_handle,
+                &mut window,
+                cache,
+            )?
+        };
+        let proof_txid = header
+            .coinbase_proof
+            .coinbase_txid_for(header)
+            .map_err(|error| {
+                ValidationError::consensus(format!("Invalid coinbase proof: {error}"))
+            })?;
+        let coinbase_txid = coinbase.compute_txid();
+        if coinbase_txid != proof_txid {
+            return Err(ValidationError::consensus(format!(
+                "Rebuilt coinbase txid {coinbase_txid} is not the {proof_txid} its header's proof gives"
+            )));
+        }
+        Ok(coinbase)
+    }
+
     fn validate_with_pool_difficulty(
         &self,
         share_header: &ShareHeader,
@@ -2062,7 +2137,8 @@ impl ShareValidator for DefaultShareValidator {
                 ValidationError::consensus(format!("Invalid share version: {error}"))
             })?;
         }
-        self.validate_token_share_asert(share_header)
+        // No store here: the pins give the BCH prev's ticks by height.
+        self.validate_token_share_asert(share_header, None)
     }
 
     /// Validations run in parallel that don't require the chain context.
@@ -2082,6 +2158,15 @@ impl ShareValidator for DefaultShareValidator {
         if chain_store_handle.has_status(&share.block_hash(), Status::BlockValid) {
             return Ok(());
         }
+        //* A body whose weak shares were pruned is a copy for the zone below
+        //* the payout depth: the weak share checks here need them whole, and
+        //* checking it without them would judge the share on what is missing.
+        if share.pruned_weak_shares.is_some() {
+            return Err(ValidationError::unresolvable(format!(
+                "Share {} has its weak shares pruned; inside the payout depth it is checked with them whole",
+                share.block_hash()
+            )));
+        }
         // The header gate peers run before fetching a share. A share this
         // node mined reaches here without it (stratum, then the validation
         // worker), so without this a local token share would skip the ASERT
@@ -2092,7 +2177,10 @@ impl ShareValidator for DefaultShareValidator {
         self.validate_body_matches_header(share)?;
         self.validate_with_pool_difficulty(&share.header, chain_store_handle)?;
         self.validate_share_version(&share.header, chain_store_handle)?;
-        self.validate_bch_prev_known(&share.header, chain_store_handle)?;
+        // With the BCH prev known, a token share's band follows the prev's
+        // own ticks and next interval, not the pins.
+        let bch_prev = self.validate_bch_prev_known(&share.header, chain_store_handle)?;
+        self.validate_token_share_asert(&share.header, bch_prev)?;
         self.validate_uncles(&share.header, chain_store_handle)?;
         self.validate_uncle_bodies_present(share, chain_store_handle)?;
         self.validate_block_size(share)?;
@@ -2360,6 +2448,16 @@ mockall::mock! {
             pplns_window: &RwLock<PplnsWindow>,
             cache: &mut WeakPayoutCache,
         ) -> Result<(), ValidationError>;
+
+        fn rebuild_coinbase_without_payouts(
+            &self,
+            header: &ShareHeader,
+            carried_coinbase: &Transaction,
+            coinbase_value: u64,
+            chain_store_handle: &ChainStoreHandle,
+            pplns_window: &RwLock<PplnsWindow>,
+            cache: &mut WeakPayoutCache,
+        ) -> Result<Transaction, ValidationError>;
     }
 }
 
@@ -2379,6 +2477,7 @@ mod tests {
     use crate::shares::merge_mining::MergeMiningCommitment;
     use crate::shares::share_block::ShareTransaction;
     use crate::shares::share_commitment::ShareCommitment;
+    use crate::shares::weak::PrunedWeakShares;
     use crate::shares::witness_commitment::WitnessCommitment;
     use crate::store::block_tx_metadata::{BlockMetadata, ChainMembership};
     use crate::store::transaction_store::PrevoutRejection;
@@ -2392,7 +2491,7 @@ mod tests {
         TEST_COINBASE_NSECS, TRADE_BUYER_SECRET_KEY, TRADE_SECRET, TRADE_SELLER_SECRET_KEY,
         TestShareBlockBuilder, build_block_from_work_components, genesis_for_tests,
         load_share_headers_test_data, make_test_address, setup_pool_difficulty_mocks,
-        test_coinbase_transaction,
+        test_coinbase_transaction, test_weak_share_on,
     };
     use crate::utils::time_provider::TestTimeProvider;
     use bitcoin::Address;
@@ -2562,28 +2661,55 @@ mod tests {
         let chipnet = validator()
             .for_chain(Chain::BitcoinCash)
             .with_bitcoin_cash_network(Some(BitcoinCashNetwork::Chipnet));
-        chipnet.validate_token_share_asert(&header).unwrap();
+        chipnet.validate_token_share_asert(&header, None).unwrap();
 
         // 256 times harder than ASERT gives is outside the band.
         let mut hard = header.clone();
         hard.bitcoin_header.bits = CompactTarget::from_consensus(0x1b34_e28b);
-        let error = chipnet.validate_token_share_asert(&hard).unwrap_err();
+        let error = chipnet.validate_token_share_asert(&hard, None).unwrap_err();
         assert_eq!(error.kind(), FailureKind::Consensus);
         assert!(error.to_string().contains("ASERT"), "{error}");
 
         // The same header as a no-token share, or on regtest, is not checked.
         let mut no_token = hard.clone();
         no_token.bch_coinbase.as_mut().unwrap().merge_mining = MergeMiningCommitment::empty();
-        chipnet.validate_token_share_asert(&no_token).unwrap();
+        chipnet.validate_token_share_asert(&no_token, None).unwrap();
         let regtest = validator()
             .for_chain(Chain::BitcoinCash)
             .with_bitcoin_cash_network(Some(BitcoinCashNetwork::Regtest));
-        regtest.validate_token_share_asert(&hard).unwrap();
+        regtest.validate_token_share_asert(&hard, None).unwrap();
         // Mainnet's anchor is above this height: refused.
         let mainnet = validator()
             .for_chain(Chain::BitcoinCash)
             .with_bitcoin_cash_network(Some(BitcoinCashNetwork::Mainnet));
-        assert!(mainnet.validate_token_share_asert(&header).is_err());
+        assert!(mainnet.validate_token_share_asert(&header, None).is_err());
+
+        // With its BCH prev known the band follows the prev's own ticks and
+        // next interval. Real mainnet block 900,001 passes on its real
+        // prev's, and on a prev with a one-minute next block its bits are
+        // ten times harder than ASERT gives, outside mainnet's band.
+        let (parent_height, _, child_hex) = crate::shares::bch_asert::tests::MAINNET_PAIRS[6];
+        let mut mainnet_header = header.clone();
+        mainnet_header.bitcoin_header = crate::shares::bch_asert::tests::header(child_hex);
+        mainnet_header.bitcoin_height = u64::from(parent_height) + 1;
+        mainnet
+            .validate_token_share_asert(&mainnet_header, None)
+            .unwrap();
+        let ten_minutes = TickInfo {
+            ticks: i64::from(parent_height) * 600,
+            next_interval: 600,
+        };
+        mainnet
+            .validate_token_share_asert(&mainnet_header, Some(ten_minutes))
+            .unwrap();
+        let one_minute = TickInfo {
+            next_interval: 60,
+            ..ten_minutes
+        };
+        let error = mainnet
+            .validate_token_share_asert(&mainnet_header, Some(one_minute))
+            .unwrap_err();
+        assert!(error.to_string().contains("harder"), "{error}");
     }
 
     /// A share this node mined goes from stratum to the validation worker
@@ -2727,7 +2853,14 @@ mod tests {
             let header = header.bitcoin_header;
             chain_store_handle
                 .expect_get_bch_header()
-                .returning(move |_| Ok(known.then_some(KnownBchHeader { height: 1, header })));
+                .returning(move |_| {
+                    Ok(known.then_some(KnownBchHeader {
+                        height: 1,
+                        header,
+                        ticks: 600,
+                        next_interval: 600,
+                    }))
+                });
             chain_store_handle
         };
 
@@ -4340,6 +4473,32 @@ mod tests {
             "Expected Ok for BlockValid status, got: {:?}",
             result.err()
         );
+    }
+
+    /// A body whose weak shares were pruned reaches full validation only when
+    /// the candidate tip fell back across the payout depth after it was
+    /// stored. The weak share checks need them whole, so it gets no verdict,
+    /// never a false root mismatch or a miscount of its asking weak shares.
+    #[test]
+    fn test_validate_share_block_leaves_a_pruned_body_without_a_verdict() {
+        let mut chain_store_handle = ChainStoreHandle::default();
+        let mut share_block = TestShareBlockBuilder::new()
+            .share_owner(ShareOwner::CashP2pkh([0x22; 20]))
+            .weak_shares(vec![test_weak_share_on(BlockHash::all_zeros(), 1)])
+            .weak_asking(1)
+            .build();
+        share_block.pruned_weak_shares = Some(PrunedWeakShares::of(&share_block.weak_shares));
+        share_block.weak_shares.clear();
+        chain_store_handle
+            .expect_has_status()
+            .returning(|_, _| false);
+
+        let error = validator()
+            .validate_share_block(&share_block, &chain_store_handle)
+            .unwrap_err();
+
+        assert_eq!(error.kind(), FailureKind::Unresolvable);
+        assert!(error.to_string().contains("pruned"), "{error}");
     }
 
     #[test]
@@ -7064,6 +7223,104 @@ mod tests {
         assert!(result.is_ok(), "{}", result.unwrap_err());
         assert_eq!(producer_payouts.outputs.len(), 79);
         assert!(coinbase.total_size() <= 3_072);
+    }
+
+    /// A token share whose window pays 118 miners, the donation key and a
+    /// fee address, relayed without its coinbase's outputs: the rebuild from
+    /// the same window gives back every output, the token root at output 0,
+    /// the payouts, the donation, the fee and the payout tree's output, and
+    /// so the txid its header's coinbase proof commits.
+    #[test]
+    fn a_share_relayed_without_payouts_gets_back_its_coinbase_and_txid() {
+        let donation = crate::config::bitcoin_cash_donation_address(BitcoinCashNetwork::Regtest);
+        let fee_address = PayoutAddress::from(Address::p2pkh(
+            PubkeyHash::from_byte_array([0xfe; 20]),
+            Network::Regtest,
+        ));
+        let mut weights: HashMap<PayoutAddress, u128> = (1..=118u8)
+            .map(|byte| {
+                (
+                    PayoutAddress::from(Address::p2pkh(
+                        PubkeyHash::from_byte_array([byte; 20]),
+                        Network::Regtest,
+                    )),
+                    u128::from(byte) * 1_000,
+                )
+            })
+            .collect();
+        weights.insert(donation.clone(), 2_000);
+        weights.insert(fee_address.clone(), 3_000);
+        let weights = PplnsWeights::without_levels(weights);
+        let root = MergeMiningCommitment {
+            root: [0x44; 32],
+            height: 1,
+            salt: 3,
+        };
+        let share = crate::test_utils::build_test_share_paying(
+            TestShareBlockBuilder::new()
+                .share_owner(ShareOwner::CashP2pkh([0x22; 20]))
+                .donation(donation.clone(), 100)
+                .fee(fee_address.clone(), 200)
+                .build(),
+            &weights,
+            312_500_000,
+            Some(root),
+        );
+        let coinbase = &share.bitcoin_coinbase;
+        let pays = |address: &PayoutAddress| {
+            coinbase
+                .output
+                .iter()
+                .any(|output| output.script_pubkey == address.script_pubkey())
+        };
+        let tree = build_pplns_outputs(
+            312_500_000,
+            &weights,
+            &None,
+            None,
+            &None,
+            None,
+            bch_split_for_commitment(&root),
+        )
+        .unwrap()
+        .tree
+        .unwrap();
+        assert_eq!(
+            MergeMiningCommitment::from_output(&coinbase.output[0]),
+            Ok(root)
+        );
+        assert!(pays(&donation) && pays(&fee_address));
+        assert!(coinbase.output.contains(&tree.root_output()));
+        let mut carried = coinbase.clone();
+        carried.output.clear();
+        let mut window = PplnsWindow::default();
+        window.expect_network().return_const(Network::Regtest);
+        window
+            .expect_get_weights_from_start_hash()
+            .times(1)
+            .returning(move |_, _, _| Ok(weights.clone()));
+
+        let rebuilt = validator()
+            .for_chain(Chain::BitcoinCash)
+            .rebuild_coinbase_without_payouts(
+                &share.header,
+                &carried,
+                312_500_000,
+                &ChainStoreHandle::default(),
+                &RwLock::new(window),
+                &mut WeakPayoutCache::new(),
+            )
+            .unwrap();
+
+        assert_eq!(&rebuilt, coinbase);
+        assert_eq!(
+            rebuilt.compute_txid(),
+            share
+                .header
+                .coinbase_proof
+                .coinbase_txid_for(&share.header)
+                .unwrap()
+        );
     }
 
     /// A pool-built share whose header names another root than its coinbase

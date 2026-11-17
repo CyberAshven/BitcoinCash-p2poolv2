@@ -358,6 +358,16 @@ Choices, and why:
   Relative locks would need each output's confirmation height inside script
   validation (BIP68), which the share chain does not track. Bitcoin Cash
   uses heights too, so both refunds are read the same way.
+- **A Bitcoin Cash lock height counts ten-minute units.** Under one-minute
+  blocks (CHIP-2025-03: chipnet since block 332,451, mainnet from
+  2027-05-15) a lock height `L` is final in the first block whose ticks pass
+  `600 * L`, not in block `L + 1`. Past the activation block, each unit of
+  `L` is ten one-minute blocks, so a BCH refund set as "the current height
+  plus N" opens much later than N blocks from now, and later still the
+  longer the chain has run on one-minute blocks. The buyer's BCH refund
+  must still open well before the seller's share refund. `p2poolv2_cli
+  bch-trade refund` prints the first block a refund is valid in
+  (`valid_from_height`) for either chain.
 - **Key hashes, not public keys.** The parties name each other by the
   addresses they already have: a share address (`p2pool:q...`) or a P2PKH
   CashAddr (`bitcoincash:q...`), both a HASH160 of a key.

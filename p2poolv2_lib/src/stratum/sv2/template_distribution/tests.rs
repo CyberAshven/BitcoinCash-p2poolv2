@@ -1,10 +1,11 @@
 use super::*;
+use crate::config::Sv2Authority;
 use crate::stratum::sv2::large_templates::MAX_IDS_PER_MESSAGE;
 use crate::stratum::sv2::sort_ctor;
 use crate::test_utils::{
-    TestSv2Server, bch_template_transaction, test_coinbase_transaction, test_sv2_authority,
-    test_tdp_new_template, test_tdp_set_new_prev_hash, test_tdp_transaction_data,
-    test_tdp_transactions_page, test_template_with_transactions,
+    TestSocksProxy, TestSv2Server, bch_template_transaction, test_coinbase_transaction,
+    test_sv2_authority, test_tdp_new_template, test_tdp_set_new_prev_hash,
+    test_tdp_transaction_data, test_tdp_transactions_page, test_template_with_transactions,
 };
 use binary_sv2::to_bytes;
 use bitcoin::block::{Header, Version};
@@ -393,7 +394,10 @@ fn a_chipnet_template_round_trips_through_template_distribution() {
     let template = provided_block_template(
         ready,
         u64::from(fixture.height),
-        block_size_floor(BitcoinCashNetwork::Chipnet),
+        block_size_floor(
+            BitcoinCashNetwork::Chipnet,
+            block_interval(BitcoinCashNetwork::Chipnet, u64::from(fixture.height), None),
+        ),
         fixture.curtime,
         solutions,
     )
@@ -444,7 +448,7 @@ fn a_regtest_template_is_checked_against_the_regtest_block_size() {
     let template = provided_block_template(
         ready,
         u64::from(fixture.height),
-        block_size_floor(BitcoinCashNetwork::Regtest),
+        block_size_floor(BitcoinCashNetwork::Regtest, BCH_BLOCK_SPACING),
         fixture.curtime,
         solutions,
     )
@@ -459,20 +463,30 @@ fn a_regtest_template_is_checked_against_the_regtest_block_size() {
 #[test]
 fn the_size_limit_is_the_one_bchn_reports_and_the_floor_only_without_one() {
     assert_eq!(
-        template_size_limit(Some(5_000_000_000), BitcoinCashNetwork::Mainnet),
+        template_size_limit(
+            Some(5_000_000_000),
+            BitcoinCashNetwork::Mainnet,
+            950_000,
+            None
+        ),
         5_000_000_000
     );
     assert_eq!(
-        template_size_limit(Some(3_000_000), BitcoinCashNetwork::Chipnet),
+        template_size_limit(Some(3_000_000), BitcoinCashNetwork::Chipnet, 340_000, None),
         3_000_000
     );
     assert_eq!(
-        template_size_limit(None, BitcoinCashNetwork::Mainnet),
+        template_size_limit(None, BitcoinCashNetwork::Mainnet, 950_000, None),
         32_000_000
     );
     assert_eq!(
-        template_size_limit(None, BitcoinCashNetwork::Chipnet),
+        template_size_limit(None, BitcoinCashNetwork::Chipnet, 332_450, None),
         2_000_000
+    );
+    // After chipnet's one-minute activation the floor is a tenth.
+    assert_eq!(
+        template_size_limit(None, BitcoinCashNetwork::Chipnet, 332_451, None),
+        200_000
     );
 }
 
@@ -480,8 +494,33 @@ fn the_size_limit_is_the_one_bchn_reports_and_the_floor_only_without_one() {
 #[test]
 fn the_scalenet_floor_is_256_mb() {
     assert_eq!(
-        template_size_limit(None, BitcoinCashNetwork::Scalenet),
+        template_size_limit(None, BitcoinCashNetwork::Scalenet, 10_000, None),
         256_000_000
+    );
+}
+
+/// Without a reported size limit the floor follows the new block's
+/// interval as the node reports it with the parent (`next_target_time`),
+/// over the pins: a tenth after mainnet's switch, which has no pin, and the
+/// whole floor on a chipnet branch whose next block past the pinned block is
+/// still ten minutes.
+#[test]
+fn the_floor_follows_the_interval_the_node_reports_for_the_new_block() {
+    assert_eq!(
+        template_size_limit(None, BitcoinCashNetwork::Mainnet, 1_000_100, Some(60)),
+        3_200_000
+    );
+    assert_eq!(
+        template_size_limit(None, BitcoinCashNetwork::Mainnet, 1_000_100, None),
+        32_000_000
+    );
+    assert_eq!(
+        template_size_limit(None, BitcoinCashNetwork::Chipnet, 332_451, Some(600)),
+        2_000_000
+    );
+    assert_eq!(
+        template_size_limit(None, BitcoinCashNetwork::Chipnet, 332_451, Some(60)),
+        200_000
     );
 }
 
@@ -573,7 +612,7 @@ fn a_provided_template_sends_its_solution_back_to_its_connection() {
     let template = provided_block_template(
         ready,
         u64::from(fixture.height),
-        block_size_floor(BitcoinCashNetwork::Regtest),
+        block_size_floor(BitcoinCashNetwork::Regtest, BCH_BLOCK_SPACING),
         fixture.curtime,
         solutions,
     )
@@ -620,7 +659,7 @@ fn a_bridge_form_coinbase_prefix_is_accepted() {
         provided_block_template(
             ready,
             u64::from(fixture.height),
-            block_size_floor(BitcoinCashNetwork::Regtest),
+            block_size_floor(BitcoinCashNetwork::Regtest, BCH_BLOCK_SPACING),
             fixture.curtime,
             solutions,
         )
@@ -650,7 +689,7 @@ fn a_coinbase_prefix_for_another_height_is_refused() {
     let refused = provided_block_template(
         ready,
         u64::from(fixture.height),
-        block_size_floor(BitcoinCashNetwork::Regtest),
+        block_size_floor(BitcoinCashNetwork::Regtest, BCH_BLOCK_SPACING),
         fixture.curtime,
         solutions,
     )
@@ -685,7 +724,7 @@ fn a_coinbase_prefix_with_more_than_the_height_push_is_refused() {
         provided_block_template(
             ready,
             u64::from(fixture.height),
-            block_size_floor(BitcoinCashNetwork::Regtest),
+            block_size_floor(BitcoinCashNetwork::Regtest, BCH_BLOCK_SPACING),
             fixture.curtime,
             solutions,
         )
@@ -722,7 +761,7 @@ fn required_coinbase_outputs_are_refused() {
     let refused = provided_block_template(
         ready,
         u64::from(fixture.height),
-        block_size_floor(BitcoinCashNetwork::Regtest),
+        block_size_floor(BitcoinCashNetwork::Regtest, BCH_BLOCK_SPACING),
         fixture.curtime,
         solutions,
     )
@@ -764,7 +803,7 @@ fn a_merkle_path_that_does_not_match_the_transactions_is_refused() {
     let refused = provided_block_template(
         ready,
         u64::from(fixture.height),
-        block_size_floor(BitcoinCashNetwork::Chipnet),
+        block_size_floor(BitcoinCashNetwork::Chipnet, BCH_BLOCK_SPACING),
         fixture.curtime,
         solutions,
     )
@@ -806,7 +845,7 @@ fn transactions_out_of_ctor_order_are_refused() {
     let refused = provided_block_template(
         ready,
         u64::from(fixture.height),
-        block_size_floor(BitcoinCashNetwork::Chipnet),
+        block_size_floor(BitcoinCashNetwork::Chipnet, BCH_BLOCK_SPACING),
         fixture.curtime,
         solutions,
     )
@@ -838,7 +877,7 @@ fn a_target_that_disagrees_with_the_bits_is_refused() {
     let refused = provided_block_template(
         ready,
         u64::from(fixture.height),
-        block_size_floor(BitcoinCashNetwork::Regtest),
+        block_size_floor(BitcoinCashNetwork::Regtest, BCH_BLOCK_SPACING),
         fixture.curtime,
         solutions,
     )
@@ -869,7 +908,7 @@ fn a_template_after_its_set_new_prev_hash_takes_the_current_time() {
     let template = provided_block_template(
         ready,
         u64::from(fixture.height),
-        block_size_floor(BitcoinCashNetwork::Regtest),
+        block_size_floor(BitcoinCashNetwork::Regtest, BCH_BLOCK_SPACING),
         fixture.curtime + 30,
         solutions,
     )
@@ -918,6 +957,7 @@ fn setup_connection_asks_for_template_distribution_version_two() {
         address: "127.0.0.1:8442".to_string(),
         authority_public_key: None,
         network: BitcoinCashNetwork::Regtest,
+        proxy: None,
     };
     let frame = setup_connection_frame(&provider).unwrap();
     let mut messages = decode_plain_frames(&mut Decoder::new(), &mut Vec::new(), &frame).unwrap();
@@ -1024,6 +1064,7 @@ async fn templates_flow_from_an_unencrypted_provider_and_solutions_flow_back() {
         address: listener.local_addr().unwrap().to_string(),
         authority_public_key: None,
         network: BitcoinCashNetwork::Chipnet,
+        proxy: None,
     };
     let (notify_tx, mut notify_rx) = mpsc::channel(4);
     start_template_provider(
@@ -1190,6 +1231,7 @@ fn start_keep_connected(
         address: listener.local_addr().unwrap().to_string(),
         authority_public_key: None,
         network: BitcoinCashNetwork::Chipnet,
+        proxy: None,
     };
     let bitcoind = BitcoindRpcClient::new(&rpc.uri(), "user", "pass").unwrap();
     let (notify_tx, notify_rx) = mpsc::channel(8);
@@ -1289,6 +1331,7 @@ async fn a_noise_provider_signed_by_the_pinned_key_sends_templates() {
         address: listener.local_addr().unwrap().to_string(),
         authority_public_key: Some(authority.public_key),
         network: BitcoinCashNetwork::Regtest,
+        proxy: None,
     };
     let (notify_tx, mut notify_rx) = mpsc::channel(4);
     start_template_provider(
@@ -1353,6 +1396,7 @@ async fn a_provider_signed_by_another_authority_is_refused() {
         address: listener.local_addr().unwrap().to_string(),
         authority_public_key: Some(other_key),
         network: BitcoinCashNetwork::Regtest,
+        proxy: None,
     };
     let mut silent_providers = HashSet::with_capacity(1);
     let (_server, opened) = tokio::join!(
@@ -1372,6 +1416,7 @@ async fn a_refused_setup_connection_ends_the_connection() {
         address: listener.local_addr().unwrap().to_string(),
         authority_public_key: None,
         network: BitcoinCashNetwork::Regtest,
+        proxy: None,
     };
     let refuse = async {
         let mut server = TestSv2Server::accept(&listener, None).await;
@@ -1401,14 +1446,22 @@ async fn a_refused_setup_connection_ends_the_connection() {
 #[test]
 fn the_extensions_wait_is_twice_the_setup_round_trip_within_its_bounds() {
     assert_eq!(
-        extensions_wait(Duration::from_millis(400)),
+        extensions_wait(Duration::from_millis(400), SETUP_TIMEOUT),
         Duration::from_millis(800)
     );
     assert_eq!(
-        extensions_wait(Duration::from_millis(10)),
+        extensions_wait(Duration::from_millis(10), SETUP_TIMEOUT),
         MIN_EXTENSIONS_WAIT
     );
-    assert_eq!(extensions_wait(Duration::from_secs(8)), SETUP_TIMEOUT);
+    assert_eq!(
+        extensions_wait(Duration::from_secs(8), SETUP_TIMEOUT),
+        SETUP_TIMEOUT
+    );
+    // An answer over I2P may take longer than a direct provider's limit.
+    assert_eq!(
+        extensions_wait(Duration::from_secs(8), Route::I2p.reply_timeout()),
+        Duration::from_secs(16)
+    );
 }
 
 /// A provider that took 500 ms to answer `SetupConnection` has 1 s to answer
@@ -1421,6 +1474,7 @@ async fn a_slow_setup_gets_a_longer_wait_for_the_extensions_answer() {
         address: listener.local_addr().unwrap().to_string(),
         authority_public_key: None,
         network: BitcoinCashNetwork::Regtest,
+        proxy: None,
     };
     let slow = async {
         let mut server = TestSv2Server::accept(&listener, None).await;
@@ -1475,6 +1529,7 @@ async fn a_silent_provider_is_not_asked_for_extensions_again() {
         address: listener.local_addr().unwrap().to_string(),
         authority_public_key: None,
         network: BitcoinCashNetwork::Regtest,
+        proxy: None,
     };
     let mut silent_providers = HashSet::with_capacity(1);
     let ignore = async {
@@ -1540,6 +1595,7 @@ async fn an_answering_provider_is_asked_for_extensions_on_every_connection() {
         address: listener.local_addr().unwrap().to_string(),
         authority_public_key: None,
         network: BitcoinCashNetwork::Regtest,
+        proxy: None,
     };
     let mut silent_providers = HashSet::with_capacity(1);
     let refuse = async {
@@ -2525,6 +2581,7 @@ async fn an_extended_channel_block_on_a_provided_template_returns_as_submit_solu
         address: listener.local_addr().unwrap().to_string(),
         authority_public_key: None,
         network: BitcoinCashNetwork::Regtest,
+        proxy: None,
     };
     let (notify_tx, mut notify_rx) = mpsc::channel(4);
     start_template_provider(
@@ -2682,6 +2739,7 @@ async fn a_reconnect_moves_the_client_to_the_provider_it_names() {
         address: first.local_addr().unwrap().to_string(),
         authority_public_key: None,
         network: BitcoinCashNetwork::Regtest,
+        proxy: None,
     };
     let (notify_tx, _notify_rx) = mpsc::channel(4);
     start_template_provider(
@@ -2750,6 +2808,7 @@ async fn the_successor_of_a_block_this_node_found_is_published_without_a_parent_
         address: listener.local_addr().unwrap().to_string(),
         authority_public_key: None,
         network: BitcoinCashNetwork::Regtest,
+        proxy: None,
     };
     let (notify_tx, mut notify_rx) = mpsc::channel(4);
     start_template_provider(
@@ -2864,6 +2923,7 @@ async fn a_provider_that_grants_large_templates_pushes_each_template() {
         address: listener.local_addr().unwrap().to_string(),
         authority_public_key: None,
         network: BitcoinCashNetwork::Chipnet,
+        proxy: None,
     };
     let (notify_tx, mut notify_rx) = mpsc::channel(4);
     start_template_provider(
@@ -3001,4 +3061,117 @@ async fn a_push_that_fails_verification_ends_the_connection() {
     let mut reconnected = TestSv2Server::accept(&listener, None).await;
     reconnected.receive(MESSAGE_TYPE_SETUP_CONNECTION).await;
     assert!(notify_rx.try_recv().is_err());
+}
+
+/// An onion name of the length Tor's version 3 services have.
+const ONION_PROVIDER: &str = "abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrstuvwx.onion:3335";
+
+/// The provider's answers to a connection that opens: `SetupConnection`,
+/// `RequestExtensions` and the coinbase output constraints.
+async fn accept_and_set_up(listener: &TcpListener, authority: &Sv2Authority) -> TestSv2Server {
+    let mut server = TestSv2Server::accept(listener, Some(authority)).await;
+    server.receive(MESSAGE_TYPE_SETUP_CONNECTION).await;
+    server
+        .send_message(
+            MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS,
+            SetupConnectionSuccess {
+                used_version: 2,
+                flags: 0,
+            },
+        )
+        .await;
+    server.answer_extensions(&[]).await;
+    server
+        .receive(MESSAGE_TYPE_COINBASE_OUTPUT_CONSTRAINTS)
+        .await;
+    server
+}
+
+/// A provider behind a proxy is reached through it, over Noise: the proxy
+/// is asked for the onion name itself, so the name is never resolved here,
+/// and each connection brings its own username, which puts it on its own
+/// Tor circuit.
+#[tokio::test]
+async fn a_provider_behind_a_proxy_is_reached_by_its_name_through_the_proxy() {
+    let authority = test_sv2_authority();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mut proxy = TestSocksProxy::start(Some(listener.local_addr().unwrap()), true).await;
+    let provider = TemplateProvider {
+        address: ONION_PROVIDER.to_string(),
+        authority_public_key: Some(authority.public_key),
+        network: BitcoinCashNetwork::Regtest,
+        proxy: Some(proxy.address.clone()),
+    };
+    let mut silent_providers = HashSet::with_capacity(1);
+    let mut usernames = Vec::with_capacity(2);
+    for _ in 0..2 {
+        let (_server, opened) = tokio::join!(
+            accept_and_set_up(&listener, &authority),
+            open_connection(&provider, &mut silent_providers)
+        );
+        assert!(opened.is_ok(), "{:?}", opened.err());
+        let request = proxy.next_request().await;
+        assert_eq!(request.address_type, 3, "the proxy was not given a name");
+        assert_eq!(
+            request.host,
+            ONION_PROVIDER.trim_end_matches(":3335").as_bytes()
+        );
+        assert_eq!(request.port, 3335);
+        usernames.push(request.username.unwrap());
+    }
+    assert_ne!(usernames[0], usernames[1]);
+}
+
+/// When the proxy cannot reach the provider the connection fails. The node
+/// does not then connect to the provider's address itself, which would show
+/// the provider this computer's address.
+#[tokio::test]
+async fn a_proxy_that_cannot_reach_the_provider_is_not_bypassed() {
+    let authority = test_sv2_authority();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mut proxy = TestSocksProxy::start(None, false).await;
+    let provider = TemplateProvider {
+        address: listener.local_addr().unwrap().to_string(),
+        authority_public_key: Some(authority.public_key),
+        network: BitcoinCashNetwork::Regtest,
+        proxy: Some(proxy.address.clone()),
+    };
+    let mut silent_providers = HashSet::with_capacity(1);
+    let Err(refused) = open_connection(&provider, &mut silent_providers).await else {
+        panic!("a connection opened although the proxy refused it");
+    };
+    assert!(refused.contains("connection refused"), "{refused}");
+    assert_eq!(proxy.next_request().await.address_type, 1);
+    assert!(
+        timeout(Duration::from_millis(300), listener.accept())
+            .await
+            .is_err(),
+        "the node connected to the provider directly"
+    );
+}
+
+/// A provider behind a proxy gets longer to accept the connection and to
+/// answer than one the node connects to directly, and an I2P name longer
+/// still.
+#[test]
+fn a_provider_behind_a_proxy_gets_longer_to_answer() {
+    let provider = |address: &str, proxy: Option<&str>| TemplateProvider {
+        address: address.to_string(),
+        authority_public_key: Some([7; 32]),
+        network: BitcoinCashNetwork::Regtest,
+        proxy: proxy.map(str::to_string),
+    };
+    let direct = Route::of(&provider("node.example:3335", None));
+    let tor = Route::of(&provider(ONION_PROVIDER, Some("127.0.0.1:9050")));
+    let i2p = Route::of(&provider("abcdefgh.b32.i2p:3335", Some("127.0.0.1:4447")));
+    assert_eq!(
+        (direct, tor, i2p),
+        (Route::Direct, Route::Proxy, Route::I2p)
+    );
+    assert_eq!(direct.dial_timeout(), SETUP_TIMEOUT);
+    assert!(direct.dial_timeout() < tor.dial_timeout());
+    assert!(tor.dial_timeout() < i2p.dial_timeout());
+    assert_eq!(direct.reply_timeout(), SETUP_TIMEOUT);
+    assert!(direct.reply_timeout() < tor.reply_timeout());
+    assert!(tor.reply_timeout() < i2p.reply_timeout());
 }

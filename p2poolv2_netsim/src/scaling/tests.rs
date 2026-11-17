@@ -119,7 +119,8 @@ fn the_compact_coinbase_idea_compares_with_3_kb_and_200_kib_coinbases() {
     assert_eq!(variants[0].relay, ShareRelay::Full);
     assert_eq!(variants[1].share_sizes().coinbase_bytes(), 204_663);
     assert_eq!(variants[1].relay, ShareRelay::Full);
-    assert_eq!(variants[2].share_sizes().coinbase_bytes(), 34_357);
+    assert_eq!(variants[2].share_sizes().coinbase_bytes(), 28_747);
+    assert_eq!(variants[2].label, "29 KB coinbase, without payouts");
     assert_eq!(variants[2].relay, ShareRelay::WithoutPayouts);
     assert_eq!(variants[3].share_sizes().coinbase_bytes(), 204_663);
     assert_eq!(variants[3].relay, ShareRelay::WithoutPayouts);

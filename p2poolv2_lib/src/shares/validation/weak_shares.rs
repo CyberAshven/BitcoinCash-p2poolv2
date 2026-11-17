@@ -20,8 +20,12 @@
 //!
 //! A share carrying weak shares must also commit to exactly them, carry each
 //! with its parent at most `WEAK_DEPTH` shares below it, and carry none an
-//! ancestor of it already carries. These are share-chain rules; a Bitcoin
-//! Cash node never sees them.
+//! ancestor of it already carries. Its header's `weak_asking` must be the
+//! number of them that ask for an easier weak target
+//! (`shares::weak::weak_share_asks`, part 6 of the design page), and it may
+//! carry more than `WEAK_IDLE_CAP` of them only while more than one in
+//! `WEAK_ASK_DIVISOR` ask (`shares::weak::weak_count_allowed`). These are
+//! share-chain rules; a Bitcoin Cash node never sees them.
 
 #[cfg(test)]
 mod tests;
@@ -43,7 +47,8 @@ use crate::shares::share_block::{ShareBlock, ShareHeader, is_terminal_blockhash}
 use crate::shares::share_commitment::ShareCommitment;
 use crate::shares::share_version::check_share_version_alone;
 use crate::shares::weak::{
-    WEAK_BYTES, WEAK_CAP, WEAK_DEPTH, WeakShare, parent_weak_target, weak_root,
+    PrunedWeakShares, WEAK_BYTES, WEAK_CAP, WEAK_DEPTH, WeakShare, parent_weak_target,
+    weak_cap_for_asking, weak_count_allowed, weak_root, weak_share_asks,
 };
 use crate::sim_overrides;
 use crate::store::writer::StoreError;
@@ -66,7 +71,8 @@ const WEAK_PAYOUT_CACHE_CAPACITY: usize = 4 * WEAK_DEPTH as usize;
 /// distribution: its parent (the window's anchor), the paying header's bits
 /// and Bitcoin Cash prev, the coinbase's total value, its merge-mining output
 /// and its own donation and fee. Weak shares on the same template share all
-/// of them, so they share one rebuild of the window's payouts.
+/// of them, so they share one rebuild of the window's payouts. A share
+/// relayed without its payouts depends on the same fields of its header.
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct WeakPayoutKey {
     parent: BlockHash,
@@ -78,8 +84,7 @@ struct WeakPayoutKey {
 }
 
 impl WeakPayoutKey {
-    fn of(weak_share: &WeakShare) -> Self {
-        let header = &weak_share.header;
+    fn of(header: &ShareHeader, coinbase_value: u64) -> Self {
         let mut merge_mining = Vec::with_capacity(64);
         header
             .merge_mining_commitment()
@@ -110,7 +115,7 @@ impl WeakPayoutKey {
             parent: header.prev_share_blockhash,
             bitcoin_bits: header.bitcoin_header.bits.to_consensus(),
             bch_prev: header.bitcoin_header.prev_blockhash,
-            coinbase_value: weak_share.coinbase_value,
+            coinbase_value,
             merge_mining,
             cuts,
         }
@@ -151,7 +156,6 @@ struct WeakWeightsKey {
 /// template ([`WeakPayoutKey`]): weak shares on many templates of one block
 /// cost one walk of the window, and each weak share one coinbase rebuild and
 /// hash.
-#[derive(Default)]
 pub struct WeakPayoutCache {
     weights: HashMap<WeakWeightsKey, Arc<PplnsWeights>>,
     payouts: HashMap<WeakPayoutKey, Arc<CoinbasePayouts>>,
@@ -159,15 +163,33 @@ pub struct WeakPayoutCache {
     weights_order: VecDeque<WeakWeightsKey>,
     /// The payout keys in the order they were cached, oldest first.
     payouts_order: VecDeque<WeakPayoutKey>,
+    /// The most window weights kept.
+    weights_capacity: usize,
+    /// The most expected payouts kept.
+    payouts_capacity: usize,
+}
+
+impl Default for WeakPayoutCache {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl WeakPayoutCache {
     pub fn new() -> Self {
+        Self::with_capacities(WEAK_WEIGHTS_CACHE_CAPACITY, WEAK_PAYOUT_CACHE_CAPACITY)
+    }
+
+    /// A cache keeping at most `weights_capacity` window weights and
+    /// `payouts_capacity` expected payouts, each dropping its oldest first.
+    pub fn with_capacities(weights_capacity: usize, payouts_capacity: usize) -> Self {
         Self {
-            weights: HashMap::with_capacity(WEAK_WEIGHTS_CACHE_CAPACITY),
-            payouts: HashMap::with_capacity(WEAK_PAYOUT_CACHE_CAPACITY),
-            weights_order: VecDeque::with_capacity(WEAK_WEIGHTS_CACHE_CAPACITY),
-            payouts_order: VecDeque::with_capacity(WEAK_PAYOUT_CACHE_CAPACITY),
+            weights: HashMap::with_capacity(weights_capacity),
+            payouts: HashMap::with_capacity(payouts_capacity),
+            weights_order: VecDeque::with_capacity(weights_capacity),
+            payouts_order: VecDeque::with_capacity(payouts_capacity),
+            weights_capacity,
+            payouts_capacity,
         }
     }
 
@@ -187,7 +209,7 @@ impl WeakPayoutCache {
         }
         let weights = self.weights_or_walk(key.weights_key(), walk_window)?;
         let payouts = Arc::new(build_outputs(&weights)?);
-        if self.payouts.len() >= WEAK_PAYOUT_CACHE_CAPACITY
+        if self.payouts.len() >= self.payouts_capacity
             && let Some(oldest) = self.payouts_order.pop_front()
         {
             self.payouts.remove(&oldest);
@@ -208,7 +230,7 @@ impl WeakPayoutCache {
             return Ok(Arc::clone(weights));
         }
         let weights = Arc::new(walk_window()?);
-        if self.weights.len() >= WEAK_WEIGHTS_CACHE_CAPACITY
+        if self.weights.len() >= self.weights_capacity
             && let Some(oldest) = self.weights_order.pop_front()
         {
             self.weights.remove(&oldest);
@@ -220,9 +242,11 @@ impl WeakPayoutCache {
 }
 
 /// The body check of a share's weak shares, against its header alone: as
-/// many as `weak_count`, no proof-of-work hash twice, and the merkle root of
-/// their whole encodings (`weak_root`) the header's `weak_root`. A failure is
-/// a bad copy of the share, as for its other body parts.
+/// many as `weak_count`, no proof-of-work hash twice, and their weak root
+/// (`weak_root`: their leaf root and their summary) the header's
+/// `weak_root`. A body whose weak shares were pruned is checked by its leaf
+/// root and summary instead ([`check_pruned_weak_shares_match_header`]). A
+/// failure is a bad copy of the share, as for its other body parts.
 ///
 /// The root binds every field of every carried weak share, so a copy that
 /// alters any of them fails here, before it is stored, and is fetched again.
@@ -238,6 +262,14 @@ impl WeakPayoutCache {
 /// so two encodings of one proof of work are a repeat too.
 pub(crate) fn check_weak_shares_match_header(share: &ShareBlock) -> Result<(), ValidationError> {
     let header = &share.header;
+    if let Some(pruned_weak_shares) = &share.pruned_weak_shares {
+        if !share.weak_shares.is_empty() {
+            return Err(ValidationError::consensus(
+                "Share carries weak shares whole and pruned",
+            ));
+        }
+        return check_pruned_weak_shares_match_header(header, pruned_weak_shares);
+    }
     if share.weak_shares.len() != usize::from(header.weak_count) {
         return Err(ValidationError::consensus(format!(
             "Share carries {} weak shares, its header commits {}",
@@ -266,6 +298,59 @@ pub(crate) fn check_weak_shares_match_header(share: &ShareBlock) -> Result<(), V
     Ok(())
 }
 
+/// The body check of a share served with its weak shares pruned: their
+/// summary holds `weak_count` proof-of-work hashes, none twice, in credit
+/// groups that count as many, and their leaf root and summary give the
+/// header's `weak_root` (`PrunedWeakShares::weak_root`). A failure is a bad
+/// copy, as for a whole body.
+///
+/// The root fixes the summary the miner committed, which is all a share
+/// below the payout depth is read for: the payouts of shares above it and
+/// the carried-once rule. Its weak shares themselves are checked only inside
+/// the payout depth, where a body without them is never used
+/// ([`DefaultShareValidator::validate_share_block`]).
+fn check_pruned_weak_shares_match_header(
+    header: &ShareHeader,
+    pruned_weak_shares: &PrunedWeakShares,
+) -> Result<(), ValidationError> {
+    let summary = &pruned_weak_shares.summary;
+    let committed = usize::from(header.weak_count);
+    if committed == 0 || summary.pow_hashes.len() != committed {
+        return Err(ValidationError::consensus(format!(
+            "Pruned weak shares sum up {} weak shares, the header commits {committed}",
+            summary.pow_hashes.len()
+        )));
+    }
+    let grouped: u64 = summary
+        .groups
+        .iter()
+        .map(|group| u64::from(group.count))
+        .sum();
+    if grouped != committed as u64 {
+        return Err(ValidationError::consensus(format!(
+            "Pruned weak shares group {grouped} weak shares, the header commits {committed}"
+        )));
+    }
+    let mut seen = HashSet::with_capacity(committed);
+    if let Some(repeated) = summary
+        .pow_hashes
+        .iter()
+        .find(|pow_hash| !seen.insert(**pow_hash))
+    {
+        return Err(ValidationError::consensus(format!(
+            "Weak share {repeated} is summed up more than once"
+        )));
+    }
+    let root = pruned_weak_shares.weak_root();
+    if root != header.weak_root {
+        return Err(ValidationError::consensus(format!(
+            "Pruned weak shares have root {root}, the header commits {}",
+            header.weak_root
+        )));
+    }
+    Ok(())
+}
+
 /// A share carries at most `WEAK_CAP` weak shares in `WEAK_BYTES`.
 pub(crate) fn check_weak_shares_size(weak_shares: &[WeakShare]) -> Result<(), ValidationError> {
     if weak_shares.len() > WEAK_CAP {
@@ -278,6 +363,43 @@ pub(crate) fn check_weak_shares_size(weak_shares: &[WeakShare]) -> Result<(), Va
     if bytes > WEAK_BYTES {
         return Err(ValidationError::consensus(format!(
             "Share carries {bytes} bytes of weak shares, more than {WEAK_BYTES}"
+        )));
+    }
+    Ok(())
+}
+
+/// A share's header commits how many of the weak shares it carries ask for
+/// an easier weak target, `weak_asking`, which moves the next share's weak
+/// ratio (`shares::weak::next_weak_ratio`): it must be `asking`, the number
+/// of carried weak shares whose `wanted_bits` is easier than the weak target
+/// each met (`shares::weak::weak_share_asks`).
+///
+/// Every node counts the same: a carried weak share's `wanted_bits` is fixed
+/// by the carrier's weak root, and the weak target it met by its parent's
+/// header. So a share can neither claim asks its weak shares do not make
+/// nor hide the ones they do.
+fn check_weak_asking_matches_header(
+    header: &ShareHeader,
+    asking: usize,
+) -> Result<(), ValidationError> {
+    if usize::from(header.weak_asking) != asking {
+        return Err(ValidationError::consensus(format!(
+            "Share header commits {} asking weak shares, its body carries {asking}",
+            header.weak_asking
+        )));
+    }
+    check_weak_count_allowed(usize::from(header.weak_count), asking)
+}
+
+/// A share carries more than `WEAK_IDLE_CAP` weak shares only while more
+/// than one in `WEAK_ASK_DIVISOR` of them ask
+/// (`shares::weak::weak_count_allowed`). A header breaking it does not
+/// decode; this holds a share built in this node to it too.
+fn check_weak_count_allowed(weak_count: usize, asking: usize) -> Result<(), ValidationError> {
+    if !weak_count_allowed(weak_count, asking) {
+        return Err(ValidationError::consensus(format!(
+            "Share carries {weak_count} weak shares with {asking} asking, more than the {} they allow",
+            weak_cap_for_asking(asking)
         )));
     }
     Ok(())
@@ -330,6 +452,18 @@ impl DefaultShareValidator {
         weak_share: &WeakShare,
         chain_store_handle: &ChainStoreHandle,
     ) -> Result<(), ValidationError> {
+        self.validate_weak_share_header_for_target(weak_share, chain_store_handle)
+            .map(|_weak_target| ())
+    }
+
+    /// [`Self::validate_weak_share_header`], giving the weak target the weak
+    /// share met, its parent's: what tells whether it asks for an easier one
+    /// (`shares::weak::weak_share_asks`), with no second read of its parent.
+    fn validate_weak_share_header_for_target(
+        &self,
+        weak_share: &WeakShare,
+        chain_store_handle: &ChainStoreHandle,
+    ) -> Result<Target, ValidationError> {
         let header = &weak_share.header;
         self.validate_weak_share_alone(weak_share)?;
 
@@ -365,12 +499,16 @@ impl DefaultShareValidator {
                 "Weak share is outside the difficulty band: {error}"
             ))
         })?;
-        self.validate_weak_share_proof_of_work(weak_share, &parent)?;
+        let weak_target = self.validate_weak_share_proof_of_work(weak_share, &parent)?;
 
         self.validate_share_version(header, chain_store_handle)?;
-        self.validate_bch_prev_known(header, chain_store_handle)?;
+        // As for a full share: with the BCH prev known, the token band
+        // follows its own ticks and next interval.
+        let bch_prev = self.validate_bch_prev_known(header, chain_store_handle)?;
+        self.validate_token_share_asert(header, bch_prev)?;
         let ancestor_times = stored_ancestor_times(parent_hash, chain_store_handle)?;
-        check_median_time_past(header.time, &ancestor_times)
+        check_median_time_past(header.time, &ancestor_times)?;
+        Ok(weak_target)
     }
 
     /// The header rules of a weak share that need no store: a Bitcoin Cash
@@ -402,18 +540,20 @@ impl DefaultShareValidator {
         check_share_version_alone(header.share_version).map_err(|error| {
             ValidationError::consensus(format!("Invalid share version: {error}"))
         })?;
-        self.validate_token_share_asert(header)?;
+        // No store here: the pins give the BCH prev's ticks by height.
+        self.validate_token_share_asert(header, None)?;
         super::ShareValidator::validate_coinbase_proof(self, header, &weak_share.merkle_branch)
     }
 
     /// Rule 2: the weak share's hash meets `parent`'s weak target and misses
     /// its own bits. A hash that meets its bits is a full share and travels
-    /// as one, so one proof of work is credited once.
+    /// as one, so one proof of work is credited once. Gives the weak target
+    /// it met.
     fn validate_weak_share_proof_of_work(
         &self,
         weak_share: &WeakShare,
         parent: &ShareHeader,
-    ) -> Result<(), ValidationError> {
+    ) -> Result<Target, ValidationError> {
         let pow_hash = weak_share.pow_hash();
         let weak_target = parent_weak_target(parent, self.target_ceiling);
         if !sim_overrides::pow_meets(weak_target, pow_hash) {
@@ -427,7 +567,7 @@ impl DefaultShareValidator {
                 "Weak share hash {pow_hash} meets its share target {share_target}: it is a full share"
             )));
         }
-        Ok(())
+        Ok(weak_target)
     }
 
     /// Rule 3: the weak share's Bitcoin Cash coinbase pays the PPLNS window
@@ -449,9 +589,51 @@ impl DefaultShareValidator {
         cache: &mut WeakPayoutCache,
     ) -> Result<(), ValidationError> {
         let header = &weak_share.header;
+        let coinbase = self.rebuild_coinbase_paying_window(
+            header,
+            &carried_script_sig(weak_share),
+            weak_share.coinbase_value,
+            chain_store_handle,
+            window,
+            cache,
+        )?;
+        let root =
+            compute_merkle_root_from_branches(coinbase.compute_txid(), &weak_share.merkle_branch);
+        if root != header.bitcoin_header.merkle_root {
+            return Err(ValidationError::consensus(format!(
+                "Weak share {} does not pay its PPLNS window: its rebuilt coinbase gives merkle root {root}, not its header's",
+                weak_share.pow_hash()
+            )));
+        }
+        Ok(())
+    }
+
+    /// The Bitcoin Cash coinbase `header` implies when it pays the PPLNS
+    /// window anchored at its parent: the scriptSig of `carried_coinbase`,
+    /// which needs no outputs, the window's payouts for
+    /// `coinbase_value`, the header's merge-mining output, payout tree,
+    /// padding and commitment, and the locktime from its height, within the
+    /// coinbase limit of its split. Rule 3 of a weak share checks this
+    /// coinbase's txid against its header's merkle root, and a share relayed
+    /// without its payouts (`ShareWithoutPayouts`) gets its coinbase back
+    /// from it.
+    ///
+    /// The window's weights come from `cache` when another share or weak
+    /// share on the same parent and Bitcoin Cash block already walked the
+    /// window, and its payouts when one on the same template already built
+    /// them.
+    pub(crate) fn rebuild_coinbase_paying_window(
+        &self,
+        header: &ShareHeader,
+        carried_coinbase: &Transaction,
+        coinbase_value: u64,
+        chain_store_handle: &ChainStoreHandle,
+        window: &mut PplnsWindow,
+        cache: &mut WeakPayoutCache,
+    ) -> Result<Transaction, ValidationError> {
         let split = split_for_share(self.chain, header);
         let payouts = cache.get_or_build(
-            WeakPayoutKey::of(weak_share),
+            WeakPayoutKey::of(header, coinbase_value),
             || {
                 let paying_block = PayingBlock::new(
                     bitcoin_block_difficulty(header.bitcoin_header.bits, window.network()),
@@ -465,32 +647,18 @@ impl DefaultShareValidator {
                     )
                     .map_err(window_error_verdict)
             },
-            |weights| {
-                Self::build_expected_outputs(header, weights, weak_share.coinbase_value, split)
-            },
+            |weights| Self::build_expected_outputs(header, weights, coinbase_value, split),
         )?;
         let commitment_hash = ShareCommitment::from_share_header_and_root(
             header,
             header.coinbase_proof.share_witness_root,
         )
         .hash();
-        let coinbase = self.rebuild_bitcoin_coinbase(
-            header,
-            &carried_script_sig(weak_share),
-            &payouts,
-            commitment_hash,
-        )?;
+        let coinbase =
+            self.rebuild_bitcoin_coinbase(header, carried_coinbase, &payouts, commitment_hash)?;
         check_bch_coinbase_limit(&coinbase, split)
             .map_err(|error| ValidationError::consensus(error.to_string()))?;
-        let root =
-            compute_merkle_root_from_branches(coinbase.compute_txid(), &weak_share.merkle_branch);
-        if root != header.bitcoin_header.merkle_root {
-            return Err(ValidationError::consensus(format!(
-                "Weak share {} does not pay its PPLNS window: its rebuilt coinbase gives merkle root {root}, not its header's",
-                weak_share.pow_hash()
-            )));
-        }
-        Ok(())
+        Ok(coinbase)
     }
 
     /// Every check of a relayed weak share that does not depend on a
@@ -631,7 +799,8 @@ impl DefaultShareValidator {
 
     /// The store checks of the weak shares a share carries, run with its
     /// other parallel checks: each one's header rules
-    /// ([`Self::validate_weak_share_header`]) and where it may be carried
+    /// ([`Self::validate_weak_share_header`]), how many of them ask
+    /// ([`check_weak_asking_matches_header`]) and where each may be carried
     /// ([`Self::validate_carried_weak_positions`]).
     ///
     /// Runs on a stored body, which passed [`check_weak_shares_match_header`]:
@@ -642,10 +811,14 @@ impl DefaultShareValidator {
         share: &ShareBlock,
         chain_store_handle: &ChainStoreHandle,
     ) -> Result<(), ValidationError> {
+        let mut asking: usize = 0;
         for weak_share in &share.weak_shares {
             check_carried_weak_time(weak_share.header.time, share.header.time)?;
-            self.validate_weak_share_header(weak_share, chain_store_handle)?;
+            let weak_target =
+                self.validate_weak_share_header_for_target(weak_share, chain_store_handle)?;
+            asking += usize::from(weak_share_asks(&weak_share.header, weak_target));
         }
+        check_weak_asking_matches_header(&share.header, asking)?;
         self.validate_carried_weak_positions(share, chain_store_handle)
     }
 

@@ -22,8 +22,10 @@
 //! share the way ABLA carries Bitcoin Cash's block size limit from block to
 //! block, so a node checks it from the parent's header alone. `wanted_bits`
 //! is the target the share's node wanted for its miner before the cap, the
-//! signal that moves `C`. Every comparison uses the exact 256-bit targets
-//! the compact forms decode to.
+//! signal that moves `C`. It may also be easier than `bits`: it then asks
+//! for an easier weak target (`shares::weak::weak_share_asks`), and the band
+//! reads it as wanting nothing harder. Every comparison uses the exact
+//! 256-bit targets the compact forms decode to.
 //!
 //! These are share-chain rules. A Bitcoin Cash node never sees them: the
 //! blocks P2Pool finds stay ordinary Bitcoin Cash blocks.
@@ -59,7 +61,7 @@ pub const BCH_BAND_RULE_TAG: &str = "band-c64";
 /// What the band rule reads from a share's parent header: its own target,
 /// its minimum, the target its node wanted and its band cap, and for the
 /// weak ratio, carried the same way (`shares::weak`), the parent's weak
-/// ratio and how many weak shares it carried.
+/// ratio, how many weak shares it carried and how many of those asked.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ParentBand {
     /// The parent's own target.
@@ -74,6 +76,8 @@ pub struct ParentBand {
     pub weak_ratio: u32,
     /// How many weak shares the parent carried.
     pub weak_count: u16,
+    /// How many of the weak shares the parent carried ask.
+    pub weak_asking: u16,
 }
 
 impl ParentBand {
@@ -86,6 +90,7 @@ impl ParentBand {
             band_cap: header.band_cap,
             weak_ratio: header.weak_ratio,
             weak_count: header.weak_count,
+            weak_asking: header.weak_asking,
         }
     }
 }
@@ -110,8 +115,10 @@ impl ParentBand {
 /// target rather than the share's own, so a minority of shares wanting
 /// heavier ones opens a band of one: counted by their own bits, at `C = 1`
 /// they would weigh one each and `C` would rise only once more than half of
-/// all shares wanted more. Integer arithmetic only, so every node computes
-/// the same cap.
+/// all shares wanted more. A parent whose `wanted_bits` is easier than its
+/// own target, asking for an easier weak target, did not want more: its
+/// wanted target is not harder than its cap allowed. Integer arithmetic
+/// only, so every node computes the same cap.
 pub fn next_band_cap(parent: &ParentBand) -> u32 {
     let band_cap = u64::from(parent.band_cap);
     let step_divisor = u64::from(BAND_STEP_DIVISOR);
@@ -169,8 +176,6 @@ pub enum BandError {
         asert_bits: u32,
         band_cap: u32,
     },
-    /// The target the share's node wanted is easier than the share's own.
-    WantedEasierThanBits { wanted_bits: u32, bits: u32 },
     /// The share's weak ratio is not one step from its parent's
     /// (`shares::weak::next_weak_ratio`).
     WeakRatio { declared: u32, expected: u32 },
@@ -195,10 +200,6 @@ impl fmt::Display for BandError {
                 formatter,
                 "bits {bits:#010x} are more than {band_cap}/1024 times harder than the minimum {asert_bits:#010x}"
             ),
-            BandError::WantedEasierThanBits { wanted_bits, bits } => write!(
-                formatter,
-                "wanted bits {wanted_bits:#010x} are easier than the share's bits {bits:#010x}"
-            ),
             BandError::WeakRatio { declared, expected } => write!(
                 formatter,
                 "weak ratio {declared} is not one step from the parent's, which gives {expected}"
@@ -210,14 +211,20 @@ impl fmt::Display for BandError {
 impl std::error::Error for BandError {}
 
 /// The band rule for a Bitcoin Cash share on `parent`: its band cap is one
-/// step from the parent's ([`next_band_cap`]), its target lies in
-/// `T_asert / C <= T <= T_asert` with `C = band_cap / 1024` its own cap, and
-/// the target its node wanted is at least as hard as its own.
+/// step from the parent's ([`next_band_cap`]), and its target lies in
+/// `T_asert / C <= T <= T_asert` with `C = band_cap / 1024` its own cap.
 ///
 /// `T_asert` is the share's `asert_bits`; the caller checks that it is the
 /// ASERT target from the parent, as it checked the share's bits before the
 /// band. The bounds compare exact 256-bit targets, the lower one as
 /// `T * band_cap >= T_asert * 1024`.
+///
+/// The target the share's node wanted, `wanted_bits`, is a signal only and
+/// makes no share invalid: harder than the cap allows it moves the next
+/// share's cap up, and easier than the share's own target it asks for an
+/// easier weak target (`shares::weak::weak_share_asks`). Until 2026-11-15 it
+/// had to be at least as hard as the share's own target
+/// (`BCH_WEAK_SHARE_RULE_TAG`).
 ///
 /// The share's weak ratio, the second state each Bitcoin Cash share carries
 /// from its parent's header, must likewise be one step from the parent's
@@ -225,10 +232,10 @@ impl std::error::Error for BandError {}
 /// full validation, header sync and block receipt.
 pub fn check_share_band(header: &ShareHeader, parent: &ParentBand) -> Result<(), BandError> {
     let expected_band_cap = next_band_cap(parent);
-    let expected_weak_ratio = next_weak_ratio(parent.weak_ratio, parent.weak_count);
+    let expected_weak_ratio =
+        next_weak_ratio(parent.weak_ratio, parent.weak_count, parent.weak_asking);
     let minimum = target_to_u512(Target::from_compact(header.asert_bits));
     let target = target_to_u512(Target::from_compact(header.bits));
-    let wanted = target_to_u512(Target::from_compact(header.wanted_bits));
     if header.weak_ratio != expected_weak_ratio {
         Err(BandError::WeakRatio {
             declared: header.weak_ratio,
@@ -250,24 +257,21 @@ pub fn check_share_band(header: &ShareHeader, parent: &ParentBand) -> Result<(),
             asert_bits: header.asert_bits.to_consensus(),
             band_cap: header.band_cap,
         })
-    } else if wanted > target {
-        Err(BandError::WantedEasierThanBits {
-            wanted_bits: header.wanted_bits.to_consensus(),
-            bits: header.bits.to_consensus(),
-        })
     } else {
         Ok(())
     }
 }
 
 /// The targets of a job's shares: the target they are mined at and the one
-/// their node wanted for the miner before the band cap.
+/// their node wanted for the miner.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct JobBand {
     /// The share target the job commits to.
     pub bits: CompactTarget,
-    /// The target the miner would have had without the cap, at least as
-    /// hard as `bits`.
+    /// The target the node wanted for the miner: `bits`; harder, the target
+    /// the miner would have had without the cap; or, on a job at the
+    /// minimum, easier than its weak target, which asks for an easier one
+    /// (`stratum::work::band_policy`).
     pub wanted_bits: CompactTarget,
 }
 
@@ -342,7 +346,7 @@ fn harder_of(first: CompactTarget, second: CompactTarget) -> CompactTarget {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shares::weak::{GENESIS_WEAK_RATIO, WEAK_FILL};
+    use crate::shares::weak::{GENESIS_WEAK_RATIO, WEAK_FILL, WEAK_RATIO_MAX};
     use crate::test_utils::TestShareBlockBuilder;
     use p2poolv2_wallet::share_owner::ShareOwner;
 
@@ -355,6 +359,7 @@ mod tests {
             band_cap: BAND_CAP_UNIT,
             weak_ratio: 256_000,
             weak_count: WEAK_FILL + 1,
+            weak_asking: 0,
         };
         let header = TestShareBlockBuilder::new()
             .share_owner(ShareOwner::CashP2pkh([0x11; 20]))
@@ -375,6 +380,7 @@ mod tests {
             band_cap: BAND_CAP_UNIT,
             weak_ratio: 256_000,
             weak_count: WEAK_FILL + 1,
+            weak_asking: 0,
         };
         let header = TestShareBlockBuilder::new()
             .share_owner(ShareOwner::CashP2pkh([0x11; 20]))
@@ -400,6 +406,8 @@ mod tests {
     const MINIMUM_OVER_EIGHT: u32 = 0x1c08_0000;
     /// A target far beyond `C_MAX` times harder than [`MINIMUM`]: `2^207`.
     const FAR_HARDER: u32 = 0x1b00_8000;
+    /// A target 1,024 times easier than [`MINIMUM`]: `2^232`.
+    const FAR_EASIER: u32 = 0x1e01_0000;
 
     #[test]
     fn the_rule_tag_names_c_max() {
@@ -415,6 +423,7 @@ mod tests {
             band_cap: GENESIS_BAND_CAP,
             weak_ratio: GENESIS_WEAK_RATIO,
             weak_count: 0,
+            weak_asking: 0,
         };
 
         assert_eq!(next_band_cap(&genesis), BAND_CAP_UNIT);
@@ -428,8 +437,9 @@ mod tests {
             asert_bits: CompactTarget::from_consensus(MINIMUM),
             wanted_bits: CompactTarget::from_consensus(MINIMUM_OVER_TWO),
             band_cap: 2048,
-            weak_ratio: GENESIS_WEAK_RATIO,
+            weak_ratio: WEAK_RATIO_MAX,
             weak_count: 0,
+            weak_asking: 0,
         };
 
         assert_eq!(next_band_cap(&parent), 2048 - 4);
@@ -444,8 +454,9 @@ mod tests {
             asert_bits: CompactTarget::from_consensus(MINIMUM),
             wanted_bits: CompactTarget::from_consensus(MINIMUM_OVER_EIGHT),
             band_cap: 4096,
-            weak_ratio: GENESIS_WEAK_RATIO,
+            weak_ratio: WEAK_RATIO_MAX,
             weak_count: 0,
+            weak_asking: 0,
         };
 
         assert_eq!(next_band_cap(&parent), 4096 + 64);
@@ -460,8 +471,9 @@ mod tests {
             asert_bits: CompactTarget::from_consensus(MINIMUM),
             wanted_bits: CompactTarget::from_consensus(MINIMUM_OVER_TWO),
             band_cap: BAND_CAP_UNIT,
-            weak_ratio: GENESIS_WEAK_RATIO,
+            weak_ratio: WEAK_RATIO_MAX,
             weak_count: 0,
+            weak_asking: 0,
         };
 
         assert_eq!(next_band_cap(&parent), BAND_CAP_UNIT + 4);
@@ -475,8 +487,9 @@ mod tests {
             asert_bits: CompactTarget::from_consensus(MINIMUM),
             wanted_bits: CompactTarget::from_consensus(FAR_HARDER),
             band_cap: 2048,
-            weak_ratio: GENESIS_WEAK_RATIO,
+            weak_ratio: WEAK_RATIO_MAX,
             weak_count: 0,
+            weak_asking: 0,
         };
 
         assert_eq!(next_band_cap(&parent), 2048 + 256);
@@ -492,8 +505,9 @@ mod tests {
             asert_bits: CompactTarget::from_consensus(MINIMUM),
             wanted_bits: two_fifths.to_compact_lossy(),
             band_cap: 2048,
-            weak_ratio: GENESIS_WEAK_RATIO,
+            weak_ratio: WEAK_RATIO_MAX,
             weak_count: 0,
+            weak_asking: 0,
         };
 
         assert_eq!(next_band_cap(&parent), 2048 + 8);
@@ -506,8 +520,9 @@ mod tests {
             asert_bits: CompactTarget::from_consensus(MINIMUM),
             wanted_bits: CompactTarget::from_consensus(FAR_HARDER),
             band_cap: BAND_CAP_MAX,
-            weak_ratio: GENESIS_WEAK_RATIO,
+            weak_ratio: WEAK_RATIO_MAX,
             weak_count: 0,
+            weak_asking: 0,
         };
 
         assert_eq!(next_band_cap(&parent), BAND_CAP_MAX);
@@ -520,8 +535,9 @@ mod tests {
             asert_bits: CompactTarget::from_consensus(MINIMUM),
             wanted_bits: CompactTarget::from_consensus(MINIMUM),
             band_cap: BAND_CAP_UNIT,
-            weak_ratio: GENESIS_WEAK_RATIO,
+            weak_ratio: WEAK_RATIO_MAX,
             weak_count: 0,
+            weak_asking: 0,
         };
 
         assert_eq!(next_band_cap(&parent), BAND_CAP_UNIT);
@@ -541,8 +557,9 @@ mod tests {
                 asert_bits: CompactTarget::from_consensus(MINIMUM),
                 wanted_bits: CompactTarget::from_consensus(MINIMUM),
                 band_cap,
-                weak_ratio: GENESIS_WEAK_RATIO,
+                weak_ratio: WEAK_RATIO_MAX,
                 weak_count: 0,
+                weak_asking: 0,
             })
         };
 
@@ -551,8 +568,9 @@ mod tests {
             asert_bits: CompactTarget::from_consensus(MINIMUM),
             wanted_bits: wanted_thirty_times,
             band_cap: BAND_CAP_UNIT,
-            weak_ratio: GENESIS_WEAK_RATIO,
+            weak_ratio: WEAK_RATIO_MAX,
             weak_count: 0,
+            weak_asking: 0,
         });
         assert_eq!(band_cap, BAND_CAP_UNIT + 60);
         let band_cap = light_step(band_cap);
@@ -577,8 +595,9 @@ mod tests {
             asert_bits: CompactTarget::from_consensus(MINIMUM),
             wanted_bits: CompactTarget::from_consensus(MINIMUM),
             band_cap: 4104,
-            weak_ratio: GENESIS_WEAK_RATIO,
+            weak_ratio: WEAK_RATIO_MAX,
             weak_count: 0,
+            weak_asking: 0,
         };
         let header = TestShareBlockBuilder::new()
             .share_owner(ShareOwner::CashP2pkh([0x11; 20]))
@@ -601,8 +620,9 @@ mod tests {
             asert_bits: CompactTarget::from_consensus(MINIMUM),
             wanted_bits: CompactTarget::from_consensus(MINIMUM),
             band_cap: 4104,
-            weak_ratio: GENESIS_WEAK_RATIO,
+            weak_ratio: WEAK_RATIO_MAX,
             weak_count: 0,
+            weak_asking: 0,
         };
         let header = TestShareBlockBuilder::new()
             .share_owner(ShareOwner::CashP2pkh([0x11; 20]))
@@ -625,8 +645,9 @@ mod tests {
             asert_bits: CompactTarget::from_consensus(MINIMUM),
             wanted_bits: CompactTarget::from_consensus(MINIMUM),
             band_cap: 4104,
-            weak_ratio: GENESIS_WEAK_RATIO,
+            weak_ratio: WEAK_RATIO_MAX,
             weak_count: 0,
+            weak_asking: 0,
         };
         let header = TestShareBlockBuilder::new()
             .share_owner(ShareOwner::CashP2pkh([0x11; 20]))
@@ -656,8 +677,9 @@ mod tests {
             asert_bits: CompactTarget::from_consensus(MINIMUM),
             wanted_bits: CompactTarget::from_consensus(MINIMUM),
             band_cap: 4104,
-            weak_ratio: GENESIS_WEAK_RATIO,
+            weak_ratio: WEAK_RATIO_MAX,
             weak_count: 0,
+            weak_asking: 0,
         };
         let header = TestShareBlockBuilder::new()
             .share_owner(ShareOwner::CashP2pkh([0x11; 20]))
@@ -687,8 +709,9 @@ mod tests {
             asert_bits: CompactTarget::from_consensus(MINIMUM),
             wanted_bits: CompactTarget::from_consensus(MINIMUM),
             band_cap: 4104,
-            weak_ratio: GENESIS_WEAK_RATIO,
+            weak_ratio: WEAK_RATIO_MAX,
             weak_count: 0,
+            weak_asking: 0,
         };
         let header = TestShareBlockBuilder::new()
             .share_owner(ShareOwner::CashP2pkh([0x11; 20]))
@@ -717,8 +740,9 @@ mod tests {
             asert_bits: CompactTarget::from_consensus(MINIMUM),
             wanted_bits: CompactTarget::from_consensus(MINIMUM),
             band_cap: 4104,
-            weak_ratio: GENESIS_WEAK_RATIO,
+            weak_ratio: WEAK_RATIO_MAX,
             weak_count: 0,
+            weak_asking: 0,
         };
         let header = TestShareBlockBuilder::new()
             .share_owner(ShareOwner::CashP2pkh([0x11; 20]))
@@ -740,17 +764,20 @@ mod tests {
         );
     }
 
+    /// A share may want a target easier than its own, the signal that asks
+    /// for an easier weak target (`shares::weak::weak_share_asks`).
     #[test]
-    fn wanted_bits_easier_than_the_share_are_refused() {
+    fn wanted_bits_easier_than_the_share_are_inside_the_band() {
         let parent = ParentBand {
             bits: CompactTarget::from_consensus(MINIMUM),
             asert_bits: CompactTarget::from_consensus(MINIMUM),
             wanted_bits: CompactTarget::from_consensus(MINIMUM),
             band_cap: 4104,
-            weak_ratio: GENESIS_WEAK_RATIO,
+            weak_ratio: WEAK_RATIO_MAX,
             weak_count: 0,
+            weak_asking: 0,
         };
-        let header = TestShareBlockBuilder::new()
+        let heavier = TestShareBlockBuilder::new()
             .share_owner(ShareOwner::CashP2pkh([0x11; 20]))
             .bits(CompactTarget::from_consensus(MINIMUM_OVER_FOUR))
             .band(
@@ -760,14 +787,43 @@ mod tests {
             )
             .build()
             .header;
+        let at_the_minimum = TestShareBlockBuilder::new()
+            .share_owner(ShareOwner::CashP2pkh([0x11; 20]))
+            .bits(CompactTarget::from_consensus(MINIMUM))
+            .band(
+                CompactTarget::from_consensus(MINIMUM),
+                CompactTarget::from_consensus(FAR_EASIER),
+                4096,
+            )
+            .build()
+            .header;
 
-        assert_eq!(
-            check_share_band(&header, &parent),
-            Err(BandError::WantedEasierThanBits {
-                wanted_bits: MINIMUM_OVER_TWO,
-                bits: MINIMUM_OVER_FOUR,
-            })
-        );
+        assert_eq!(check_share_band(&heavier, &parent), Ok(()));
+        assert_eq!(check_share_band(&at_the_minimum, &parent), Ok(()));
+    }
+
+    /// A parent that wanted an easier target did not want more, however wide
+    /// its cap: the cap steps down as under a parent that wanted the minimum,
+    /// and its work multiple, which only a step up reads, stays at one.
+    #[test]
+    fn a_parent_that_wanted_an_easier_target_did_not_want_more() {
+        let asking = ParentBand {
+            bits: CompactTarget::from_consensus(MINIMUM),
+            asert_bits: CompactTarget::from_consensus(MINIMUM),
+            wanted_bits: CompactTarget::from_consensus(FAR_EASIER),
+            band_cap: 4096,
+            weak_ratio: WEAK_RATIO_MAX,
+            weak_count: 0,
+            weak_asking: 0,
+        };
+        let content = ParentBand {
+            wanted_bits: CompactTarget::from_consensus(MINIMUM),
+            ..asking
+        };
+
+        assert_eq!(next_band_cap(&asking), 4096 - 8);
+        assert_eq!(next_band_cap(&asking), next_band_cap(&content));
+        assert_eq!(work_multiple(&asking), 1);
     }
 
     #[test]
@@ -818,8 +874,9 @@ mod tests {
             asert_bits: minimum,
             wanted_bits: CompactTarget::from_consensus(FAR_HARDER),
             band_cap: BAND_CAP_MAX,
-            weak_ratio: GENESIS_WEAK_RATIO,
+            weak_ratio: WEAK_RATIO_MAX,
             weak_count: 0,
+            weak_asking: 0,
         };
         let header = TestShareBlockBuilder::new()
             .share_owner(ShareOwner::CashP2pkh([0x11; 20]))

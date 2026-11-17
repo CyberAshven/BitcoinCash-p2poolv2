@@ -495,6 +495,13 @@ pub struct StratumConfig<State = Raw> {
     /// unless the provider listens on this computer (a loopback address).
     #[serde(default)]
     pub template_provider_authority_public_key: Option<String>,
+    /// `HOST:PORT` of a SOCKS5 proxy the Template Provider is reached
+    /// through: Tor's SOCKS port for a `.onion` address, an I2P router's
+    /// SOCKS proxy for a `.i2p` address. The provider's name goes to the
+    /// proxy and is never resolved on this computer. Needs
+    /// `template_provider_authority_public_key`.
+    #[serde(default)]
+    pub template_provider_proxy: Option<String>,
     /// The version mask to use for version-rolling
     #[serde(deserialize_with = "deserialize_version_mask")]
     pub version_mask: i32,
@@ -756,6 +763,7 @@ impl StratumConfig<Raw> {
             self.template_source,
             self.template_provider_address.as_deref(),
             self.template_provider_authority_public_key.as_deref(),
+            self.template_provider_proxy.as_deref(),
         )?;
         let sv2_coinbase_only_networks = parse_client_networks(&self.sv2_coinbase_only_from)?;
 
@@ -788,6 +796,7 @@ impl StratumConfig<Raw> {
             template_source: self.template_source,
             template_provider_address: self.template_provider_address,
             template_provider_authority_public_key: self.template_provider_authority_public_key,
+            template_provider_proxy: self.template_provider_proxy,
             version_mask: self.version_mask,
             ignore_difficulty: self.ignore_difficulty,
             pool_signature: self.pool_signature,
@@ -893,14 +902,19 @@ pub struct TemplateProvider {
     pub authority_public_key: Option<[u8; 32]>,
     /// The Bitcoin Cash network its templates must be for.
     pub network: BitcoinCashNetwork,
+    /// `HOST:PORT` of the SOCKS5 proxy every connection to the provider is
+    /// opened through, a redirected one included. `None` connects directly.
+    pub proxy: Option<String>,
 }
 
 impl TemplateProvider {
     /// The provider a `Reconnect` from this one names: `host` and `port`,
     /// or this provider's own when `host` is empty or `port` is 0.
     ///
-    /// The pinned key and the network carry over, so a provider spoken to
-    /// without encryption may only redirect to this computer.
+    /// The pinned key, the network and the proxy carry over, so a provider
+    /// spoken to without encryption may only redirect to this computer, and
+    /// one reached through a proxy never redirects the node to a direct
+    /// connection. Without a proxy, a Tor or I2P name cannot be reached.
     pub fn redirected(&self, host: &str, port: u16) -> Result<TemplateProvider, ConfigError> {
         let (current_host, current_port) = self
             .address
@@ -921,6 +935,13 @@ impl TemplateProvider {
                 ),
             });
         }
+        if self.proxy.is_none() && is_overlay_host(host) {
+            return Err(ConfigError {
+                message: format!(
+                    "a Template Provider reached without a proxy may not redirect to {host}"
+                ),
+            });
+        }
         let address = if host.contains(':') && !host.starts_with('[') {
             format!("[{host}]:{port}")
         } else {
@@ -930,6 +951,7 @@ impl TemplateProvider {
             address,
             authority_public_key: self.authority_public_key,
             network: self.network,
+            proxy: self.proxy.clone(),
         })
     }
 }
@@ -956,17 +978,23 @@ fn validate_light_templates(chain: Chain, source: TemplateSource) -> Result<(), 
 /// is on this computer: the specification allows unencrypted frames only
 /// between local roles, and an unauthenticated provider could keep every
 /// found block.
+///
+/// `proxy` is a SOCKS5 proxy the provider is reached through. It always
+/// needs the provider's key: the proxy, and a Tor exit behind it, carry the
+/// connection. A `.onion` or `.i2p` address needs a proxy, since nothing
+/// else can reach it and the name must not go to this computer's resolver.
 fn parse_template_provider(
     chain: Chain,
     bitcoin_cash_network: Option<BitcoinCashNetwork>,
     source: TemplateSource,
     address: Option<&str>,
     authority_public_key: Option<&str>,
+    proxy: Option<&str>,
 ) -> Result<Option<TemplateProvider>, ConfigError> {
     if source != TemplateSource::Sv2 {
-        if address.is_some() || authority_public_key.is_some() {
+        if address.is_some() || authority_public_key.is_some() || proxy.is_some() {
             return Err(ConfigError {
-                message: "template_provider_address and template_provider_authority_public_key need template_source = \"sv2\"".to_string(),
+                message: "template_provider_address, template_provider_authority_public_key and template_provider_proxy need template_source = \"sv2\"".to_string(),
             });
         }
         return Ok(None);
@@ -1001,11 +1029,50 @@ fn parse_template_provider(
             ),
         });
     }
+    match proxy {
+        Some(proxy) => {
+            if !is_host_port(proxy) {
+                return Err(ConfigError {
+                    message: format!("template_provider_proxy must be HOST:PORT, got {proxy}"),
+                });
+            }
+            if authority_public_key.is_none() {
+                return Err(ConfigError {
+                    message: format!(
+                        "template_provider_authority_public_key is required for a Template Provider reached through a proxy ({proxy})"
+                    ),
+                });
+            }
+        }
+        None if is_overlay_host(host) => {
+            return Err(ConfigError {
+                message: format!(
+                    "template_provider_proxy is required for a Tor or I2P Template Provider ({address})"
+                ),
+            });
+        }
+        None => (),
+    }
     Ok(Some(TemplateProvider {
         address: address.to_string(),
         authority_public_key,
         network,
+        proxy: proxy.map(str::to_string),
     }))
+}
+
+/// Whether `address` is `HOST:PORT` with a host and a port number.
+fn is_host_port(address: &str) -> bool {
+    address
+        .rsplit_once(':')
+        .is_some_and(|(host, port)| !host.is_empty() && port.parse::<u16>().is_ok())
+}
+
+/// Whether `host` is a Tor or I2P name, which only a proxy of that network
+/// can reach.
+fn is_overlay_host(host: &str) -> bool {
+    let host = host.to_ascii_lowercase();
+    host.ends_with(".onion") || host.ends_with(".i2p")
 }
 
 /// Whether `host` names this computer: `localhost` or a loopback IP,
@@ -1235,6 +1302,7 @@ impl StratumConfig<Raw> {
             template_source: TemplateSource::Rpc,
             template_provider_address: None,
             template_provider_authority_public_key: None,
+            template_provider_proxy: None,
             version_mask: DEFAULT_VERSION_MASK,
             ignore_difficulty: None,
             pool_signature: None,
@@ -1321,10 +1389,105 @@ pub struct NetworkConfig {
     // (`Config::with_bitcoin_cash_dns_seed_off`).
     #[serde(default = "default_dns_seed")]
     pub dns_seed: bool,
+    /// File holding this node's libp2p identity, whose public key is its
+    /// peer ID. Created on the first start and read on every start after,
+    /// so peers, saved peer lists and announcements keep finding the node
+    /// under one peer ID. Default: `p2p_node_key` in the directory holding
+    /// the store (`NetworkConfig::node_key_file`).
+    #[serde(default)]
+    pub node_key_path: Option<String>,
+    /// Give the node a new peer ID on every start instead, as it had before
+    /// identities were kept. Nothing then links a node's peer ID across
+    /// restarts, but peers and announcements forget it each time.
+    #[serde(default)]
+    pub ephemeral_node_key: bool,
+    /// Nostr relays the node announces itself on and, while it has fewer
+    /// than 8 peers, asks for other nodes' announcements. Default
+    /// [`DEFAULT_NOSTR_RELAYS`]; an empty list keeps the node off Nostr.
+    #[serde(default = "default_nostr_relays")]
+    pub nostr_relays: Vec<String>,
+    /// Publish `external_address` on the relays so nodes short of peers can
+    /// dial this one. Only a node with an `external_address`, which its
+    /// operator says is reachable, announces. Default true.
+    #[serde(default = "default_nostr_announce")]
+    pub nostr_announce: bool,
+    /// Outgoing peers the node keeps. While it has fewer, it dials a peer it
+    /// learned of through Kademlia or Identify at a public IP address, one a
+    /// second, never past `max_established_outgoing` and never in an IPv4
+    /// /16 or IPv6 /32 where it already has an outgoing peer (`dial_peers`
+    /// do not count). 0 turns this off.
+    #[serde(default = "default_target_outgoing_peers")]
+    pub target_outgoing_peers: u32,
 }
 
 fn default_dns_seed() -> bool {
     true
+}
+
+/// Public Nostr relays a node uses by default, run by different operators.
+/// Each answered an announcement lookup when they were picked (2026-11-17).
+pub const DEFAULT_NOSTR_RELAYS: [&str; 6] = [
+    "wss://nos.lol",
+    "wss://relay.primal.net",
+    "wss://nostr.mom",
+    "wss://offchain.pub",
+    "wss://nostr.oxtr.dev",
+    "wss://relay.nostr.net",
+];
+
+fn default_nostr_relays() -> Vec<String> {
+    DEFAULT_NOSTR_RELAYS
+        .iter()
+        .map(|relay| relay.to_string())
+        .collect()
+}
+
+fn default_nostr_announce() -> bool {
+    true
+}
+
+/// File name of the node identity when `node_key_path` is not set.
+pub const DEFAULT_NODE_KEY_FILE: &str = "p2p_node_key";
+
+/// File name of the saved book of known peers, beside the store.
+pub const DEFAULT_PEER_BOOK_FILE: &str = "p2p_peers.json";
+
+impl NetworkConfig {
+    /// Where this node keeps its libp2p identity: `node_key_path`, else
+    /// [`DEFAULT_NODE_KEY_FILE`] in the directory holding `store_path`.
+    /// `None` with `ephemeral_node_key`.
+    pub fn node_key_file(&self, store_path: &str) -> Option<std::path::PathBuf> {
+        if self.ephemeral_node_key {
+            return None;
+        }
+        Some(match &self.node_key_path {
+            Some(path) => std::path::PathBuf::from(path),
+            None => std::path::Path::new(store_path)
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new("."))
+                .join(DEFAULT_NODE_KEY_FILE),
+        })
+    }
+
+    /// Where this node saves its book of known peers:
+    /// [`DEFAULT_PEER_BOOK_FILE`] in the directory holding `store_path`.
+    /// `None` with `ephemeral_node_key`, which keeps nothing that links a
+    /// node's restarts.
+    pub fn peer_book_file(&self, store_path: &str) -> Option<std::path::PathBuf> {
+        if self.ephemeral_node_key {
+            return None;
+        }
+        Some(
+            std::path::Path::new(store_path)
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new("."))
+                .join(DEFAULT_PEER_BOOK_FILE),
+        )
+    }
+}
+
+fn default_target_outgoing_peers() -> u32 {
+    16
 }
 
 impl Default for NetworkConfig {
@@ -1334,7 +1497,10 @@ impl Default for NetworkConfig {
             dial_peers: vec![],
             max_pending_incoming: 10,
             max_pending_outgoing: 10,
-            max_established_incoming: 50,
+            // Each outgoing peer is another node's inbound one: with 16
+            // outgoing a node takes 16 on average, and 128 is room for that
+            // while one node in four accepts inbound connections.
+            max_established_incoming: 128,
             max_established_outgoing: 50,
             // Two, not one: when two nodes dial each other at the same moment
             // each can keep its own outbound connection and refuse the other's
@@ -1352,6 +1518,11 @@ impl Default for NetworkConfig {
             blocked_ips: vec![],
             external_address: None,
             dns_seed: true,
+            node_key_path: None,
+            ephemeral_node_key: false,
+            nostr_relays: default_nostr_relays(),
+            nostr_announce: true,
+            target_outgoing_peers: default_target_outgoing_peers(),
         }
     }
 }
@@ -1362,6 +1533,13 @@ pub struct StoreConfig {
     /// Time-to-live for PPLNS shares (in days)
     #[serde(default = "default_pplns_ttl_days")]
     pub pplns_ttl_days: u64,
+    /// Keep the whole weak shares a Bitcoin Cash share carries until its body
+    /// is pruned, two payout depths below the tip, as an explorer or an
+    /// archive wants. By default (false) they are pruned one payout depth
+    /// below the tip, and their leaf root and summary stay with the body;
+    /// either way the node serves every body a syncing peer asks for.
+    #[serde(default)]
+    pub keep_whole_weak_shares: bool,
 }
 
 fn default_wait_for_chain_sync() -> bool {
@@ -1584,12 +1762,21 @@ pub struct SimConfig {
     /// default, so other sim runs keep pacing by the share target.
     #[serde(default)]
     pub weak_shares: bool,
+    /// Bitcoin Cash: with `weak_shares`, every job this node's miner mines at
+    /// the minimum wants a target twice as easy as its weak target, never
+    /// easier than the chain's ceiling, so its weak shares ask for an easier
+    /// one whatever the node's default would ask. For the end-to-end check of
+    /// the weak shares that ask; off by default, so the miner wants its bits.
+    #[serde(default)]
+    pub weak_asks: bool,
     /// Bitcoin Cash: of the share blocks this node broadcasts that carry weak
     /// shares, every this many goes out with its first weak share's coinbase
     /// value one satoshi higher, as a peer serving an altered copy of an
-    /// honest share would. The node's store and its answers to block requests
-    /// stay honest. For the end-to-end check of the weak-share commitment;
-    /// omit to broadcast every share as stored.
+    /// honest share would. Such a copy goes whole, not with its weak shares
+    /// listed by hash, which would name the honest ones. The node's store
+    /// and its answers to block requests stay honest. For the end-to-end
+    /// check of the weak-share commitment; omit to broadcast every share as
+    /// stored.
     #[serde(default)]
     pub alter_weak_copy_every: Option<u64>,
     /// Bitcoin Cash: carry only this node's own weak shares in the shares it
@@ -1907,6 +2094,36 @@ mod tests {
     use temp_env::{with_var, with_vars};
     use tokio_test::assert_err;
 
+    /// The node key sits beside the store unless `node_key_path` names a
+    /// file, and an ephemeral node keeps none.
+    #[test]
+    fn node_key_file_defaults_beside_the_store() {
+        let mut network = NetworkConfig::default();
+        assert_eq!(
+            network.node_key_file("/var/lib/p2pool/store.db"),
+            Some(std::path::PathBuf::from("/var/lib/p2pool").join(DEFAULT_NODE_KEY_FILE))
+        );
+        assert_eq!(
+            network.node_key_file("store.db"),
+            Some(std::path::PathBuf::from("").join(DEFAULT_NODE_KEY_FILE))
+        );
+        network.node_key_path = Some("/etc/p2poolv2/node.key".into());
+        assert_eq!(
+            network.node_key_file("/var/lib/p2pool/store.db"),
+            Some(std::path::PathBuf::from("/etc/p2poolv2/node.key"))
+        );
+        network.ephemeral_node_key = true;
+        assert_eq!(network.node_key_file("/var/lib/p2pool/store.db"), None);
+    }
+
+    /// The sample config keeps the node's identity by default.
+    #[test]
+    fn the_sample_config_keeps_the_node_key() {
+        let config = Config::load("../config.sample.toml").unwrap();
+        assert!(!config.network.ephemeral_node_key);
+        assert!(config.network.node_key_path.is_none());
+    }
+
     #[test]
     fn test_config_builder() {
         let config = Config::load("../config.sample.toml").unwrap();
@@ -2002,6 +2219,19 @@ mod tests {
         assert_eq!(config.store.pplns_ttl_days, 9);
     }
 
+    /// A node prunes whole weak shares at one payout depth unless its config
+    /// keeps them, as an explorer or an archive does.
+    #[test]
+    fn whole_weak_shares_are_pruned_unless_the_store_keeps_them() {
+        let config = Config::load("../config.sample.toml").unwrap();
+        assert!(!config.store.keep_whole_weak_shares, "sample default");
+
+        with_var("P2POOL_STORE__KEEP_WHOLE_WEAK_SHARES", Some("true"), || {
+            let config = Config::load("../config.sample.toml").unwrap();
+            assert!(config.store.keep_whole_weak_shares, "archive setting");
+        });
+    }
+
     /// Characterisation tests for environment-variable overrides.
     ///
     /// `Config::load` layers `config::Environment` with prefix `P2POOL` and
@@ -2085,6 +2315,14 @@ mod tests {
     fn dns_seed_defaults_to_true_when_absent() {
         let config = Config::load("../config-bitcoin.sample.toml").unwrap();
         assert!(config.network.dns_seed);
+    }
+
+    /// The sample configs leave target_outgoing_peers commented out, so a
+    /// node keeps 16 outgoing peers unless its operator says otherwise.
+    #[test]
+    fn target_outgoing_peers_defaults_to_16_when_absent() {
+        let config = Config::load("../config.sample.toml").unwrap();
+        assert_eq!(config.network.target_outgoing_peers, 16);
     }
 
     /// The sample config leaves `[electrum]` commented out, so the server is
@@ -3503,6 +3741,7 @@ mod template_provider_tests {
                 address: "127.0.0.1:8442".to_string(),
                 authority_public_key: None,
                 network: BitcoinCashNetwork::Regtest,
+                proxy: None,
             })
         );
     }
@@ -3608,6 +3847,7 @@ mod template_provider_tests {
             address: "127.0.0.1:8442".to_string(),
             authority_public_key: None,
             network: BitcoinCashNetwork::Regtest,
+            proxy: None,
         };
         assert_eq!(provider.redirected("", 0).unwrap(), provider);
     }
@@ -3618,6 +3858,7 @@ mod template_provider_tests {
             address: "127.0.0.1:8442".to_string(),
             authority_public_key: None,
             network: BitcoinCashNetwork::Regtest,
+            proxy: None,
         };
         assert_eq!(
             provider.redirected("::1", 8443).unwrap().address,
@@ -3631,6 +3872,7 @@ mod template_provider_tests {
             address: "127.0.0.1:8442".to_string(),
             authority_public_key: None,
             network: BitcoinCashNetwork::Regtest,
+            proxy: None,
         };
         let error = provider.redirected("192.0.2.7", 8442).unwrap_err();
         assert!(
@@ -3646,6 +3888,7 @@ mod template_provider_tests {
             address: "127.0.0.1:8442".to_string(),
             authority_public_key: Some([7; 32]),
             network: BitcoinCashNetwork::Regtest,
+            proxy: None,
         };
         assert_eq!(
             provider.redirected("node.example", 0).unwrap(),
@@ -3653,7 +3896,108 @@ mod template_provider_tests {
                 address: "node.example:8442".to_string(),
                 authority_public_key: Some([7; 32]),
                 network: BitcoinCashNetwork::Regtest,
+                proxy: None,
             }
+        );
+    }
+
+    const ONION_PROVIDER: &str =
+        "abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrstuvwx.onion:3335";
+
+    #[test]
+    fn a_tor_provider_is_reached_through_the_proxy_with_its_key() {
+        let mut config = bitcoin_cash_config();
+        config.template_source = TemplateSource::Sv2;
+        config.template_provider_address = Some(ONION_PROVIDER.to_string());
+        config.template_provider_authority_public_key = Some(PUBLIC_KEY.to_string());
+        config.template_provider_proxy = Some("127.0.0.1:9050".to_string());
+        let parsed = config.parse().unwrap();
+        let provider = parsed.template_provider().unwrap();
+        assert_eq!(provider.address, ONION_PROVIDER);
+        assert_eq!(provider.proxy.as_deref(), Some("127.0.0.1:9050"));
+    }
+
+    #[test]
+    fn a_tor_or_i2p_provider_without_a_proxy_is_rejected() {
+        for address in [ONION_PROVIDER, "abcdefgh.b32.i2p:3335"] {
+            let mut config = bitcoin_cash_config();
+            config.template_source = TemplateSource::Sv2;
+            config.template_provider_address = Some(address.to_string());
+            config.template_provider_authority_public_key = Some(PUBLIC_KEY.to_string());
+            let error = config.parse().unwrap_err();
+            assert!(
+                error
+                    .message
+                    .contains("template_provider_proxy is required"),
+                "{}",
+                error.message
+            );
+        }
+    }
+
+    /// The proxy carries the connection, so it is never spoken to without
+    /// the provider's key, a provider on this computer included.
+    #[test]
+    fn a_provider_behind_a_proxy_without_a_key_is_rejected() {
+        let mut config = bitcoin_cash_config();
+        config.template_source = TemplateSource::Sv2;
+        config.template_provider_address = Some("127.0.0.1:8442".to_string());
+        config.template_provider_proxy = Some("127.0.0.1:9050".to_string());
+        let error = config.parse().unwrap_err();
+        assert!(
+            error.message.contains("reached through a proxy"),
+            "{}",
+            error.message
+        );
+    }
+
+    #[test]
+    fn a_proxy_without_a_port_or_without_sv2_templates_is_rejected() {
+        let mut config = bitcoin_cash_config();
+        config.template_source = TemplateSource::Sv2;
+        config.template_provider_address = Some(ONION_PROVIDER.to_string());
+        config.template_provider_authority_public_key = Some(PUBLIC_KEY.to_string());
+        config.template_provider_proxy = Some("127.0.0.1".to_string());
+        let error = config.parse().unwrap_err();
+        assert!(error.message.contains("HOST:PORT"), "{}", error.message);
+
+        let mut config = bitcoin_cash_config();
+        config.template_provider_proxy = Some("127.0.0.1:9050".to_string());
+        let error = config.parse().unwrap_err();
+        assert!(
+            error.message.contains("template_source = \"sv2\""),
+            "{}",
+            error.message
+        );
+    }
+
+    /// A redirect stays behind the proxy, and a provider reached directly
+    /// cannot send the node to a name only a proxy reaches.
+    #[test]
+    fn a_redirect_keeps_the_proxy_and_needs_one_for_a_tor_name() {
+        let behind_proxy = TemplateProvider {
+            address: ONION_PROVIDER.to_string(),
+            authority_public_key: Some([7; 32]),
+            network: BitcoinCashNetwork::Regtest,
+            proxy: Some("127.0.0.1:9050".to_string()),
+        };
+        let redirected = behind_proxy.redirected("node.example", 8442).unwrap();
+        assert_eq!(redirected.address, "node.example:8442");
+        assert_eq!(redirected.proxy.as_deref(), Some("127.0.0.1:9050"));
+
+        let direct = TemplateProvider {
+            address: "node.example:8442".to_string(),
+            authority_public_key: Some([7; 32]),
+            network: BitcoinCashNetwork::Regtest,
+            proxy: None,
+        };
+        let error = direct
+            .redirected(ONION_PROVIDER.trim_end_matches(":3335"), 3335)
+            .unwrap_err();
+        assert!(
+            error.message.contains("without a proxy"),
+            "{}",
+            error.message
         );
     }
 

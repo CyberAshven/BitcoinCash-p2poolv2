@@ -31,7 +31,8 @@ use crate::shares::share_version::ShareVersion;
 use crate::shares::transactions::coinbase::compute_witness_root;
 use crate::shares::validation::BLOCK_TXS_SIZE_LIMIT;
 use crate::shares::weak::{
-    GENESIS_WEAK_RATIO, WEAK_BYTES, WEAK_CAP, WeakShare, empty_weak_root, weak_root,
+    GENESIS_WEAK_RATIO, WEAK_BYTES, WEAK_CAP, WeakShare, empty_weak_root, weak_cap_for_asking,
+    weak_count_allowed, weak_root,
 };
 use crate::shares::witness_commitment::WitnessCommitment;
 use crate::stratum::parse_password::MINER_DONATION_STEP;
@@ -278,6 +279,9 @@ pub struct PreparedNotifyParams {
     /// node's weak pool when the params were built; committed after the
     /// payout level.
     weak_shares: Arc<[WeakShare]>,
+    /// How many of `weak_shares` ask for an easier weak target
+    /// (`shares::weak::weak_share_asks`), committed after their count.
+    weak_asking: u16,
     /// The merkle root of `weak_shares`' whole encodings
     /// (`shares::weak::weak_root`).
     weak_root: sha256d::Hash,
@@ -466,7 +470,7 @@ impl PreparedNotifyParams {
         .pool_hashrate(self.pool_hashrate)
         .payout_level(self.payout_level)
         .spend_cost(self.spend_cost)
-        .weak_shares(self.weak_ratio, self.weak_shares.to_vec())
+        .weak_shares(self.weak_ratio, self.weak_shares.to_vec(), self.weak_asking)
         .weak_target(self.weak_target)
         .share_transactions(self.share_transactions.to_vec());
         builder.pplns_weights = Some(Arc::clone(weights));
@@ -499,8 +503,9 @@ impl PreparedNotifyParams {
     ///
     /// The terms are the template's own: a declared job's share is at the
     /// minimum, its bits, carries the template's band cap and weak ratio,
-    /// and carries no weak shares. Its payout level is `payout_level`, the
-    /// one the token's identity chose or the node's own.
+    /// carries no weak shares and wants its own bits, so it asks for no
+    /// easier weak target. Its payout level is `payout_level`, the one the
+    /// token's identity chose or the node's own.
     pub(crate) fn mining_job_token_at_level(
         &self,
         nonce: [u8; 32],
@@ -643,22 +648,24 @@ impl PreparedNotifyParams {
             &mut suffix,
             self.weak_ratio,
             self.weak_shares.len() as u16,
+            self.weak_asking,
             self.weak_root,
         );
         Some(suffix)
     }
 
-    /// The weak ratio, count and root a share on these params commits: zero
-    /// on Bitcoin, whose shares carry no weak shares.
-    fn commitment_weak_shares(&self) -> (u32, u16, sha256d::Hash) {
+    /// The weak ratio, count, number asking and root a share on these params
+    /// commits: zero on Bitcoin, whose shares carry no weak shares.
+    fn commitment_weak_shares(&self) -> (u32, u16, u16, sha256d::Hash) {
         if self.commitment_band_offset.is_some() {
             (
                 self.weak_ratio,
                 self.weak_shares.len() as u16,
+                self.weak_asking,
                 self.weak_root,
             )
         } else {
-            (0, 0, empty_weak_root())
+            (0, 0, 0, empty_weak_root())
         }
     }
 
@@ -669,10 +676,19 @@ impl PreparedNotifyParams {
         self.weak_ratio
     }
 
-    /// The weak target of the mining base: what a weak share on a job at the
-    /// minimum on these params must meet. `None` on Bitcoin. Read by the sim's
-    /// emitter; stratum reads it through each job (`JobDetails::weak_target`).
+    /// How many weak shares every share on these params carries, and how many
+    /// of those ask for an easier weak target. Read by the sim's emitter for
+    /// its stats.
     #[cfg_attr(not(feature = "sim"), allow(dead_code))]
+    pub(crate) fn weak_counts(&self) -> (usize, u16) {
+        (self.weak_shares.len(), self.weak_asking)
+    }
+
+    /// The weak target of the mining base: what a weak share on a job at the
+    /// minimum on these params must meet. `None` on Bitcoin. Read by the
+    /// node's default that asks for an easier one
+    /// (`stratum::work::band_policy`) and by the sim's emitter; stratum reads
+    /// it through each job (`JobDetails::weak_target`).
     pub(crate) fn weak_target(&self) -> Option<Target> {
         self.weak_target
     }
@@ -817,6 +833,7 @@ pub(crate) struct PreparedNotifyParamsBuilder {
     spend_cost: u64,
     weak_ratio: u32,
     weak_shares: Vec<WeakShare>,
+    weak_asking: u16,
     weak_target: Option<Target>,
     share_transactions: Vec<ShareTransaction>,
 }
@@ -855,20 +872,32 @@ impl PreparedNotifyParamsBuilder {
             spend_cost: DEFAULT_SPEND_COST,
             weak_ratio: GENESIS_WEAK_RATIO,
             weak_shares: Vec::new(),
+            weak_asking: 0,
             weak_target: None,
             share_transactions: Vec::new(),
         }
     }
 
     /// The weak ratio every share on these params carries, one step from the
-    /// mining base's (`shares::weak::next_weak_ratio`), and the weak shares
-    /// they carry, from the node's weak pool. By default the genesis ratio,
-    /// which stays put under a mining base carrying none, and no weak shares.
-    /// `build` keeps them within `WEAK_CAP` and `WEAK_BYTES`. Committed only
-    /// on Bitcoin Cash (`include_merge_mining`).
-    pub fn weak_shares(mut self, weak_ratio: u32, weak_shares: Vec<WeakShare>) -> Self {
+    /// mining base's (`shares::weak::next_weak_ratio`), the weak shares they
+    /// carry, from the node's weak pool, and how many of those ask for an
+    /// easier weak target (`shares::weak::weak_share_asks`). By default the
+    /// genesis ratio, which stays put under a mining base carrying none, and
+    /// no weak shares.
+    ///
+    /// The weak shares are the ones one share may carry, within `WEAK_CAP`
+    /// and `WEAK_BYTES` ([`fit_weak_shares`]): the number asking counts
+    /// exactly them, so `build` refuses a list it would have to cut.
+    /// Committed only on Bitcoin Cash (`include_merge_mining`).
+    pub fn weak_shares(
+        mut self,
+        weak_ratio: u32,
+        weak_shares: Vec<WeakShare>,
+        weak_asking: u16,
+    ) -> Self {
         self.weak_ratio = weak_ratio;
         self.weak_shares = weak_shares;
+        self.weak_asking = weak_asking;
         self
     }
 
@@ -1162,10 +1191,13 @@ impl PreparedNotifyParamsBuilder {
         //* the share version, and the weak shares follow the level; a heavier
         //* job, or a miner at another level, replaces all three from the
         //* band's offset.
-        let weak_shares = if self.include_merge_mining {
-            fit_weak_shares(self.weak_shares)
+        let (weak_shares, weak_asking) = if self.include_merge_mining {
+            (
+                checked_weak_shares(self.weak_shares, self.weak_asking)?,
+                self.weak_asking,
+            )
         } else {
-            Vec::new()
+            (Vec::new(), 0)
         };
         let weak_root = weak_root(&weak_shares);
         let commitment_band_offset = self.include_merge_mining.then(|| {
@@ -1176,6 +1208,7 @@ impl PreparedNotifyParamsBuilder {
                 &mut commitment_suffix,
                 self.weak_ratio,
                 weak_shares.len() as u16,
+                weak_asking,
                 weak_root,
             );
             band_offset
@@ -1213,6 +1246,7 @@ impl PreparedNotifyParamsBuilder {
             spend_cost: self.spend_cost,
             weak_ratio: self.weak_ratio,
             weak_shares: weak_shares.into(),
+            weak_asking,
             weak_root,
             weak_target: self.weak_target.filter(|_| self.include_merge_mining),
             donation_address: self.donation_address,
@@ -1266,8 +1300,8 @@ pub(crate) fn token_split(
 /// Keep the weak shares, in the order given, that fit one share's `WEAK_CAP`
 /// and `WEAK_BYTES`: the rest stay in the weak pool for a later share. A
 /// weak share too large to fit is skipped rather than ending the list, so a
-/// later smaller one can still be carried.
-fn fit_weak_shares(weak_shares: Vec<WeakShare>) -> Vec<WeakShare> {
+/// later smaller one can still be carried. A list that fits is kept whole.
+pub(crate) fn fit_weak_shares(weak_shares: Vec<WeakShare>) -> Vec<WeakShare> {
     let mut carried = Vec::with_capacity(weak_shares.len().min(WEAK_CAP));
     let mut carried_bytes: usize = 0;
     for weak_share in weak_shares {
@@ -1278,6 +1312,44 @@ fn fit_weak_shares(weak_shares: Vec<WeakShare>) -> Vec<WeakShare> {
         }
     }
     carried
+}
+
+/// `weak_shares` as a share carries them with `weak_asking` of them asking,
+/// or why no share can: more than fit one share ([`fit_weak_shares`]), of
+/// which the number asking would no longer be known, more asking than
+/// carried, or more carried than the asking ones allow
+/// ([`weak_count_allowed`]). A share built on any would be invalid.
+fn checked_weak_shares(
+    weak_shares: Vec<WeakShare>,
+    weak_asking: u16,
+) -> Result<Vec<WeakShare>, WorkError> {
+    let offered = weak_shares.len();
+    let carried = fit_weak_shares(weak_shares);
+    if carried.len() != offered {
+        return Err(WorkError {
+            message: format!(
+                "{offered} weak shares do not fit one share, which carries {WEAK_CAP} in {WEAK_BYTES} bytes"
+            ),
+        });
+    }
+    if usize::from(weak_asking) > carried.len() {
+        return Err(WorkError {
+            message: format!(
+                "{weak_asking} asking weak shares are more than the {} carried",
+                carried.len()
+            ),
+        });
+    }
+    if !weak_count_allowed(carried.len(), usize::from(weak_asking)) {
+        return Err(WorkError {
+            message: format!(
+                "{} weak shares with {weak_asking} asking are more than the {} they allow",
+                carried.len(),
+                weak_cap_for_asking(usize::from(weak_asking))
+            ),
+        });
+    }
+    Ok(carried)
 }
 
 /// Bytes a miner's bitcoin coinbase may add to the one `build` sizes: the
@@ -1383,8 +1455,10 @@ fn build_per_miner_coinbase2(
 /// On Bitcoin Cash `job_band` gives a heavier miner's job its own target and
 /// wanted target inside the band (`stratum::work::band_policy`): the
 /// commitment then carries them, its digest is built from a prefix with
-/// those bits and a suffix with that band. `None`, and every Bitcoin job,
-/// mines at the minimum, `prepared.bits`.
+/// those bits and a suffix with that band. A job at the minimum whose miner
+/// finds too few weak shares carries the minimum with an easier wanted
+/// target the same way, which asks for an easier weak target. `None`, and
+/// every Bitcoin job, mines at the minimum, `prepared.bits`.
 ///
 /// On Bitcoin Cash `payout_level` is the miner's own payout level
 /// (`stratum::work::level_policy`), which the commitment carries after the
@@ -1428,7 +1502,7 @@ pub(crate) fn insert_miner_job(
     } else {
         None
     };
-    let (weak_ratio, weak_count, weak_root) = prepared.commitment_weak_shares();
+    let (weak_ratio, weak_count, weak_asking, weak_root) = prepared.commitment_weak_shares();
 
     // Build ShareCommitment only when both addresses are available: the share
     // chain coinbase needs an owner and the bitcoin coinbase needs a payee.
@@ -1454,6 +1528,7 @@ pub(crate) fn insert_miner_job(
             payout_level: job_level,
             weak_ratio,
             weak_count,
+            weak_asking,
             weak_root,
         }),
         _ => None,

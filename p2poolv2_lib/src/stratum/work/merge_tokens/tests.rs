@@ -242,19 +242,29 @@ fn a_share_meeting_a_token_target_wins_a_proof_that_verifies() {
         .unwrap();
     assert!(!job.entries[1].is_won_by(&winning.block_hash()));
 
-    let wins = job.wins(&winning, &coinbase, &[], None);
+    let wins = job.wins(&winning, &coinbase, &[], None, None);
 
     assert_eq!(wins.len(), 1);
     assert_eq!(wins[0].category, [0x11; 32]);
     assert_eq!(wins[0].split, pickaxe_split());
     let proof = AuxProof::from_bytes(&wins[0].proof).unwrap();
     assert_eq!(
-        proof.verify(&job.entries[0].leaf, MAX_MERGE_MINING_TREE_HEIGHT, None),
+        proof.verify(
+            &job.entries[0].leaf,
+            MAX_MERGE_MINING_TREE_HEIGHT,
+            None,
+            None
+        ),
         Ok(())
     );
     assert!(
         proof
-            .verify(&job.entries[1].leaf, MAX_MERGE_MINING_TREE_HEIGHT, None)
+            .verify(
+                &job.entries[1].leaf,
+                MAX_MERGE_MINING_TREE_HEIGHT,
+                None,
+                None
+            )
             .is_err()
     );
 }
@@ -270,7 +280,7 @@ fn a_share_below_every_token_target_wins_nothing() {
     let job = set.miner_job(&p2pkh(0x12), pickaxe_split());
     let coinbase = job_coinbase(&job);
     assert!(
-        job.wins(&header_on(&coinbase, 0), &coinbase, &[], None)
+        job.wins(&header_on(&coinbase, 0), &coinbase, &[], None, None)
             .is_empty()
     );
 }
@@ -344,12 +354,17 @@ fn a_node_does_not_start_on_a_broken_token_file() {
 
 /// These named vectors are `claimTargetBits` outputs of the Node SAFA tool
 /// (`tools/safa-auxpow/lib.mjs`, commit `88b696e8`), before `p2poolv2_safa`
-/// replaced it. Both implementations must retain its integer rounding.
+/// replaced it. Both implementations must retain its integer rounding. The
+/// Node tool counted ten-minute blocks; the ease now counts ticks, 600 a
+/// ten-minute block, and gives the same targets.
 #[test]
 fn safa_claim_target_matches_lib_mjs_one_block_one_thread() {
-    assert_eq!(safa_claim_target_bits(0x1d00_ffff, 1, 1), Some(0x1d00_ffff));
     assert_eq!(
-        p2poolv2_safa::claim_target_bits(0x1d00_ffff, 1, 1),
+        safa_claim_target_bits(0x1d00_ffff, 600, 1),
+        Some(0x1d00_ffff)
+    );
+    assert_eq!(
+        p2poolv2_safa::claim_target_bits(0x1d00_ffff, 600, 1),
         Ok(0x1d00_ffff)
     );
 }
@@ -357,11 +372,11 @@ fn safa_claim_target_matches_lib_mjs_one_block_one_thread() {
 #[test]
 fn safa_claim_target_matches_lib_mjs_at_easing_cap() {
     assert_eq!(
-        safa_claim_target_bits(0x1d00_ffff, 288, 1),
+        safa_claim_target_bits(0x1d00_ffff, 288 * 600, 1),
         Some(0x1e00_907f)
     );
     assert_eq!(
-        p2poolv2_safa::claim_target_bits(0x1d00_ffff, 288, 1),
+        p2poolv2_safa::claim_target_bits(0x1d00_ffff, 288 * 600, 1),
         Ok(0x1e00_907f)
     );
 }
@@ -369,11 +384,11 @@ fn safa_claim_target_matches_lib_mjs_at_easing_cap() {
 #[test]
 fn safa_claim_target_matches_lib_mjs_beyond_easing_cap() {
     assert_eq!(
-        safa_claim_target_bits(0x1d00_ffff, 1_000, 63),
+        safa_claim_target_bits(0x1d00_ffff, 1000 * 600, 63),
         Some(0x1d02_c920)
     );
     assert_eq!(
-        p2poolv2_safa::claim_target_bits(0x1d00_ffff, 1_000, 63),
+        p2poolv2_safa::claim_target_bits(0x1d00_ffff, 1000 * 600, 63),
         Ok(0x1d02_c920)
     );
 }
@@ -381,11 +396,11 @@ fn safa_claim_target_matches_lib_mjs_beyond_easing_cap() {
 #[test]
 fn safa_claim_target_matches_lib_mjs_maximum_threads() {
     assert_eq!(
-        safa_claim_target_bits(0x2000_ffff, 288, 63),
+        safa_claim_target_bits(0x2000_ffff, 288 * 600, 63),
         Some(0x2002_c920)
     );
     assert_eq!(
-        p2poolv2_safa::claim_target_bits(0x2000_ffff, 288, 63),
+        p2poolv2_safa::claim_target_bits(0x2000_ffff, 288 * 600, 63),
         Ok(0x2002_c920)
     );
 }
@@ -393,11 +408,11 @@ fn safa_claim_target_matches_lib_mjs_maximum_threads() {
 #[test]
 fn safa_claim_target_matches_lib_mjs_maximum_target_clamp() {
     assert_eq!(
-        safa_claim_target_bits(0x207f_ffff, 288, 1),
+        safa_claim_target_bits(0x207f_ffff, 288 * 600, 1),
         Some(0x207f_ffff)
     );
     assert_eq!(
-        p2poolv2_safa::claim_target_bits(0x207f_ffff, 288, 1),
+        p2poolv2_safa::claim_target_bits(0x207f_ffff, 288 * 600, 1),
         Ok(0x207f_ffff)
     );
 }
@@ -405,11 +420,11 @@ fn safa_claim_target_matches_lib_mjs_maximum_target_clamp() {
 #[test]
 fn safa_claim_target_matches_lib_mjs_minimum_target_clamp() {
     assert_eq!(
-        safa_claim_target_bits(0x0300_0001, 1, 63),
+        safa_claim_target_bits(0x0300_0001, 600, 63),
         Some(0x0300_0001)
     );
     assert_eq!(
-        p2poolv2_safa::claim_target_bits(0x0300_0001, 1, 63),
+        p2poolv2_safa::claim_target_bits(0x0300_0001, 600, 63),
         Ok(0x0300_0001)
     );
 }
@@ -417,11 +432,11 @@ fn safa_claim_target_matches_lib_mjs_minimum_target_clamp() {
 #[test]
 fn safa_claim_target_matches_lib_mjs_fractional_thread_ease() {
     assert_eq!(
-        safa_claim_target_bits(0x1a31_06ee, 10, 7),
+        safa_claim_target_bits(0x1a31_06ee, 10 * 600, 7),
         Some(0x1a3b_8756)
     );
     assert_eq!(
-        p2poolv2_safa::claim_target_bits(0x1a31_06ee, 10, 7),
+        p2poolv2_safa::claim_target_bits(0x1a31_06ee, 10 * 600, 7),
         Ok(0x1a3b_8756)
     );
 }
@@ -429,11 +444,11 @@ fn safa_claim_target_matches_lib_mjs_fractional_thread_ease() {
 #[test]
 fn safa_claim_target_matches_lib_mjs_compact_exponent_carry() {
     assert_eq!(
-        safa_claim_target_bits(0x1f7f_ffff, 100, 3),
+        safa_claim_target_bits(0x1f7f_ffff, 100 * 600, 3),
         Some(0x2008_9553)
     );
     assert_eq!(
-        p2poolv2_safa::claim_target_bits(0x1f7f_ffff, 100, 3),
+        p2poolv2_safa::claim_target_bits(0x1f7f_ffff, 100 * 600, 3),
         Ok(0x2008_9553)
     );
 }
@@ -459,11 +474,11 @@ fn safa_claim_target_matches_lib_mjs_compact_exponent_borrow() {
 #[test]
 fn safa_claim_target_matches_lib_mjs_before_easing_cap() {
     assert_eq!(
-        safa_claim_target_bits(0x1c7f_ffff, 287, 5),
+        safa_claim_target_bits(0x1c7f_ffff, 287 * 600, 5),
         Some(0x1d0e_9999)
     );
     assert_eq!(
-        p2poolv2_safa::claim_target_bits(0x1c7f_ffff, 287, 5),
+        p2poolv2_safa::claim_target_bits(0x1c7f_ffff, 287 * 600, 5),
         Ok(0x1d0e_9999)
     );
 }
@@ -480,36 +495,38 @@ fn safa_claim_target_matches_lib_mjs_zero_delta_at_maximum() {
 #[test]
 fn safa_claim_target_caps_the_height_before_multiplication() {
     assert_eq!(
-        safa_claim_target_bits(0x2000_ffff, u32::MAX, 63),
+        safa_claim_target_bits(0x2000_ffff, u64::MAX, 63),
         Some(0x2002_c920)
     );
     assert_eq!(
-        p2poolv2_safa::claim_target_bits(0x2000_ffff, u32::MAX, 63),
+        p2poolv2_safa::claim_target_bits(0x2000_ffff, u64::MAX, 63),
         Ok(0x2002_c920)
     );
 }
 
 #[test]
 fn safa_claim_target_rejects_no_threads() {
-    assert_eq!(safa_claim_target_bits(0x1d00_ffff, 1, 0), None);
-    assert!(p2poolv2_safa::claim_target_bits(0x1d00_ffff, 1, 0).is_err());
+    assert_eq!(safa_claim_target_bits(0x1d00_ffff, 600, 0), None);
+    assert!(p2poolv2_safa::claim_target_bits(0x1d00_ffff, 600, 0).is_err());
 }
 
 #[test]
 fn safa_claim_target_rejects_too_many_threads() {
-    assert_eq!(safa_claim_target_bits(0x1d00_ffff, 1, 64), None);
-    assert!(p2poolv2_safa::claim_target_bits(0x1d00_ffff, 1, 64).is_err());
+    assert_eq!(safa_claim_target_bits(0x1d00_ffff, 600, 64), None);
+    assert!(p2poolv2_safa::claim_target_bits(0x1d00_ffff, 600, 64).is_err());
 }
 
 #[test]
 fn safa_claim_target_rejects_noncanonical_state_bits() {
-    assert_eq!(safa_claim_target_bits(0x0200_ffff, 1, 1), None);
-    assert!(p2poolv2_safa::claim_target_bits(0x0200_ffff, 1, 1).is_err());
+    assert_eq!(safa_claim_target_bits(0x0200_ffff, 600, 1), None);
+    assert!(p2poolv2_safa::claim_target_bits(0x0200_ffff, 600, 1).is_err());
 }
 
 /// Every thread count, ease and a spread of state targets, from the
 /// hardest to the easiest canonical one: the node and `p2poolv2_safa`
-/// agree, clamps and rounding included.
+/// agree, clamps and rounding included. The eases are ticks: whole
+/// ten-minute blocks, one-minute blocks, either side of the cap and of
+/// whole minutes.
 #[test]
 fn safa_claim_targets_agree_with_p2poolv2_safa_everywhere() {
     let states = [
@@ -531,18 +548,38 @@ fn safa_claim_targets_agree_with_p2poolv2_safa_everywhere() {
     let mut checked = 0;
     for state_bits in states {
         for threads in 1..=SAFA_MAX_THREADS {
-            for height_delta in [0, 1, 2, 7, 63, 100, 287, 288, 289, 4_032, u32::MAX] {
+            for tick_delta in [
+                0,
+                59,
+                60,
+                61,
+                120,
+                599,
+                600,
+                601,
+                1_200,
+                4_200,
+                37_800,
+                60_000,
+                172_200,
+                172_799,
+                172_800,
+                172_801,
+                173_400,
+                4_032 * 600,
+                u64::MAX,
+            ] {
                 assert_eq!(
-                    safa_claim_target_bits(state_bits, height_delta, threads).ok_or(()),
-                    p2poolv2_safa::claim_target_bits(state_bits, height_delta, threads)
+                    safa_claim_target_bits(state_bits, tick_delta, threads).ok_or(()),
+                    p2poolv2_safa::claim_target_bits(state_bits, tick_delta, threads)
                         .map_err(|_| ()),
-                    "{state_bits:#010x} after {height_delta} blocks over {threads} threads"
+                    "{state_bits:#010x} after {tick_delta} ticks over {threads} threads"
                 );
                 checked += 1;
             }
         }
     }
-    assert_eq!(checked, 14 * 63 * 11);
+    assert_eq!(checked, 14 * 63 * 19);
 }
 
 /// That vault's thread state: thread 5, height 329,000, target
@@ -553,16 +590,21 @@ const SAFA_STATE: &str = "0500000028050500ffff0020ee06311a";
 /// covenant's lock hash) with `threads` and `state`, and `extra` fields.
 fn safa_token_json(threads: u32, state: &str, extra: &str) -> String {
     format!(
-        r#"{{"tokens":[{{"category":"201f1e1d1c1b1a191817161514131211100f0e0d0c0b0a090807060504030201","lock_hash":"a38bbab2ff9047bceeea12f052cc9a3655178a7f7fd60768716d816fbaad7843","safa":{{"threads":{threads},"state":"{state}"}}{extra}}}]}}"#
+        r#"{{"tokens":[{{"category":"201f1e1d1c1b1a191817161514131211100f0e0d0c0b0a090807060504030201","lock_hash":"fce2f3db5ec3eda92e71d6e67a6bb5aa5f0a7b540162b1f6cc199c6287d58814","safa":{{"threads":{threads},"state":"{state}"}}{extra}}}]}}"#
     )
 }
 
+/// The same thread at chipnet block 332,450, its last ten-minute block.
+const SAFA_STATE_AT_SWITCH: &str = "05000000a2120500ffff0020ee06311a";
+
 /// A node mining that vault builds the SAFA tool's leaf at each job's
 /// height: the state hash from the thread's state, the target eased by the
-/// blocks since it. Checked against the Node tool's printed leaves and
-/// against `p2poolv2_safa::claim_leaf` on the compiled chipnet covenant.
+/// ticks since it. Checked against `p2poolv2_safa::claim_leaf` on the
+/// compiled chipnet covenant; the targets before chipnet's switch are the
+/// Node tool's, and the leaf hashes are pinned.
 #[test]
 fn a_safa_vault_s_leaf_follows_its_thread_at_each_height() {
+    let chipnet = TickSchedule::for_network(crate::config::BitcoinCashNetwork::Chipnet);
     let set = Arc::new(
         TokenSet::from_json(safa_token_json(63, SAFA_STATE, "").as_bytes())
             .unwrap()
@@ -590,12 +632,12 @@ fn a_safa_vault_s_leaf_follows_its_thread_at_each_height() {
         fee_bps: 100,
         fee_locking_bytecode: p2pkh(0xfe),
     };
-    let next_height = set.at_height(329_001).unwrap();
+    let next_height = set.at_height(329_001, &chipnet).unwrap();
     assert_eq!(next_height.tokens()[0].target_bits, 0x2000_8205);
     let next_job = next_height.miner_job(&p2pkh(0x12), split);
     assert_eq!(
         hex::encode(next_job.entries[0].leaf.hash()),
-        "53e4d65d273996f978a7ef1fcf7235e1961e6fdca2295eab08d18e5471649986"
+        "afff20dfcfcfad9cdd9255752e5540d4f57f617563f6bd9f0c5abf6a8f7d8539"
     );
     let next_tool =
         p2poolv2_safa::claim_leaf(&covenant, &vault, &p2pkh(0x12), Some(&tool_split), 329_001)
@@ -607,12 +649,12 @@ fn a_safa_vault_s_leaf_follows_its_thread_at_each_height() {
         expand_token_target(0x2000_8205).unwrap()
     );
 
-    let capped_height = set.at_height(329_300).unwrap();
+    let capped_height = set.at_height(329_300, &chipnet).unwrap();
     assert_eq!(capped_height.tokens()[0].target_bits, 0x2002_c920);
     let capped_job = capped_height.miner_job(&p2pkh(0x12), split);
     assert_eq!(
         hex::encode(capped_job.entries[0].leaf.hash()),
-        "e7aaea290fc93691db63a04cd8a5e2495ac9577612e21397a6f30bf73e115789"
+        "fea4c5ca99e85121c956599b913e9be6c4dcdc20fc6502def7e857f9009baebe"
     );
     let capped_tool =
         p2poolv2_safa::claim_leaf(&covenant, &vault, &p2pkh(0x12), Some(&tool_split), 329_300)
@@ -625,19 +667,66 @@ fn a_safa_vault_s_leaf_follows_its_thread_at_each_height() {
     );
     // Preparing a second job reuses the original state rather than easing
     // an already eased target. Old jobs retain the target they committed to.
-    assert_eq!(next_height.at_height(329_300).unwrap(), capped_height);
+    assert_eq!(
+        next_height.at_height(329_300, &chipnet).unwrap(),
+        capped_height
+    );
     assert_eq!(set.tokens()[0].target_bits, 0x2000_ffff);
     assert_eq!(next_height.tokens()[0].target_bits, 0x2000_8205);
     // No claim of a coinbase at or below the state's height can succeed.
-    assert!(set.at_height(329_000).is_err());
-    assert!(set.at_height(1).is_err());
+    assert!(set.at_height(329_000, &chipnet).is_err());
+    assert!(set.at_height(1, &chipnet).is_err());
+
+    // After chipnet's switch: a state at block 332,450 and a job at 332,451
+    // ease by 60 ticks, a tenth of a ten-minute block's 600, as the covenant
+    // rebuilds the leaf. Mainnet's schedule, with no pin, would count that
+    // block as ten minutes.
+    let late = Arc::new(
+        TokenSet::from_json(safa_token_json(63, SAFA_STATE_AT_SWITCH, "").as_bytes())
+            .unwrap()
+            .unwrap(),
+    );
+    let one_minute = late.at_height(332_451, &chipnet).unwrap();
+    assert_eq!(one_minute.tokens()[0].target_bits, 0x2000_802d);
+    assert_eq!(
+        safa_claim_target_bits(0x2000_ffff, 60, 63),
+        Some(0x2000_802d)
+    );
+    let late_vault = p2poolv2_safa::Vault {
+        commitment: hex::decode(SAFA_STATE_AT_SWITCH).unwrap(),
+        ..vault
+    };
+    let late_tool = p2poolv2_safa::claim_leaf(
+        &covenant,
+        &late_vault,
+        &p2pkh(0x12),
+        Some(&tool_split),
+        332_451,
+    )
+    .unwrap();
+    assert_eq!(late_tool.tick_delta, 60);
+    assert_eq!(late_tool.target_bits, 0x2000_802d);
+    assert_eq!(
+        late_tool.leaf_hash,
+        one_minute.miner_job(&p2pkh(0x12), split).entries[0]
+            .leaf
+            .hash()
+    );
+    let mainnet = TickSchedule::for_network(crate::config::BitcoinCashNetwork::Mainnet);
+    assert_eq!(
+        late.at_height(332_451, &mainnet).unwrap().tokens()[0].target_bits,
+        0x2000_8205
+    );
 }
 
 /// A set without SAFA tokens is the same at every height.
 #[test]
 fn a_set_without_safa_tokens_does_not_change_with_height() {
     let set = Arc::new(TokenSet::new(vec![token_a(), token_b()]).unwrap());
-    assert!(Arc::ptr_eq(&set, &set.at_height(1).unwrap()));
+    assert!(Arc::ptr_eq(
+        &set,
+        &set.at_height(1, &TickSchedule::TEN_MINUTES).unwrap()
+    ));
 }
 
 /// A SAFA token gives its thread instead of a state hash and target, with

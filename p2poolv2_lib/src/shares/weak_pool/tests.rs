@@ -3,24 +3,41 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 use super::*;
+use crate::shares::share_block::ShareHeader;
 use crate::test_utils::{TestShareBlockBuilder, setup_test_chain_store_handle, test_weak_share_on};
 use bitcoin::ScriptBuf;
 use bitcoin::hashes::Hash;
 use p2poolv2_wallet::share_owner::ShareOwner;
+use std::sync::OnceLock;
 
 /// A weak share known by the hash `nonce` gives it; the pool reads nothing
-/// else of it.
+/// else of it. One header is built and each weak share is a copy of it with
+/// its own nonce, so a test can fill the pool to its bounds, over a hundred
+/// thousand weak shares, in a moment.
 fn pool_weak_share(nonce: u32) -> WeakShare {
+    static HEADER: OnceLock<ShareHeader> = OnceLock::new();
+    let mut header = HEADER
+        .get_or_init(|| {
+            TestShareBlockBuilder::new()
+                .share_owner(ShareOwner::CashP2pkh([0x33; 20]))
+                .build()
+                .header
+        })
+        .clone();
+    header.bitcoin_header.nonce = nonce;
     WeakShare {
-        header: TestShareBlockBuilder::new()
-            .share_owner(ShareOwner::CashP2pkh([0x33; 20]))
-            .nonce(nonce)
-            .build()
-            .header,
+        header,
         coinbase_script_sig: ScriptBuf::new(),
         coinbase_value: 1,
         merkle_branch: Vec::new(),
     }
+}
+
+/// [`pool_weak_share`] mined on `parent`, a share this node may not have.
+fn pool_weak_share_on(parent: BlockHash, nonce: u32) -> WeakShare {
+    let mut weak_share = pool_weak_share(nonce);
+    weak_share.header.prev_share_blockhash = parent;
+    weak_share
 }
 
 #[tokio::test]
@@ -109,6 +126,38 @@ async fn a_weak_share_held_again_for_a_retry_keeps_its_first_hold_time() {
 
     assert_eq!(pool.held_len(), 1);
     assert_eq!(pool.counts().refused.unknown_parent, 1);
+}
+
+/// The pool looks for expired held weak shares only once the earliest could
+/// have expired. After that one is dropped the next still expires at its own
+/// time, not before and not later.
+#[tokio::test]
+async fn each_held_weak_share_expires_at_its_own_time() {
+    let (chain_store_handle, _temp_dir) = setup_test_chain_store_handle(true).await;
+    let (pool, _relay_rx) = WeakPool::new(chain_store_handle);
+    let parent = BlockHash::from_byte_array([1; 32]);
+    pool.lock().hold(
+        test_weak_share_on(parent, 1),
+        WeakShareSource::Local,
+        1_000,
+        None,
+    );
+    pool.lock().hold(
+        test_weak_share_on(parent, 2),
+        WeakShareSource::Local,
+        5_000,
+        None,
+    );
+
+    pool.lock().expire_held(1_000 + max_held_millis());
+    assert_eq!(pool.held_len(), 2, "neither has waited longer than allowed");
+    pool.lock().expire_held(1_000 + max_held_millis() + 1);
+    assert_eq!(pool.held_len(), 1, "the first held has expired");
+    pool.lock().expire_held(5_000 + max_held_millis());
+    assert_eq!(pool.held_len(), 1, "the second has not yet");
+    pool.lock().expire_held(5_000 + max_held_millis() + 1);
+    assert_eq!(pool.held_len(), 0, "the second has expired");
+    assert_eq!(pool.counts().refused.unknown_parent, 2);
 }
 
 #[tokio::test]
@@ -435,6 +484,40 @@ async fn a_full_pool_counts_a_weak_share_on_an_old_parent_as_pool_full() {
     assert_eq!(stats.pooled, MAX_POOL_WEAK_SHARES);
 }
 
+/// A share relayed by hash is filled from pooled weak shares only, in the
+/// order asked: one only held, unchecked, is left for the sender to send.
+#[tokio::test]
+async fn pooled_weak_shares_fill_in_order_and_leave_held_ones_out() {
+    let (chain_store_handle, _temp_dir) = setup_test_chain_store_handle(true).await;
+    let (pool, _relay_rx) = WeakPool::new(chain_store_handle);
+    let pooled = test_weak_share_on(BlockHash::from_byte_array([1; 32]), 1);
+    let held = test_weak_share_on(BlockHash::from_byte_array([2; 32]), 2);
+    pool.insert(pooled.clone(), 3, WeakShareSource::Local);
+    pool.hold(held.clone(), WeakShareSource::Local);
+
+    assert_eq!(
+        pool.pooled_weak_shares(&[held.pow_hash(), pooled.pow_hash()]),
+        vec![None, Some(pooled)]
+    );
+}
+
+/// The pool remembers when it took each weak share, for a relay to tell the
+/// young ones its peers may lack; one it only holds has no such time.
+#[tokio::test]
+async fn the_pool_remembers_when_it_took_each_weak_share() {
+    let (chain_store_handle, _temp_dir) = setup_test_chain_store_handle(true).await;
+    let (pool, _relay_rx) = WeakPool::new(chain_store_handle);
+    let pooled = test_weak_share_on(BlockHash::from_byte_array([1; 32]), 1);
+    let held = test_weak_share_on(BlockHash::from_byte_array([2; 32]), 2);
+    pool.insert_at(pooled.clone(), 3, WeakShareSource::Local, 12_345);
+    pool.hold(held.clone(), WeakShareSource::Local);
+
+    assert_eq!(
+        pool.pooled_at_millis(&[held.pow_hash(), pooled.pow_hash()]),
+        vec![None, Some(12_345)]
+    );
+}
+
 #[test]
 fn the_weak_pool_exposition_lists_each_series_and_every_refusal_reason() {
     let stats = WeakPoolStats {
@@ -453,6 +536,11 @@ fn the_weak_pool_exposition_lists_each_series_and_every_refusal_reason() {
                 too_deep: 13,
                 unknown_parent: 14,
             },
+            filled_from_pool: 16,
+            fetched_for_shares: 17,
+            fills_fetched_whole: 18,
+            prefilled_for_shares: 19,
+            prefilled_unused: 20,
         },
         pooled: 12,
         held: 15,
@@ -466,6 +554,11 @@ fn the_weak_pool_exposition_lists_each_series_and_every_refusal_reason() {
     assert!(exposition.contains("weak_shares_received_total 3\n"));
     assert!(exposition.contains("weak_shares_relayed_total 4\n"));
     assert!(exposition.contains("weak_shares_expired_total 6\n"));
+    assert!(exposition.contains("weak_shares_filled_from_pool_total 16\n"));
+    assert!(exposition.contains("weak_shares_fetched_for_shares_total 17\n"));
+    assert!(exposition.contains("weak_share_fills_fetched_whole_total 18\n"));
+    assert!(exposition.contains("weak_shares_prefilled_total 19\n"));
+    assert!(exposition.contains("weak_shares_prefilled_unused_total 20\n"));
     assert!(exposition.contains("# TYPE weak_pool_size gauge\nweak_pool_size 12\n"));
     assert!(
         exposition.contains(
@@ -592,7 +685,7 @@ async fn a_flood_of_weak_shares_on_unknown_parents_stays_within_the_bounds() {
         let mut parent = [0; 32];
         parent[..4].copy_from_slice(&nonce.to_le_bytes());
         pool.hold(
-            test_weak_share_on(BlockHash::from_byte_array(parent), nonce),
+            pool_weak_share_on(BlockHash::from_byte_array(parent), nonce),
             WeakShareSource::Peer(PeerId::random()),
         );
     }
@@ -626,11 +719,11 @@ async fn a_peer_flooding_the_held_weak_shares_pushes_out_only_its_own() {
     let flooder = WeakShareSource::Peer(PeerId::random());
     let honest_count = 5;
     for nonce in 0..honest_count {
-        pool.hold(test_weak_share_on(unknown_parent(nonce), nonce), honest);
+        pool.hold(pool_weak_share_on(unknown_parent(nonce), nonce), honest);
     }
     let flood = MAX_HELD_WEAK_SHARES as u32 + 50;
     for nonce in honest_count..honest_count + flood {
-        pool.hold(test_weak_share_on(unknown_parent(nonce), nonce), flooder);
+        pool.hold(pool_weak_share_on(unknown_parent(nonce), nonce), flooder);
     }
 
     let state = pool.lock();

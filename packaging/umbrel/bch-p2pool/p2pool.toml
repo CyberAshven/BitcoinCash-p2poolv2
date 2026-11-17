@@ -26,7 +26,10 @@ dial_peers = []
 # external_address = "/ip4/203.0.113.1/tcp/6890"
 max_pending_incoming = 10
 max_pending_outgoing = 10
-max_established_incoming = 50
+# Inbound peers. Each outgoing peer is another node's inbound one, so with
+# 16 outgoing a node takes 16 on average; 128 leaves room for that while
+# one node in four accepts inbound connections.
+max_established_incoming = 128
 max_established_outgoing = 50
 max_established_per_peer = 2
 max_workbase_per_second = 10
@@ -42,6 +45,13 @@ dial_timeout_secs = 30
 # chain, or one written under older share-chain rules.
 path = "/p2poolv2/data/mainnet"
 pplns_ttl_days = 7
+# Keep the whole weak shares a Bitcoin Cash share carries until its body is
+# pruned (242,534 shares), for an explorer or an archive.
+# By default they are pruned one payout depth (121,423 shares) below the tip
+# and only their summary, which the payouts read, stays with the body. Every
+# node serves every body a syncing peer asks for either way. A node that
+# syncs late keeps whole only the weak shares a peer still holds whole.
+# keep_whole_weak_shares = false
 
 [stratum]
 hostname = "0.0.0.0"

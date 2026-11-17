@@ -48,14 +48,17 @@ older shares                                                      newest
   ([Selling shares](../payouts/selling-shares.md)).
 
 How long the window is depends on the pool's share of Bitcoin Cash's
-hashrate (10-minute blocks, 10-second shares):
+hashrate (one-minute blocks under CHIP-2025-03, 10-second shares):
 
 | Pool share of BCH hashrate | Window |
 |---|---|
-| 0.05% | the 120,960-share cap, about 14 days |
-| 1% | about 18,000 shares, 50 hours |
-| 10% | about 1,800 shares, 5 hours |
-| 30% | about 600 shares, 100 minutes |
+| 0.01% | the 120,960-share cap, about 14 days |
+| 0.1% | about 18,000 shares, 50 hours |
+| 1% | about 1,800 shares, 5 hours |
+| 10% | about 180 shares, 30 minutes |
+| 30% | about 60 shares, 10 minutes |
+
+With ten-minute blocks each window was ten times as long.
 
 ### How this differs from upstream
 

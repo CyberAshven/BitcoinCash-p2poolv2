@@ -12,10 +12,10 @@
 //! without copying its code, and makes it about Bitcoin Cash and scale:
 //! share sizes counted from this repository's encoders, coinbases for up to
 //! a million payees under the hybrid payout rule (on PR #33 and chipnet;
-//! the earlier 11-payout cap is kept as a historical comparison), BCH
-//! blocks from 2 MB to BCHN's 2 GB guard, and bandwidth and latency drawn
-//! from distributions. Every run is a pure function of its scenario and
-//! seed.
+//! the earlier 11-payout cap is kept as a historical comparison), one-minute
+//! BCH blocks from chipnet's 200 kB floor to BCHN's 2 GB guard, and
+//! bandwidth and latency drawn from distributions. Every run is a pure
+//! function of its scenario and seed.
 //!
 //! See `docs/simulation/network-sim.md` for the model, the results and what
 //! they mean.

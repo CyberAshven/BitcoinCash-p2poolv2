@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 use super::*;
+use crate::constants::{BCH_BLOCK_INTERVAL_SECONDS, scaled_to_block_interval};
 
 #[test]
 fn the_same_seed_gives_the_same_outcome() {
@@ -303,10 +304,12 @@ fn bch_blocks_on_a_slow_link_delay_shares() {
         forwarding: Forwarding::AfterValidation,
         weak_shares: None,
     };
+    // A 50 MB compact block every ten minutes, in blocks of the model's
+    // interval: the same bytes a second.
     let with = Parameters {
         bch_block: Some(BchBlockLoad {
-            interval_seconds: 600.0,
-            compact_block_bytes: 50_000_000,
+            interval_seconds: BCH_BLOCK_INTERVAL_SECONDS,
+            compact_block_bytes: scaled_to_block_interval(50_000_000),
         }),
         ..without
     };

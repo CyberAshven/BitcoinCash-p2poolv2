@@ -46,8 +46,8 @@ pub fn read_json(path: impl AsRef<Path>) -> Result<Value, String> {
 pub fn run(command: &str, inputs: &[Value]) -> Result<Value, String> {
     match (command, inputs) {
         ("params", [deployment]) => params(deployment),
-        ("leaf" | "work", [deployment, job]) => leaf(deployment, job),
-        ("claim", [deployment, input]) => claim(deployment, input),
+        ("leaf" | "work", [deployment, job]) => leaf(&covenant_of(deployment)?, deployment, job),
+        ("claim", [deployment, input]) => claim(&covenant_of(deployment)?, deployment, input),
         ("genesis", [input]) => genesis(input),
         ("unlock", [deployment, input]) => unlock(deployment, input),
         ("verify", [deployment, input]) => verify(deployment, input),
@@ -168,8 +168,8 @@ fn params(deployment: &Value) -> Result<Value, String> {
     }))
 }
 
-fn leaf(deployment: &Value, job: &Value) -> Result<Value, String> {
-    let covenant = covenant_of(deployment)?;
+/// `leaf` for a deployment whose covenant is already compiled.
+pub(crate) fn leaf(covenant: &Covenant, deployment: &Value, job: &Value) -> Result<Value, String> {
     let split = split_of(&job["split"])?;
     let vault = Vault {
         category: category_of(deployment)?,
@@ -178,7 +178,7 @@ fn leaf(deployment: &Value, job: &Value) -> Result<Value, String> {
         commitment: bytes(&job["vault_commitment"], Some(16), "vault_commitment")?,
     };
     let info = claim_leaf(
-        &covenant,
+        covenant,
         &vault,
         &bytes(&job["payout_script"], None, "payout_script")?,
         split.as_ref(),
@@ -205,11 +205,15 @@ fn leaf(deployment: &Value, job: &Value) -> Result<Value, String> {
         "ext": hex::encode(info.leaf.ext),
         "split_preimage": hex::encode(info.preimage),
         "height_delta": info.height_delta,
+        "tick_delta": info.tick_delta,
     }))
 }
 
-fn built_claim(deployment: &Value, input: &Value) -> Result<BuiltClaim, String> {
-    let covenant = covenant_of(deployment)?;
+fn built_claim(
+    covenant: &Covenant,
+    deployment: &Value,
+    input: &Value,
+) -> Result<BuiltClaim, String> {
     let vault = Vault {
         category: category_of(deployment)?,
         value: amount(&input["vault"]["value_sats"], "vault.value_sats")?,
@@ -227,7 +231,7 @@ fn built_claim(deployment: &Value, input: &Value) -> Result<BuiltClaim, String> 
         Some(integer(&input["locktime"], "locktime")?)
     };
     build_claim(
-        &covenant,
+        covenant,
         &outpoint,
         &vault,
         &bytes(&input["payout_script"], None, "payout_script")?,
@@ -238,8 +242,13 @@ fn built_claim(deployment: &Value, input: &Value) -> Result<BuiltClaim, String> 
     )
 }
 
-fn claim(deployment: &Value, input: &Value) -> Result<Value, String> {
-    let built = built_claim(deployment, input)?;
+/// `claim` for a deployment whose covenant is already compiled.
+pub(crate) fn claim(
+    covenant: &Covenant,
+    deployment: &Value,
+    input: &Value,
+) -> Result<Value, String> {
+    let built = built_claim(covenant, deployment, input)?;
     verify_transaction(&built.transaction, &built.source_outputs)
         .map_err(|error| format!("the covenant refuses this claim: {error}"))?;
     let encoded = encode_transaction_bch(&built.transaction);
@@ -337,14 +346,14 @@ fn genesis(input: &Value) -> Result<Value, String> {
 }
 
 fn unlock(deployment: &Value, input: &Value) -> Result<Value, String> {
-    let built = built_claim(deployment, input)?;
+    let built = built_claim(&covenant_of(deployment)?, deployment, input)?;
     Ok(json!({
         "unlocking_bytecode": hex::encode(&built.transaction.inputs[0].unlocking_bytecode),
     }))
 }
 
 fn verify(deployment: &Value, input: &Value) -> Result<Value, String> {
-    let built = built_claim(deployment, input)?;
+    let built = built_claim(&covenant_of(deployment)?, deployment, input)?;
     verify_transaction(&built.transaction, &built.source_outputs)
         .map_err(|error| format!("the covenant refuses this claim: {error}"))?;
     Ok(json!({ "verified": true }))

@@ -222,7 +222,7 @@ P2Pool's own limits that this design touches:
 |---|---|---|---|
 | Share transactions, including their share coinbase | 200 KiB | `BLOCK_TXS_SIZE_LIMIT`, `shares/validation/mod.rs` | Retained for the share chain's own transactions |
 | BCH share body, including the carried BCH coinbase | 1,204,800 bytes | `BCH_SHARE_BODY_SIZE_LIMIT`, `shares/validation/mod.rs` | 1,000,000-byte coinbase plus 200 KiB of share transactions |
-| BCH P2P message | 1.25 MiB | `MAX_P2P_MESSAGE_SIZE`, `node/messages.rs` | Holds the full share body, header and merkle branch |
+| BCH P2P message | 2,144 KiB | `MAX_P2P_MESSAGE_SIZE`, `node/messages.rs` | Holds the full share body, up to 960 KiB of carried weak shares (`WEAK_BYTES`), header and merkle branch; 1.25 MiB before 2026-11-15, when a share could carry 96 KiB of weak shares |
 | Share spacing | about 10 seconds | `IDEAL_BLOCK_TIME`, `sim_overrides.rs` | Upstream |
 
 ## 3. The payout rule
@@ -768,7 +768,8 @@ share body limit = 1,000,000   the coinbase: BCH consensus MAX_TX_SIZE
 A coinbase is never relayed by BCHN on its own (it reaches BCHN only inside
 a block through `submitblock`), so BCHN's 100,000-byte standard-size
 policy never applies to it; only the 1,000,000-byte consensus limit does.
-Derived sizes change with it: `MAX_P2P_MESSAGE_SIZE` is 1.25 MiB, and the block
+Derived sizes change with it: `MAX_P2P_MESSAGE_SIZE` was 1.25 MiB (2,144 KiB
+since a share may carry 960 KiB of weak shares), and the block
 receiver's pending buffer, bounded at 32 MiB, holds at least 26 of the
 largest shares. The organise worker's channel (512 shares) and pending
 buffer (1,024 shares), bounded by count alone, would hold about 620 MB and
@@ -797,7 +798,7 @@ several hops. A share that arrives `t` seconds late is built on by others
 for those seconds, so about `1 - e^(-t/10)` more shares go stale: 1 second
 costs about 10%, 6.4 seconds about 47%. Stale shares become uncles (9/10 of
 their weight) or orphans, which hurts small miners on slow links most.
-Storage grows the same way: shares are kept for `BCH_PRUNE_DEPTH` (242,126
+Storage grows the same way: shares are kept for `BCH_PRUNE_DEPTH` (242,174
 shares), about 8 GB of coinbases at 1,000 payees and 242 GB at 29,402. These
 are estimates from sizes and link speeds; the network sim being built in
 parallel should measure propagation delay and stale rate against coinbase

@@ -278,6 +278,7 @@ mod tests {
             timestamp: 0,
             bits: bitcoin::CompactTarget::from_consensus(0x1d00ffff),
             weak_count: 0,
+            weak_asking: 0,
             uncles: vec![],
         });
 
@@ -361,6 +362,7 @@ mod tests {
             timestamp: 1000,
             bits: bitcoin::CompactTarget::from_consensus(0x1d00ffff),
             weak_count: 0,
+            weak_asking: 0,
             uncles: vec![],
         });
 
@@ -409,6 +411,7 @@ mod tests {
             timestamp: 1000,
             bits: bitcoin::CompactTarget::from_consensus(0x1d00ffff),
             weak_count: 0,
+            weak_asking: 0,
             uncles: vec![uncle],
         });
 
@@ -440,6 +443,7 @@ mod tests {
             timestamp: 1000,
             bits: bitcoin::CompactTarget::from_consensus(0x1d00ffff),
             weak_count: 0,
+            weak_asking: 0,
             uncles: vec![],
         });
 
@@ -484,6 +488,7 @@ mod tests {
             timestamp: 1000,
             bits: bitcoin::CompactTarget::from_consensus(0x1d00ffff),
             weak_count: 0,
+            weak_asking: 0,
             uncles: vec![uncle],
         });
 
@@ -513,6 +518,7 @@ mod tests {
             timestamp: 1000,
             bits: bitcoin::CompactTarget::from_consensus(0x1d00ffff),
             weak_count: 0,
+            weak_asking: 0,
             uncles: vec![],
         });
 
@@ -548,6 +554,7 @@ mod tests {
             timestamp: 0,
             bits: bitcoin::CompactTarget::from_consensus(0x1d00ffff),
             weak_count: 0,
+            weak_asking: 0,
             uncles: vec![],
         });
 
