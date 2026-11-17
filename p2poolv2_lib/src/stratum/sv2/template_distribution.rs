@@ -5,9 +5,11 @@
 //! Stratum V2 Template Distribution client: block templates from a Template
 //! Provider instead of the node's `getblocktemplate`.
 //!
-//! The node connects to the configured provider, over Noise when the
-//! provider's authority key is pinned, sets up the Template Distribution
-//! Protocol, asks for the large templates extension and declares in
+//! The node connects to the configured provider, through a SOCKS5 proxy
+//! when one is configured (a provider behind Tor or I2P, `super::socks5`)
+//! and over Noise when the provider's authority key is pinned, sets up the
+//! Template Distribution Protocol, asks for the large templates extension
+//! and declares in
 //! `CoinbaseOutputConstraints` the most coinbase output bytes it can ever
 //! add. The provider then sends `NewTemplate` and `SetNewPrevHash`, and the
 //! node asks for each template's transactions with `RequestTransactionData`,
@@ -69,6 +71,7 @@ use super::large_templates::{
 };
 use super::noise::NoiseTransport;
 use super::session::{Sv2Message, decode_plain_frames, encode_extension_frame, encode_frame};
+use super::socks5;
 use crate::config::{BitcoinCashNetwork, TemplateProvider};
 use crate::shares::bch_asert::{BCH_BLOCK_SPACING, TickSchedule};
 use crate::stratum::block_submit::submit_block;
@@ -153,10 +156,64 @@ const MAX_PENDING_TEMPLATES: usize = 16;
 /// Found blocks queued for one provider connection.
 const SOLUTION_QUEUE: usize = 16;
 
-/// How long the provider has to answer `SetupConnection`, and the longest
-/// the node waits for its answer to `RequestExtensions`
-/// ([`extensions_wait`]).
+/// How long a provider the node connects to directly has to accept the
+/// connection and to answer the handshake and `SetupConnection`, and the
+/// longest the node waits for its answer to `RequestExtensions`
+/// ([`extensions_wait`]). A provider behind a proxy gets longer ([`Route`]).
 const SETUP_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How the node reaches a provider, which decides how long the connection
+/// may take to open and how long each setup answer may take.
+///
+/// A Tor circuit to an onion service, and far more so an I2P tunnel, is
+/// built when the connection opens, and every answer then crosses several
+/// relays. The times are the ones Knuth's Job Declaration client allows its
+/// pools on the same links.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Route {
+    /// A TCP connection to the provider's address.
+    Direct,
+    /// Through the SOCKS5 proxy, to anything but an I2P name: Tor.
+    Proxy,
+    /// Through the SOCKS5 proxy, to an I2P name.
+    I2p,
+}
+
+impl Route {
+    fn of(provider: &TemplateProvider) -> Self {
+        match &provider.proxy {
+            None => Self::Direct,
+            Some(_)
+                if socks5::split_host_port(&provider.address)
+                    .is_ok_and(|(host, _)| socks5::is_i2p_host(host)) =>
+            {
+                Self::I2p
+            }
+            Some(_) => Self::Proxy,
+        }
+    }
+
+    /// How long opening the connection may take: until the provider, or
+    /// the proxy on its behalf, accepts it.
+    fn dial_timeout(self) -> Duration {
+        match self {
+            Self::Direct => SETUP_TIMEOUT,
+            Self::Proxy => Duration::from_secs(20),
+            Self::I2p => Duration::from_secs(90),
+        }
+    }
+
+    /// How long the provider has to answer the Noise handshake and
+    /// `SetupConnection`, and the longest wait for its answer to
+    /// `RequestExtensions`.
+    fn reply_timeout(self) -> Duration {
+        match self {
+            Self::Direct => SETUP_TIMEOUT,
+            Self::Proxy => Duration::from_secs(15),
+            Self::I2p => Duration::from_secs(45),
+        }
+    }
+}
 
 /// The shortest wait for the answer to `RequestExtensions`, however fast
 /// `SetupConnection` was answered.
@@ -1058,12 +1115,16 @@ pub async fn start_template_provider(
         message: format!("Failed to create the bitcoind client: {error}"),
     })?;
     info!(
-        "Taking block templates from the Stratum V2 Template Provider at {} ({})",
+        "Taking block templates from the Stratum V2 Template Provider at {} ({}{})",
         provider.address,
         if provider.authority_public_key.is_some() {
             "Noise, pinned authority key"
         } else {
             "unencrypted, loopback"
+        },
+        match &provider.proxy {
+            Some(proxy) => format!(", through the SOCKS5 proxy at {proxy}"),
+            None => String::new(),
         }
     );
     tokio::spawn(async move {
@@ -1211,15 +1272,17 @@ async fn open_connection(
     provider: &TemplateProvider,
     silent_providers: &mut HashSet<String>,
 ) -> Result<(Transport, TcpStream, ProviderSession, Vec<Sv2Message>), String> {
-    let mut stream = timeout(SETUP_TIMEOUT, TcpStream::connect(&provider.address))
+    let route = Route::of(provider);
+    let mut stream = timeout(route.dial_timeout(), dial(provider))
         .await
-        .map_err(|_| "connect timed out".to_string())?
-        .map_err(|error| format!("connect: {error}"))?;
+        .map_err(|_| "connect timed out".to_string())??;
     if let Err(nodelay_error) = stream.set_nodelay(true) {
         debug!("Failed to set TCP_NODELAY for the Template Provider: {nodelay_error}");
     }
     let mut transport = match provider.authority_public_key {
-        Some(key) => Transport::Noise(Box::new(NoiseTransport::connect(&mut stream, key).await?)),
+        Some(key) => Transport::Noise(Box::new(
+            NoiseTransport::connect(&mut stream, key, route.reply_timeout()).await?,
+        )),
         None => Transport::Plain {
             decoder: Decoder::new(),
             inbox: Vec::with_capacity(READ_BUFFER_SIZE),
@@ -1231,10 +1294,13 @@ async fn open_connection(
         .write_all(&setup)
         .await
         .map_err(|error| format!("write: {error}"))?;
-    let mut early_messages = timeout(SETUP_TIMEOUT, read_setup_reply(&mut stream, &mut transport))
-        .await
-        .map_err(|_| "no SetupConnection reply".to_string())??;
-    let wait = extensions_wait(setup_sent.elapsed());
+    let mut early_messages = timeout(
+        route.reply_timeout(),
+        read_setup_reply(&mut stream, &mut transport),
+    )
+    .await
+    .map_err(|_| "no SetupConnection reply".to_string())??;
+    let wait = extensions_wait(setup_sent.elapsed(), route.reply_timeout());
     let answer = if silent_providers.contains(&provider.address) {
         ExtensionAnswer::NotAsked
     } else {
@@ -1277,6 +1343,19 @@ async fn open_connection(
         ExtensionAnswer::Refused | ExtensionAnswer::NotAsked => ProviderSession::default(),
     };
     Ok((transport, stream, session, early_messages))
+}
+
+/// Open the byte stream to `provider`: a TCP connection to its address, or,
+/// when a proxy is configured, a SOCKS5 `CONNECT` through the proxy, which
+/// is given the provider's name unresolved (`super::socks5`). Nothing is
+/// dialed directly when a proxy is configured, whatever the proxy answers.
+async fn dial(provider: &TemplateProvider) -> Result<TcpStream, String> {
+    match &provider.proxy {
+        Some(proxy) => socks5::connect(proxy, &provider.address).await,
+        None => TcpStream::connect(&provider.address)
+            .await
+            .map_err(|error| format!("connect: {error}")),
+    }
 }
 
 /// Read until the provider answers `SetupConnection`, and return the
@@ -1350,13 +1429,14 @@ enum ExtensionAnswer {
 /// How long to wait for the answer to `RequestExtensions`: twice the round
 /// trip `SetupConnection` took, the strategy the extensions negotiation
 /// specification suggests, at least [`MIN_EXTENSIONS_WAIT`] and at most
-/// [`SETUP_TIMEOUT`]. The specification lets a provider ignore the request,
-/// and the node sends nothing else until the answer, so this wait is what a
-/// silent provider costs the connection.
-fn extensions_wait(setup_round_trip: Duration) -> Duration {
+/// `longest`, the reply time of the provider's [`Route`]. The specification
+/// lets a provider ignore the request, and the node sends nothing else
+/// until the answer, so this wait is what a silent provider costs the
+/// connection.
+fn extensions_wait(setup_round_trip: Duration, longest: Duration) -> Duration {
     setup_round_trip
         .saturating_mul(2)
-        .clamp(MIN_EXTENSIONS_WAIT, SETUP_TIMEOUT)
+        .clamp(MIN_EXTENSIONS_WAIT, longest)
 }
 
 /// `RequestExtensions` asking for the large templates extension.

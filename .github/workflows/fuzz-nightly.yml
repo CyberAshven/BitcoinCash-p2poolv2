@@ -61,6 +61,16 @@ jobs:
           mkdir -p p2poolv2_lib/fuzz/corpus/wire_message_decode
           cp p2poolv2_lib/fuzz/seed_corpus/wire_message_decode/* p2poolv2_lib/fuzz/corpus/wire_message_decode/
 
+      # Upstream's nightly run pushes what it finds for the same target to
+      # p2poolv2/fuzz-corpus. Its entries become starting inputs for this
+      # fork's decoder, read anonymously; nothing is pushed back.
+      - name: Add upstream's shared corpus
+        run: |
+          git clone --depth 1 https://github.com/p2poolv2/fuzz-corpus "$RUNNER_TEMP/upstream-corpus"
+          if [ -d "$RUNNER_TEMP/upstream-corpus/wire_message_decode" ]; then
+            cp -n "$RUNNER_TEMP/upstream-corpus/wire_message_decode/"* p2poolv2_lib/fuzz/corpus/wire_message_decode/
+          fi
+
       - name: Run decoder (1 hour)
         working-directory: p2poolv2_lib
         # The prebuilt cargo-fuzz defaults to musl, where AddressSanitizer cannot run.

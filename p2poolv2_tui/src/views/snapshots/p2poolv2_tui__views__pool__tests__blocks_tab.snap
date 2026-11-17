@@ -1,9 +1,10 @@
 ---
 source: p2poolv2_tui/src/views/pool.rs
+assertion_line: 765
 expression: text
 ---
 + Info --------------------------------------------------------------------------------------------+
-| Overview | Shares | Miners | Blocks | Peers                                                      |
+| Overview | Shares | Miners | Blocks | Peers | System                                             |
 +--------------------------------------------------------------------------------------------------+
 + Blocks found by the pool (1) --------------------------------------------------------------------+
 |Height    Block                  Found          Paid to                                           |
