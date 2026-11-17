@@ -53,12 +53,16 @@ fn share_view(share: ShareDetail, is_block: bool) -> impl IntoView {
         .into_any()
     };
     // The weak-share details only render for a share that carries weak
-    // shares: three stat rows and a panel between the share panel and the
+    // shares: four stat rows and a panel between the share panel and the
     // uncles, as the node's page does. Nothing renders when the count is 0.
     let carries_weak = share.weak_count > 0;
     let weak_stats = carries_weak.then(|| {
         view! {
             {stat("Weak shares", view! { {share.weak_count.to_string()} }.into_any())}
+            {stat(
+                "Weak shares asking",
+                view! { {share.weak_asking.to_string()} }.into_any(),
+            )}
             {stat(
                 "Weak ratio",
                 view! { {fmt_weak_ratio(share.weak_ratio)} }.into_any(),

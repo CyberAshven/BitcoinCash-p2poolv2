@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Weak shares follow the asks (#118, issue #79 part 6), a flag day: protocol
+segment `weak4-640-100-48-256-320-64-4096-64-32`, store format 10, new
+genesis shares. A share header counts the weak shares it carries that ask
+for an easier target (`weak_asking`); while more than one in 64 ask, the weak
+ratio rises (up to 4096) and a share may carry more than 64 of them (up to
+640). A new chain starts at a weak ratio of 32.
+
 Upstream P2Poolv2 is merged through fdbf85df (its 0.18.0 and two commits
 after it). A node now dials only the host names listed in `dial_peers`, never
 a `/dns` address learned from a peer, and checks `blocked_ips` after it
@@ -32,6 +39,13 @@ onion service must change: every miner then connects from this computer's
 own address, which the default `sv2_coinbase_only_from` lets declare
 Coinbase-Only jobs.
 
+Both Umbrel apps run Prometheus and Grafana beside the node, as upstream's
+Umbrel app does (`dbf8ae48`), on the repository's Bitcoin Cash dashboards.
+Grafana is on port 3342 (`bch-p2pool`) or 3343 (the external node app),
+open to view, with the admin password the app's Umbrel password. Both
+images are pinned by version and digest; a test keeps each app's copy of the
+dashboards equal to `prometheus/grafana`.
+
 The Umbrel apps' dashboards move from ports 46890 and 46891 to 36890 and
 36891. umbrelOS 2.0 keeps host ports 40000 to 49999 for Umbrel Machines'
 port forwards, and upstream's Umbrel app left 46884 for 36884 for the same
@@ -39,6 +53,14 @@ reason; a test now keeps every app port out of that range. The nightly fuzz
 run also starts from upstream's shared corpus for the same decoder target
 (`p2poolv2/fuzz-corpus`). Upstream's website, docs and difficulty analysis
 repositories have nothing new to port.
+
+The terminal UI follows upstream's PDM through `b7d97c34` (2026-11-04). A
+System tab on P2Pool Status starts, stops and restarts the node when it
+runs as the systemd user service `p2poolv2@<instance>`, from PDM's unit,
+now in `p2poolv2_tui/systemd/user`, with its config at
+`~/.config/p2poolv2/config-<instance>.toml`; `systemctl` runs off the
+screen's thread, since a stop waits for the node to close its store. The
+colours come from PDM's theme, readable on light and dark terminals.
 
 The network and payout simulators model one-minute Bitcoin Cash blocks
 (CHIP-2025-03): a block every minute paying a tenth of a ten-minute block,

@@ -5,10 +5,10 @@ apps that run a P2Poolv2 node for Bitcoin Cash. It is a port of upstream's
 [p2poolv2/umbrel-app](https://github.com/p2poolv2/umbrel-app), which runs
 the Bitcoin version on Umbrel's Bitcoin Node app.
 
-| App | Bitcoin Cash Node | Network | Stratum V1 | Share chain P2P | Dashboard |
-|---|---|---|---|---|---|
-| P2Pool for Bitcoin Cash (`bch-p2pool`) | Umbrel's Bitcoin Cash Node app | mainnet | 3340 | 6890 | 36890 |
-| P2Pool for Bitcoin Cash (external node) (`bch-p2pool-external`) | BCHN on another computer | chipnet by default, or mainnet | 3341 | 6891 | 36891 |
+| App | Bitcoin Cash Node | Network | Stratum V1 | Share chain P2P | Dashboard | Grafana |
+|---|---|---|---|---|---|---|
+| P2Pool for Bitcoin Cash (`bch-p2pool`) | Umbrel's Bitcoin Cash Node app | mainnet | 3340 | 6890 | 36890 | 3342 |
+| P2Pool for Bitcoin Cash (external node) (`bch-p2pool-external`) | BCHN on another computer | chipnet by default, or mainnet | 3341 | 6891 | 36891 | 3343 |
 
 Both apps run the fork's image,
 `ghcr.io/cyberashven/bitcoincash-p2poolv2:v0.0.1-alpha` (amd64 and arm64),
@@ -204,13 +204,26 @@ bootstrap_address = "bitcoincash:qze95tc2dqrnltvxfa5yhunwx5952f34fvw4g6365k"
 never pays it. The sample value is the P2Poolv2 Bitcoin Cash donation
 address.
 
+## Monitoring
+
+Each app runs Prometheus and Grafana beside its node, as upstream's app
+does: Prometheus reads the node's `/metrics` every 5 seconds, and Grafana
+shows the repository's Bitcoin Cash dashboards (`prometheus/grafana`, copied
+into each app's `grafana` folder; a test keeps the copies equal). Open
+`http://umbrel.local:3342` for `bch-p2pool`, or port 3343 for the external
+node app. Anyone on your network sees the dashboards without logging in;
+the admin login is `admin` with the app's password, which Umbrel shows in
+the app's settings. Both images are pinned by version and digest, as in
+`docker/docker-compose.metrics.yml`, and their data stays in the app's
+`data/prometheus` and `data/grafana`. Backups leave out `data/prometheus`.
+
 ## Ports
 
 | Port | Used by |
 |---|---|
-| 3340, 6890, 36890 | `bch-p2pool`: Stratum V1, share chain P2P, dashboard |
-| 3341, 6891, 36891 | `bch-p2pool-external`: Stratum V1, share chain P2P, dashboard |
-| 3333, 6884, 36884 | P2Poolv2 for Bitcoin (`p2poolv2/umbrel-app`) |
+| 3340, 6890, 36890, 3342 | `bch-p2pool`: Stratum V1, share chain P2P, dashboard, Grafana |
+| 3341, 6891, 36891, 3343 | `bch-p2pool-external`: Stratum V1, share chain P2P, dashboard, Grafana |
+| 3333, 6884, 36884, 3001 | P2Poolv2 for Bitcoin (`p2poolv2/umbrel-app`), 3001 its Grafana |
 | 2100, 8332 to 8335, 28332 to 28336 | Bitcoin Node |
 | 2105, 8334, 9332, 9333, 9335, 48332 to 48336 | Bitcoin Knots |
 | 3330, 8335 | Bitcoin Cash Node (dashboard, P2P); its RPC 8332 and ZMQ 28332 stay on Umbrel's network |
@@ -279,7 +292,9 @@ Ported from [p2poolv2/umbrel-app](https://github.com/p2poolv2/umbrel-app) at
 `5b1a3ae`, and followed through `b4e19f96` (2026-11-06): the dashboard ports
 left umbrelOS's Machines range, and the `APP_DATA_DIR` mounts and the
 double-underscore `P2POOL_*__*` variables were already here. Upstream's
-Grafana and Prometheus services (`dbf8ae48`) are not ported yet. By Juwon
+Grafana and Prometheus services (`dbf8ae48`) are here on the repository's
+Bitcoin Cash dashboards, with pinned images and published on their own
+ports. By Juwon
 Ogunseye and the P2Poolv2 developers, under the Apache
 License 2.0; [LICENSE](LICENSE) is upstream's licence file. Changes from
 upstream: Bitcoin Cash in place of Bitcoin (the fork's image and config

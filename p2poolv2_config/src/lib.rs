@@ -1652,6 +1652,13 @@ pub struct SimConfig {
     /// default, so other sim runs keep pacing by the share target.
     #[serde(default)]
     pub weak_shares: bool,
+    /// Bitcoin Cash: with `weak_shares`, every job this node's miner mines at
+    /// the minimum wants a target twice as easy as its weak target, never
+    /// easier than the chain's ceiling, so its weak shares ask for an easier
+    /// one whatever the node's default would ask. For the end-to-end check of
+    /// the weak shares that ask; off by default, so the miner wants its bits.
+    #[serde(default)]
+    pub weak_asks: bool,
     /// Bitcoin Cash: of the share blocks this node broadcasts that carry weak
     /// shares, every this many goes out with its first weak share's coinbase
     /// value one satoshi higher, as a peer serving an altered copy of an

@@ -151,10 +151,11 @@ pub struct ShareHeader {
     /// ([`Self::minimum_bits`]).
     #[serde(default)]
     pub asert_bits: CompactTarget,
-    /// The target this share's node wanted for its miner before the band
-    /// cap: equal to `bits`, or harder when the cap stopped it. A signal that
-    /// moves the next share's band cap; it must be at least as hard as
-    /// `bits`.
+    /// The target this share's node wanted for its miner: equal to `bits`;
+    /// harder when the band cap stopped it, which moves the next share's
+    /// band cap up; or easier, which on a weak share asks for an easier weak
+    /// target (`shares::weak::weak_share_asks`). A signal only: it makes no
+    /// share valid or invalid.
     #[serde(default)]
     pub wanted_bits: CompactTarget,
     /// This share's band cap `C` in units of 1/1024 (1024 is a band of one),
@@ -174,13 +175,19 @@ pub struct ShareHeader {
     /// parent's (`shares::weak::next_weak_ratio`): weak shares mined on this
     /// share meet its weak target, its minimum times `R`
     /// (`shares::weak::parent_weak_target`). Encoded after the payout level,
-    /// and committed with `weak_count` and `weak_root`, for Bitcoin Cash
-    /// share owners only; Bitcoin shares read all three as zero.
+    /// and committed with `weak_count`, `weak_asking` and `weak_root`, for
+    /// Bitcoin Cash share owners only; Bitcoin shares read all four as zero.
     #[serde(default)]
     pub weak_ratio: u32,
     /// How many weak shares this share's body carries (`shares::weak`).
     #[serde(default)]
     pub weak_count: u16,
+    /// How many of the weak shares this share's body carries ask for an
+    /// easier weak target (`shares::weak::weak_share_asks`), which moves the
+    /// next share's weak ratio (`shares::weak::next_weak_ratio`). At most
+    /// `weak_count`: a header counting more does not decode.
+    #[serde(default)]
+    pub weak_asking: u16,
     /// The merkle root of the weak shares this share carries, in order, each
     /// leaf the SHA-256d of one weak share's whole encoding
     /// (`shares::weak::weak_root`); all zeros for none.
@@ -314,6 +321,7 @@ impl ShareHeader {
             payout_level: commitment.payout_level,
             weak_ratio: commitment.weak_ratio,
             weak_count: commitment.weak_count,
+            weak_asking: commitment.weak_asking,
             weak_root: commitment.weak_root,
         }
     }
@@ -417,6 +425,7 @@ impl ShareHeader {
             len += self.payout_level.consensus_encode(w)?;
             len += self.weak_ratio.consensus_encode(w)?;
             len += self.weak_count.consensus_encode(w)?;
+            len += self.weak_asking.consensus_encode(w)?;
             len += self.weak_root.consensus_encode(w)?;
         }
         len += self.bitcoin_header.version.consensus_encode(w)?;
@@ -494,16 +503,35 @@ impl ShareHeader {
                     0,
                 )
             };
-        let (weak_ratio, weak_count, weak_root) =
+        let (weak_ratio, weak_count, weak_asking, weak_root) =
             if matches!(miner_address, ShareOwner::CashP2pkh(_)) {
                 let weak_ratio = u32::consensus_decode(r)?;
                 let weak_count = u16::consensus_decode(r)?;
                 if usize::from(weak_count) > crate::shares::weak::WEAK_CAP {
                     return Err(ParseFailed("share header carries too many weak shares"));
                 }
-                (weak_ratio, weak_count, sha256d::Hash::consensus_decode(r)?)
+                let weak_asking = u16::consensus_decode(r)?;
+                if weak_asking > weak_count {
+                    return Err(ParseFailed(
+                        "share header counts more asking weak shares than it carries",
+                    ));
+                }
+                if !crate::shares::weak::weak_count_allowed(
+                    usize::from(weak_count),
+                    usize::from(weak_asking),
+                ) {
+                    return Err(ParseFailed(
+                        "share header carries more weak shares than its asking ones allow",
+                    ));
+                }
+                (
+                    weak_ratio,
+                    weak_count,
+                    weak_asking,
+                    sha256d::Hash::consensus_decode(r)?,
+                )
             } else {
-                (0, 0, sha256d::Hash::all_zeros())
+                (0, 0, 0, sha256d::Hash::all_zeros())
             };
         let bitcoin_version = bitcoin::block::Version::consensus_decode(r)?;
         let bitcoin_prev_blockhash = BlockHash::consensus_decode(r)?;
@@ -578,6 +606,7 @@ impl ShareHeader {
             payout_level,
             weak_ratio,
             weak_count,
+            weak_asking,
             weak_root,
         })
     }
@@ -661,8 +690,10 @@ pub struct ShareBlock {
     /// `WEAK_CAP` of them in `WEAK_BYTES`. Not part of the block hash: the
     /// header commits to their count and the merkle root of their whole
     /// encodings, which the body check compares, so a copy with any field of
-    /// any of them changed is a bad copy. Encoded on Bitcoin Cash shares only;
-    /// always empty on Bitcoin.
+    /// any of them changed is a bad copy. The header also commits how many of
+    /// them ask (`ShareHeader::weak_asking`), which validation counts from
+    /// the carried weak shares. Encoded on Bitcoin Cash shares only; always
+    /// empty on Bitcoin.
     #[serde(default)]
     pub weak_shares: Vec<WeakShare>,
 }
@@ -810,6 +841,7 @@ impl ShareBlock {
             payout_level: 0,
             weak_ratio: 0,
             weak_count: 0,
+            weak_asking: 0,
             weak_root: sha256d::Hash::all_zeros(),
         };
         let bitcoin_coinbase = bitcoin_block
@@ -1112,8 +1144,9 @@ mod tests {
         assert!(CoinbaseProof::verify(&wider, &share.template_merkle_branches).is_err());
     }
 
-    /// A Bitcoin Cash header round-trips its weak ratio and the count and
-    /// root of the weak shares it carries, and its block round-trips them.
+    /// A Bitcoin Cash header round-trips its weak ratio, the count and root
+    /// of the weak shares it carries and how many of them ask, and its block
+    /// round-trips them.
     #[test]
     fn bitcoin_cash_share_round_trips_its_weak_shares() {
         let weak_share = crate::shares::weak::WeakShare {
@@ -1130,6 +1163,7 @@ mod tests {
             .share_owner(ShareOwner::CashP2pkh([0x22; 20]))
             .weak_ratio(256_000)
             .weak_shares(vec![weak_share.clone()])
+            .weak_asking(1)
             .build();
 
         let decoded: ShareBlock = deserialize(&serialize(&share)).unwrap();
@@ -1137,13 +1171,14 @@ mod tests {
         assert_eq!(decoded, share);
         assert_eq!(decoded.header.weak_ratio, 256_000);
         assert_eq!(decoded.header.weak_count, 1);
+        assert_eq!(decoded.header.weak_asking, 1);
         assert_eq!(decoded.header.weak_root, weak_share.committed_hash());
         assert_eq!(decoded.weak_shares, vec![weak_share]);
         CoinbaseProof::verify(&share.header, &share.template_merkle_branches).unwrap();
     }
 
-    /// The weak fields are bound by the proof of work: another ratio or count
-    /// is another share hash and fails the coinbase proof.
+    /// The weak fields are bound by the proof of work: another ratio, count
+    /// or number asking is another share hash and fails the coinbase proof.
     #[test]
     fn bitcoin_cash_header_binds_its_weak_shares() {
         let share = TestShareBlockBuilder::new()
@@ -1153,10 +1188,117 @@ mod tests {
         easier.weak_ratio -= 1;
         let mut counted = share.header.clone();
         counted.weak_count = 1;
+        let mut asking = counted.clone();
+        asking.weak_asking = 1;
 
         assert_ne!(easier.block_hash(), share.header.block_hash());
+        assert_ne!(asking.block_hash(), counted.block_hash());
+        assert_eq!(serialize(&asking).len(), serialize(&counted).len());
         assert!(CoinbaseProof::verify(&easier, &share.template_merkle_branches).is_err());
         assert!(CoinbaseProof::verify(&counted, &share.template_merkle_branches).is_err());
+        assert!(CoinbaseProof::verify(&asking, &share.template_merkle_branches).is_err());
+    }
+
+    /// A header counts at most as many asking weak shares as it carries: one
+    /// counting more does not decode, wherever a header is read.
+    #[test]
+    fn a_header_counting_more_asking_weak_shares_than_it_carries_does_not_decode() {
+        let mut header = TestShareBlockBuilder::new()
+            .share_owner(ShareOwner::CashP2pkh([0x22; 20]))
+            .build()
+            .header;
+        header.weak_count = 3;
+        header.weak_asking = 3;
+        let decoded: ShareHeader = deserialize(&serialize(&header)).unwrap();
+        assert_eq!(decoded.weak_asking, 3);
+
+        header.weak_asking = 4;
+        let error = deserialize::<ShareHeader>(&serialize(&header)).unwrap_err();
+        assert!(
+            error.to_string().contains("more asking weak shares"),
+            "{error}"
+        );
+    }
+
+    /// A header commits at most `WEAK_CAP` (640) carried weak shares, and a
+    /// body carries at most as many: one more does not decode.
+    #[test]
+    fn a_share_carrying_more_weak_shares_than_the_cap_does_not_decode() {
+        let weak_share = crate::shares::weak::WeakShare {
+            header: TestShareBlockBuilder::new()
+                .share_owner(ShareOwner::CashP2pkh([0x33; 20]))
+                .build()
+                .header,
+            coinbase_script_sig: ScriptBuf::new(),
+            coinbase_value: 1,
+            merkle_branch: Vec::new(),
+        };
+        let mut share = TestShareBlockBuilder::new()
+            .share_owner(ShareOwner::CashP2pkh([0x22; 20]))
+            .build();
+        share.header.weak_count = WEAK_CAP as u16;
+        share.header.weak_asking = 11;
+        share.weak_shares = vec![weak_share.clone(); WEAK_CAP];
+        assert_eq!(WEAK_CAP, 640);
+
+        let decoded: ShareBlock = deserialize(&serialize(&share)).unwrap();
+        assert_eq!(decoded.weak_shares.len(), WEAK_CAP);
+
+        share.weak_shares.push(weak_share);
+        let error = deserialize::<ShareBlock>(&serialize(&share)).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("share block carries too many weak shares"),
+            "{error}"
+        );
+
+        share.header.weak_count = WEAK_CAP as u16 + 1;
+        let error = deserialize::<ShareHeader>(&serialize(&share.header)).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("share header carries too many weak shares"),
+            "{error}"
+        );
+    }
+
+    /// More than `WEAK_IDLE_CAP` (64) weak shares only while more than one
+    /// in 64 of them ask: a header counting fewer asking ones does not
+    /// decode, wherever a header is read.
+    #[test]
+    fn a_header_carrying_more_than_64_weak_shares_needs_enough_asking() {
+        let mut header = TestShareBlockBuilder::new()
+            .share_owner(ShareOwner::CashP2pkh([0x22; 20]))
+            .build()
+            .header;
+        let decodes = |header: &ShareHeader| deserialize::<ShareHeader>(&serialize(header));
+
+        for (weak_count, weak_asking, allowed) in [
+            (64, 0, true),
+            (65, 1, false),
+            (65, 2, true),
+            (127, 2, true),
+            (128, 2, false),
+            (640, 10, false),
+            (640, 11, true),
+        ] {
+            header.weak_count = weak_count;
+            header.weak_asking = weak_asking;
+            match decodes(&header) {
+                Ok(decoded) => {
+                    assert!(allowed, "{weak_count} with {weak_asking} asking decoded");
+                    assert_eq!(decoded.weak_count, weak_count);
+                }
+                Err(error) => {
+                    assert!(!allowed, "{weak_count} with {weak_asking} asking: {error}");
+                    assert!(
+                        error.to_string().contains("than its asking ones allow"),
+                        "{error}"
+                    );
+                }
+            }
+        }
     }
 
     /// A Bitcoin header and block carry no weak shares: nothing is encoded,
@@ -1167,11 +1309,13 @@ mod tests {
         let mut weak = bitcoin.clone();
         weak.header.weak_ratio = 256_000;
         weak.header.weak_count = 3;
+        weak.header.weak_asking = 2;
 
         assert_eq!(serialize(&weak), serialize(&bitcoin));
         let decoded: ShareBlock = deserialize(&serialize(&weak)).unwrap();
         assert_eq!(decoded.header.weak_ratio, 0);
         assert_eq!(decoded.header.weak_count, 0);
+        assert_eq!(decoded.header.weak_asking, 0);
         assert!(decoded.weak_shares.is_empty());
     }
 
@@ -1560,6 +1704,7 @@ mod tests {
             payout_level: 0,
             weak_ratio: 0,
             weak_count: 0,
+            weak_asking: 0,
             weak_root: sha256d::Hash::all_zeros(),
         };
 

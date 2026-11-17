@@ -260,5 +260,5 @@ fn the_default_bounds_are_the_channels_doubled() {
     assert_eq!(limits.max_blocks, 1_024);
     assert_eq!(limits.max_bytes, 128 * 1024 * 1024);
     assert_eq!(limits.max_bytes, 2 * super::super::ORGANISE_CHANNEL_BYTES);
-    assert!(limits.max_bytes / crate::node::messages::MAX_P2P_MESSAGE_SIZE >= 102);
+    assert!(limits.max_bytes / crate::node::messages::MAX_P2P_MESSAGE_SIZE >= 61);
 }
