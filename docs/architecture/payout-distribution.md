@@ -309,7 +309,8 @@ every permitted rate.
 
 The carried BCH coinbase has its own 1,000,000-byte limit beside 200 KiB
 of share transactions. `BCH_SHARE_BODY_SIZE_LIMIT` is 1,204,800 bytes and
-the BCH P2P message limit is 1.25 MiB, allowing the header and merkle branch.
+the BCH P2P message limit is 2,144 KiB, allowing the header, merkle branch
+and up to 960 KiB of carried weak shares.
 Compact transport and propagation measurements at large coinbase sizes
 remain follow-ups.
 

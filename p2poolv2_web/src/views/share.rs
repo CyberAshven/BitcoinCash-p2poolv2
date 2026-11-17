@@ -53,12 +53,16 @@ fn share_view(share: ShareDetail, is_block: bool) -> impl IntoView {
         .into_any()
     };
     // The weak-share details only render for a share that carries weak
-    // shares: three stat rows and a panel between the share panel and the
+    // shares: four stat rows and a panel between the share panel and the
     // uncles, as the node's page does. Nothing renders when the count is 0.
     let carries_weak = share.weak_count > 0;
     let weak_stats = carries_weak.then(|| {
         view! {
             {stat("Weak shares", view! { {share.weak_count.to_string()} }.into_any())}
+            {stat(
+                "Weak shares asking",
+                view! { {share.weak_asking.to_string()} }.into_any(),
+            )}
             {stat(
                 "Weak ratio",
                 view! { {fmt_weak_ratio(share.weak_ratio)} }.into_any(),
@@ -71,7 +75,43 @@ fn share_view(share: ShareDetail, is_block: bool) -> impl IntoView {
         .into_any()
     });
     let weak_panel = carries_weak.then(|| {
-        let body = if share.weak_shares.is_empty() {
+        let body = if let Some(summary) = share
+            .weak_summary
+            .as_ref()
+            .filter(|_| share.weak_shares.is_empty())
+        {
+            let rows = summary
+                .groups
+                .iter()
+                .map(|group| {
+                    view! {
+                        <tr>
+                            <td>{miner_link(&group.miner_bitcoin_address)}</td>
+                            <td>{group.count.to_string()}</td>
+                            <td>{group.payout_level.to_string()}</td>
+                        </tr>
+                    }
+                })
+                .collect_view();
+            view! {
+                <p class="empty-state">
+                    "The whole weak shares were pruned one payout depth below the tip. Their summary, which the payouts read, is kept:"
+                </p>
+                <div class="table-x">
+                    <table class="table">
+                        <thead>
+                            <tr>
+                                <th>"Miner"</th>
+                                <th>"Weak shares"</th>
+                                <th>"Level"</th>
+                            </tr>
+                        </thead>
+                        <tbody>{rows}</tbody>
+                    </table>
+                </div>
+            }
+            .into_any()
+        } else if share.weak_shares.is_empty() {
             view! {
                 <p class="empty-state">
                     {format!(

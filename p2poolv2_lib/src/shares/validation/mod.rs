@@ -2097,6 +2097,15 @@ impl ShareValidator for DefaultShareValidator {
         if chain_store_handle.has_status(&share.block_hash(), Status::BlockValid) {
             return Ok(());
         }
+        //* A body whose weak shares were pruned is a copy for the zone below
+        //* the payout depth: the weak share checks here need them whole, and
+        //* checking it without them would judge the share on what is missing.
+        if share.pruned_weak_shares.is_some() {
+            return Err(ValidationError::unresolvable(format!(
+                "Share {} has its weak shares pruned; inside the payout depth it is checked with them whole",
+                share.block_hash()
+            )));
+        }
         // The header gate peers run before fetching a share. A share this
         // node mined reaches here without it (stratum, then the validation
         // worker), so without this a local token share would skip the ASERT
@@ -2397,6 +2406,7 @@ mod tests {
     use crate::shares::merge_mining::MergeMiningCommitment;
     use crate::shares::share_block::ShareTransaction;
     use crate::shares::share_commitment::ShareCommitment;
+    use crate::shares::weak::PrunedWeakShares;
     use crate::shares::witness_commitment::WitnessCommitment;
     use crate::store::block_tx_metadata::{BlockMetadata, ChainMembership};
     use crate::store::transaction_store::PrevoutRejection;
@@ -2410,7 +2420,7 @@ mod tests {
         TEST_COINBASE_NSECS, TRADE_BUYER_SECRET_KEY, TRADE_SECRET, TRADE_SELLER_SECRET_KEY,
         TestShareBlockBuilder, build_block_from_work_components, genesis_for_tests,
         load_share_headers_test_data, make_test_address, setup_pool_difficulty_mocks,
-        test_coinbase_transaction,
+        test_coinbase_transaction, test_weak_share_on,
     };
     use crate::utils::time_provider::TestTimeProvider;
     use bitcoin::Address;
@@ -4392,6 +4402,32 @@ mod tests {
             "Expected Ok for BlockValid status, got: {:?}",
             result.err()
         );
+    }
+
+    /// A body whose weak shares were pruned reaches full validation only when
+    /// the candidate tip fell back across the payout depth after it was
+    /// stored. The weak share checks need them whole, so it gets no verdict,
+    /// never a false root mismatch or a miscount of its asking weak shares.
+    #[test]
+    fn test_validate_share_block_leaves_a_pruned_body_without_a_verdict() {
+        let mut chain_store_handle = ChainStoreHandle::default();
+        let mut share_block = TestShareBlockBuilder::new()
+            .share_owner(ShareOwner::CashP2pkh([0x22; 20]))
+            .weak_shares(vec![test_weak_share_on(BlockHash::all_zeros(), 1)])
+            .weak_asking(1)
+            .build();
+        share_block.pruned_weak_shares = Some(PrunedWeakShares::of(&share_block.weak_shares));
+        share_block.weak_shares.clear();
+        chain_store_handle
+            .expect_has_status()
+            .returning(|_, _| false);
+
+        let error = validator()
+            .validate_share_block(&share_block, &chain_store_handle)
+            .unwrap_err();
+
+        assert_eq!(error.kind(), FailureKind::Unresolvable);
+        assert!(error.to_string().contains("pruned"), "{error}");
     }
 
     #[test]
