@@ -35,13 +35,14 @@ use crate::node::messages::{GetData, Message};
 use crate::node::p2p_message_handlers::receivers::request_missing_blocks::request_headers_for_missing_blocks;
 pub use crate::node::weak_share_fetch::WeakFetchEvent;
 use crate::node::weak_share_fetch::{WeakShareFetch, WeakShareFetchSend};
+use crate::node::weak_share_fill::WeakShareFill;
 #[cfg(test)]
 #[mockall_double::double]
 use crate::shares::chain::chain_store_handle::ChainStoreHandle;
 #[cfg(not(test))]
 use crate::shares::chain::chain_store_handle::ChainStoreHandle;
 use crate::shares::validation::{FailureKind, ShareValidator, WeakPayoutCache};
-use crate::shares::weak::WeakShare;
+use crate::shares::weak::{WEAK_CAP, WeakShare};
 use crate::shares::weak_pool::{
     HoldOutcome, WeakPool, WeakRelayReceiver, WeakShareRefusal, WeakShareSource, can_be_carried,
     now_millis,
@@ -55,8 +56,10 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tracing::{debug, info};
 
-/// Weak shares waiting for their checks.
-pub const WEAK_SHARE_EVENT_CHANNEL_CAPACITY: usize = 1024;
+/// Weak shares waiting for their checks: sixteen full shares' worth. A weak
+/// share one of this node's miners found is dropped, and its credit lost,
+/// when the channel is full, so its depth follows the most a share carries.
+pub const WEAK_SHARE_EVENT_CHANNEL_CAPACITY: usize = 16 * WEAK_CAP;
 
 /// Inventories and fetch responses waiting for the weak-share worker.
 ///
@@ -85,12 +88,15 @@ pub type WeakShareEventReceiver = mpsc::Receiver<WeakShareEvent>;
 /// It also carries the pool and the channel of hash announcements. A
 /// `GetData` for a weak share is answered from that pool, and an inventory
 /// of hashes is fetched once, on the same handle the request context already
-/// stores. Cloning shares both channels and the pool.
+/// stores. A share relayed with its weak shares by hash is filled from that
+/// pool, and waits in the fill book for the ones the pool lacks. Cloning
+/// shares both channels, the pool and the fill book.
 #[derive(Clone)]
 pub struct WeakShareEventSender {
     events: mpsc::Sender<WeakShareEvent>,
     fetches: mpsc::Sender<WeakFetchEvent>,
     pool: WeakPool,
+    fill: WeakShareFill,
 }
 
 impl WeakShareEventSender {
@@ -133,6 +139,12 @@ impl WeakShareEventSender {
     ) -> Result<(), mpsc::error::TrySendError<WeakFetchEvent>> {
         self.fetches.try_send(event)
     }
+
+    /// The book of shares relayed by hash that wait for weak shares. The
+    /// clone shares that book.
+    pub(crate) fn fill(&self) -> WeakShareFill {
+        self.fill.clone()
+    }
 }
 
 /// What a Bitcoin Cash P2Pool node needs for weak shares: the pool, the
@@ -159,6 +171,7 @@ impl WeakShareNetwork {
             events: events_tx,
             fetches: fetch_tx,
             pool: pool.clone(),
+            fill: WeakShareFill::default(),
         };
         Self {
             pool,

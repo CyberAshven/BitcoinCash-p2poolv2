@@ -94,7 +94,10 @@ fn start_pplns_share_pruning(
     })
 }
 
-/// Spawn a task that prunes block bodies below the prune target.
+/// Spawn a task that prunes block bodies below the prune target, and then
+/// whole weak shares below the weak share prune target, one payout depth
+/// below the confirmed tip, unless the node keeps them
+/// (`store.keep_whole_weak_shares`).
 ///
 /// Runs every `BACKGROUND_TASK_INTERVAL`, the first time immediately. A run
 /// that overruns the interval delays the next tick rather than bursting. Sends
@@ -109,13 +112,22 @@ fn start_block_body_pruning(
         let mut interval = tokio::time::interval(BACKGROUND_TASK_INTERVAL);
         interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
         let mut next_prune_start: Option<u32> = None;
+        let mut next_weak_prune_start: Option<u32> = None;
         loop {
             interval.tick().await;
             trace!("Pruning block bodies");
-            if let Err(prune_error) = chain_store_handle
+            let pruned = match chain_store_handle
                 .prune_block_bodies_if_due(&mut next_prune_start)
                 .await
             {
+                Ok(()) => {
+                    chain_store_handle
+                        .prune_weak_shares_if_due(&mut next_weak_prune_start)
+                        .await
+                }
+                Err(prune_error) => Err(prune_error),
+            };
+            if let Err(prune_error) = pruned {
                 error!("Block body pruning failed: {prune_error}");
                 if *exit_receiver.borrow() == ShutdownReason::None {
                     let _ = exit_sender.send(ShutdownReason::Error);

@@ -344,10 +344,10 @@ async fn a_heavier_job_commits_to_its_band_and_its_miners_payout_level() {
     assert!(coinbase2.contains(&hex::encode(commitment.hash().as_byte_array())));
 }
 
-/// A job carrying the template's weak shares commits to their count, root
-/// and the template's weak ratio, and the digest its coinbase carries is the
-/// hash of the commitment it stores, on a heavier job too, whose band
-/// replaces the template's in the suffix.
+/// A job carrying the template's weak shares commits to their count, how
+/// many of them ask, their root and the template's weak ratio, and the digest
+/// its coinbase carries is the hash of the commitment it stores, on a heavier
+/// job too, whose band replaces the template's in the suffix.
 #[tokio::test]
 async fn jobs_commit_to_the_weak_shares_the_template_carries() {
     let weak_share = WeakShare {
@@ -378,7 +378,7 @@ async fn jobs_commit_to_the_weak_shares_the_template_carries() {
     .payout_split(base.payout_split)
     .bits(base.bits())
     .include_merge_mining(true)
-    .weak_shares(256_000, vec![weak_share.clone()])
+    .weak_shares(256_000, vec![weak_share.clone()], 1)
     .build()
     .unwrap();
     let tracker = start_tracker_actor();
@@ -409,7 +409,11 @@ async fn jobs_commit_to_the_weak_shares_the_template_carries() {
     let minimum_commitment = minimum.share_commitment.clone().unwrap();
     assert_eq!(minimum_commitment.weak_ratio, 256_000);
     assert_eq!(minimum_commitment.weak_count, 1);
-    assert_eq!(minimum_commitment.weak_root, weak_share.committed_hash());
+    assert_eq!(minimum_commitment.weak_asking, 1);
+    assert_eq!(
+        minimum_commitment.weak_root,
+        weak_root(std::slice::from_ref(&weak_share))
+    );
     assert_eq!(minimum.weak_shares.as_ref(), &[weak_share]);
     assert!(minimum_coinbase2.contains(&hex::encode(minimum_commitment.hash().as_byte_array())));
     let heavier_commitment = tracker
@@ -418,7 +422,82 @@ async fn jobs_commit_to_the_weak_shares_the_template_carries() {
         .share_commitment
         .unwrap();
     assert_eq!(heavier_commitment.weak_count, 1);
+    assert_eq!(heavier_commitment.weak_asking, 1);
     assert!(heavier_coinbase2.contains(&hex::encode(heavier_commitment.hash().as_byte_array())));
+}
+
+/// The number asking counts the weak shares a share carries: the builder
+/// refuses more asking than carried, and a list it would have to cut to fit
+/// one share, of which it could not tell how many still ask.
+#[test]
+fn the_builder_refuses_weak_shares_whose_number_asking_it_cannot_keep() {
+    let weak_share = WeakShare {
+        header: crate::test_utils::TestShareBlockBuilder::new()
+            .share_owner(ShareOwner::CashP2pkh([0x33; 20]))
+            .build()
+            .header,
+        coinbase_script_sig: bitcoin::ScriptBuf::new(),
+        coinbase_value: 1,
+        merkle_branch: Vec::new(),
+    };
+
+    let more_asking_than_carried = checked_weak_shares(vec![weak_share.clone()], 2);
+    let more_than_fit = checked_weak_shares(vec![weak_share.clone(); WEAK_CAP + 1], 0);
+    let more_than_the_asks_allow = checked_weak_shares(vec![weak_share.clone(); 65], 1);
+    let a_full_share = checked_weak_shares(vec![weak_share; WEAK_CAP], WEAK_CAP as u16);
+
+    assert!(more_asking_than_carried.is_err());
+    assert!(more_than_fit.is_err());
+    let error = more_than_the_asks_allow.unwrap_err();
+    assert!(
+        error.message.contains("more than the 64 they allow"),
+        "{}",
+        error.message
+    );
+    assert_eq!(a_full_share.unwrap().len(), WEAK_CAP);
+}
+
+/// A job at the minimum that asks for an easier weak target commits the
+/// minimum with its easier wanted bits, still makes weak shares, and its
+/// coinbase carries the hash of the commitment it stores.
+#[tokio::test]
+async fn a_job_that_asks_commits_its_easier_wanted_bits_at_the_minimum() {
+    let mut prepared = Arc::try_unwrap(test_bch_prepared()).ok().unwrap();
+    let weak_target = Target::from_compact(CompactTarget::from_consensus(0x1d00_ffff));
+    prepared.weak_target = Some(weak_target);
+    let tracker = start_tracker_actor();
+    let payout = PayoutAddress::from(Address::p2pkh(
+        bitcoin::PubkeyHash::from_byte_array([1; 20]),
+        Network::Regtest,
+    ));
+    let asking_band = JobBand {
+        bits: prepared.bits(),
+        wanted_bits: CompactTarget::from_consensus(0x1e00_ffff),
+    };
+
+    let (job_id, coinbase2) = insert_miner_job(
+        &prepared,
+        Some(&payout),
+        Some(ShareOwner::CashP2pkh([9; 20])),
+        Some(asking_band),
+        None,
+        &tracker,
+    );
+
+    let job = tracker.get_job(job_id).unwrap();
+    let commitment = job.share_commitment.clone().unwrap();
+    assert_eq!(commitment.bits, prepared.bits());
+    assert_eq!(commitment.asert_bits, prepared.bits());
+    assert_eq!(
+        commitment.wanted_bits,
+        CompactTarget::from_consensus(0x1e00_ffff)
+    );
+    assert_eq!(job.weak_target, Some(weak_target));
+    assert_eq!(
+        prepared.session_ceiling_bits(Some(asking_band)),
+        prepared.session_ceiling_bits(None)
+    );
+    assert!(coinbase2.contains(&hex::encode(commitment.hash().as_byte_array())));
 }
 
 /// Only a job at the minimum makes weak shares: it keeps the template's
@@ -681,6 +760,7 @@ async fn test_commitment_hash_matches_struct_hash() {
         payout_level: 0,
         weak_ratio: 0,
         weak_count: 0,
+        weak_asking: 0,
         weak_root: crate::shares::weak::empty_weak_root(),
         prev_share_blockhash: BlockHash::all_zeros(),
         uncles: Vec::new(),
@@ -777,6 +857,7 @@ fn notify_hash_matches_share_commitment_hash() {
         payout_level: 0,
         weak_ratio: 0,
         weak_count: 0,
+        weak_asking: 0,
         weak_root: crate::shares::weak::empty_weak_root(),
         prev_share_blockhash: prepared.prev_share_blockhash,
         uncles: prepared.uncles.clone(),

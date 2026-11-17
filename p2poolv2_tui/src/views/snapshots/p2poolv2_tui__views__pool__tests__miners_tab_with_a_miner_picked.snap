@@ -1,9 +1,10 @@
 ---
 source: p2poolv2_tui/src/views/pool.rs
+assertion_line: 732
 expression: text
 ---
 + Info --------------------------------------------------------------------------------------------+
-| Overview | Shares | Miners | Blocks | Peers                                                      |
+| Overview | Shares | Miners | Blocks | Peers | System                                             |
 +--------------------------------------------------------------------------------------------------+
 + Miners on this node: 1 online, 1 workers (page 1 of 1) ------------------------------------------+
 |  Payout address                 Workers  Work      Best      Last share    Payout                |

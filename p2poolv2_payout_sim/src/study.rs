@@ -496,12 +496,13 @@ impl TransitionCase {
             includer_cut: PAGE_INCLUDER_CUT,
             event_seconds: TRANSITION_EVENT_SECONDS,
             after_seconds: TRANSITION_AFTER_SECONDS,
+            asks: None,
         }
     }
 }
 
 /// The sum of `hours[start..end]`.
-fn hours_sum(hours: &[HourSample], start: usize, end: usize) -> HourSample {
+pub(crate) fn hours_sum(hours: &[HourSample], start: usize, end: usize) -> HourSample {
     let mut sum = HourSample::default();
     hours[start..end.min(hours.len())]
         .iter()
@@ -684,6 +685,7 @@ fn genesis_inputs(base: &Scenario, pool_fraction: f64, ratio_max: u64) -> Transi
         includer_cut: PAGE_INCLUDER_CUT,
         event_seconds: 0.0,
         after_seconds: GENESIS_SECONDS,
+        asks: None,
     }
 }
 
@@ -1325,14 +1327,14 @@ const SCALE_HASHRATE_MULTIPLES: [f64; 5] = [1.0, 10.0, 100.0, 270.0, 1_000.0];
 /// The hashrate that finds `NODE_MIN_PAYMENTS_PER_MONTH` weak shares a month
 /// at `weak_difficulty`: below it a miner's credit comes less often than a
 /// node's payment floor, whatever its payout level.
-fn smallest_regular_miner(weak_difficulty: f64) -> f64 {
+pub(crate) fn smallest_regular_miner(weak_difficulty: f64) -> f64 {
     NODE_MIN_PAYMENTS_PER_MONTH * weak_difficulty * HASHES_PER_DIFFICULTY / MONTH_SECONDS
 }
 
 /// One row of the scale table: `multiple` times today's Bitcoin Cash
 /// hashrate and a pool that is `fraction` of it, each class at the level a
 /// node would leave a machine of that hashrate.
-fn scale_scenario(base: &Scenario, multiple: f64, fraction: f64) -> Scenario {
+pub(crate) fn scale_scenario(base: &Scenario, multiple: f64, fraction: f64) -> Scenario {
     let network = BCH_NETWORK_HASHRATE * multiple;
     let pool_blocks = BCH_BLOCKS_PER_MONTH * fraction;
     let home_level = node_level(HOME_MINER_HASHRATE, network, pool_blocks);
@@ -1358,8 +1360,10 @@ fn scale_scenario(base: &Scenario, multiple: f64, fraction: f64) -> Scenario {
 /// Bitcoin Cash and 1 to 1,000 times today's hashrate, 50% industrial, with
 /// every class at the payout level a node would leave its machine, including
 /// the tracked Bitaxe and the tracked ASIC. Each row gives Bitcoin Cash's
-/// difficulty at that hashrate (Bitcoin's is about the x270 rows') and the
-/// smallest miner that still finds three weak shares a month.
+/// difficulty at that hashrate for its `BCH_BLOCK_INTERVAL_SECONDS` blocks
+/// (Bitcoin's, at about the x270 rows' hashrate but with ten-minute blocks,
+/// is ten times the x270 rows' for one-minute blocks) and the smallest miner
+/// that still finds three weak shares a month.
 pub fn scale(base: &Scenario) -> String {
     let scenarios: Vec<Scenario> = SCALE_HASHRATE_MULTIPLES
         .into_iter()
@@ -1555,6 +1559,111 @@ pub fn scale_levers(base: &Scenario) -> String {
             ]
             .iter()
             .map(|column| format!("{name} {column}")),
+        );
+    });
+    table_from(&headers, &rows)
+}
+
+/// Pools of the window cap table, as parts of today's Bitcoin Cash: from
+/// 370 TH/s, which finds a one-minute block about every 7 days, to 37 PH/s,
+/// about 432 blocks a month (a block every 70 days to 43 a month with
+/// ten-minute blocks). Above about 0.015% the window holds three blocks of
+/// work inside 14 days and the cap never binds (0.15% with ten-minute
+/// blocks), so with one-minute blocks only the smallest row reaches it.
+const WINDOW_CAP_POOL_FRACTIONS: [f64; 7] = [0.0001, 0.0002, 0.0005, 0.001, 0.002, 0.005, 0.01];
+
+/// Window caps of the window cap table, in days: today's 14 (120,960
+/// shares at 10 seconds), and 30 and 60.
+const WINDOW_CAP_DAYS: [f64; 3] = [14.0, 30.0, 60.0];
+
+/// Seconds in a day.
+const DAY_SECONDS: f64 = 86_400.0;
+
+/// One row of the window cap table: a pool of medium miners that is
+/// `fraction` of today's Bitcoin Cash, levels as a node sets them, with the
+/// window capped at `cap_days`.
+pub(crate) fn window_cap_scenario(base: &Scenario, fraction: f64, cap_days: f64) -> Scenario {
+    Scenario {
+        mix: MinerMix::Medium,
+        window_cap_seconds: cap_days * DAY_SECONDS,
+        ..scale_scenario(base, 1.0, fraction)
+    }
+}
+
+/// The PPLNS window's cap against small pools. On Bitcoin Cash the window
+/// holds three blocks of the pool's work, at most 14 days of shares; a pool
+/// that finds fewer than three blocks in 14 days reaches the cap, so a share
+/// is paid by fewer blocks and more of them by none. Each row gives the
+/// window the cap leaves, the blocks a share is paid by on average and how
+/// often by none, how long a miner is still paid after it stops, and what
+/// the Bitaxe and a 100 TH/s ASIC get. A longer cap is a share-chain rule:
+/// it lengthens the payout depth, and with it the reorg limit, the expiry of
+/// share chain outputs and the share bodies every node keeps (two payout
+/// depths).
+pub fn window_cap(base: &Scenario) -> String {
+    let scenarios: Vec<Scenario> = WINDOW_CAP_POOL_FRACTIONS
+        .into_iter()
+        .flat_map(|fraction| {
+            WINDOW_CAP_DAYS
+                .into_iter()
+                .map(move |cap_days| window_cap_scenario(base, fraction, cap_days))
+        })
+        .collect();
+    let reports = run_scenarios(&scenarios);
+    let rows: Vec<Vec<String>> = reports
+        .iter()
+        .map(|report| {
+            let scenario = &report.scenario;
+            let window = &report.home_chain().window;
+            let blocks_per_second = scenario.pool_fraction / BCH_BLOCK_INTERVAL_SECONDS;
+            let blocks_per_share = window.span_seconds * blocks_per_second;
+            let mut row = vec![
+                pool_percent(scenario.pool_fraction),
+                rounded(scenario.pool_fraction * BCH_NETWORK_HASHRATE / 1.0e15),
+                rounded(BCH_BLOCKS_PER_MONTH * scenario.pool_fraction),
+                format!("{} days", scenario.window_cap_seconds / DAY_SECONDS),
+                format!("{:.1} days", window.span_seconds / DAY_SECONDS),
+                two_decimals(blocks_per_share),
+                percent((-blocks_per_share).exp()),
+                format!(
+                    "{:.1} days",
+                    (window.span_seconds + window.skip_seconds) / DAY_SECONDS
+                ),
+            ];
+            scenario
+                .tracked
+                .iter()
+                .zip(&report.miners)
+                .for_each(|(tracked, miner)| {
+                    row.extend([
+                        tracked.level.to_string(),
+                        rounded(miner.payments_per_month),
+                        percent(miner.months_without_payment),
+                        optional(miner.swing, two_decimals),
+                        income_ratio(miner),
+                    ]);
+                });
+            row
+        })
+        .collect();
+    let mut headers: Vec<String> = [
+        "Pool",
+        "PH/s",
+        "Blocks a month",
+        "Cap",
+        "Window",
+        "Blocks a share is paid by",
+        "Shares paid by no block",
+        "Paid after stopping, at most",
+    ]
+    .iter()
+    .map(|cell| cell.to_string())
+    .collect();
+    ["Bitaxe", "ASIC"].iter().for_each(|name| {
+        headers.extend(
+            ["level", "pay/mo", "empty months", "swing", "vs fair"]
+                .iter()
+                .map(|column| format!("{name} {column}")),
         );
     });
     table_from(&headers, &rows)

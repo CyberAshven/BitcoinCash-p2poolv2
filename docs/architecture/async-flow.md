@@ -68,7 +68,11 @@ except the per-peer services and the StoreWriter thread:
   queues validation.
 - **BlockFetcher** -- distributes `GetData` requests across peers with timeouts.
 - **ValidationWorker** -- context-free validation, one spawned task per block,
-  concurrency capped by a semaphore sized to the CPU count.
+  concurrency capped by a semaphore sized to the CPU count. Each block is
+  checked once at a time: the loop keeps the blocks it has received and not
+  finished checking, in a queue bounded like its channel, and tasks report
+  their end back on an unbounded channel, one message per task, so the loop
+  alone owns that state and no task waits on it.
 - **OrganiseWorker** -- serial candidate-to-confirmed promotion.
 - **FoundBlockVerifier** -- on Bitcoin Cash, checks candidate block hashes
   against BCHN's chain independently of share confirmation. RPC failures
@@ -97,6 +101,7 @@ Every channel is bounded, and every edge has an explicit policy:
 | EmissionWorker -> ValidationWorker | 8192 | awaited send |
 | Stratum connection -> PplnsShareWorker | 1000 | awaited send (enqueue only) |
 | ValidationWorker -> OrganiseWorker | 512 | awaited send, holding the validation permit |
+| Validation task -> ValidationWorker loop (check finished) | unbounded, one message per task | send never blocks; bounded by the tasks, which the permits bound |
 | OrganiseWorker -> ValidationWorker (stranded re-drive, startup seed) | 8192 | `try_send`; skip (next arrival re-drives) |
 | Share transaction pool -> Actor (relay, Bitcoin Cash) | 256 | `try_send`; drop the relay (the transaction stays in the pool and is mined) |
 | OrganiseWorker (`Share`), actor (`Peer`) -> monitoring broadcast (API `/ws` clients, Electrum tip watcher) | 256 | `broadcast` send, never blocks; a receiver that falls behind gets `Lagged` and skips ahead |
@@ -190,7 +195,7 @@ because they involve compaction-visible mutations and batch commits.
 These are planning estimates, not disk or cache measurements. MB and GB
 use decimal bytes. The rate assumption is one stored share per 10 seconds.
 The BCH payout window is capped at 120,960 shares, about two weeks. Body
-retention is longer: `BCH_PRUNE_DEPTH` is 242,126 shares, about 28 days,
+retention is longer: `BCH_PRUNE_DEPTH` is 242,174 shares, about 28 days,
 before the prune interval and background-task lag. Headers and merkle
 branches remain after body pruning.
 
@@ -208,7 +213,7 @@ There is no BCH witness data or witness commitment. Token shares cap the
 coinbase at 3,072 bytes and move excess payees to a payout tree. No-token
 coinbases may reach 1,000,000 bytes. See `accounting/payout/coinbase_budget.rs`.
 
-| Coinbase scenario | Bytes per coinbase | 242,126 retained coinbases |
+| Coinbase scenario | Bytes per coinbase | 242,174 retained coinbases |
 |---|---|---|
 | 10 direct P2PKH payees | at most 707 | 0.17 GB |
 | 100 direct P2PKH payees | at most 3,767 | 0.91 GB |

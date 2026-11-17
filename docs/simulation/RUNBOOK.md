@@ -433,8 +433,8 @@ tests pin it.
 ## 9a. Test H — a fresh node joins pruned peers
 
 Checks that a node syncing from genesis gets everything it needs from peers
-that have pruned block bodies. The Bitcoin Cash sim build prunes below 386 shares under
-the tip (prune depth 366 plus interval 20), every 30s, so the run is
+that have pruned block bodies. The Bitcoin Cash sim build prunes below 434 shares under
+the tip (prune depth 414 plus interval 20), every 30s, so the run is
 time-compressed to get there in minutes:
 
 ```sh

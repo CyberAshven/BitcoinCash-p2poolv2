@@ -8,13 +8,17 @@ use crate::accounting::payout::sharechain_pplns::pplns_window::MockPplnsWindow;
 use crate::pool_difficulty::{AsertParent, MockPoolDifficulty};
 use crate::shares::chain::chain_store_handle::MockChainStoreHandle;
 use crate::shares::validation::FailureKind;
-use crate::shares::weak::{GENESIS_WEAK_RATIO, WEAK_DEPTH, WeakSummary, next_weak_ratio};
+use crate::shares::weak::{
+    GENESIS_WEAK_RATIO, WEAK_DEPTH, WEAK_RATIO_MAX, WEAK_RATIO_UNIT, WeakSummary, next_weak_ratio,
+};
 use crate::store::block_tx_metadata::{BlockMetadata, ChainMembership, Status};
 use crate::test_utils::{
     TestShareBlockBuilder, TestWeakShare, build_test_weak_share, build_test_weak_share_paying,
+    build_test_weak_share_wanting,
 };
 use crate::utils::time_provider::TestTimeProvider;
-use bitcoin::hashes::Hash;
+use bitcoin::consensus::{deserialize, serialize};
+use bitcoin::hashes::{Hash, sha256d};
 use bitcoin::{Address, CompactTarget, Network, PubkeyHash, Work};
 use p2poolv2_wallet::payout_address::PayoutAddress;
 use p2poolv2_wallet::share_owner::ShareOwner;
@@ -121,6 +125,75 @@ fn a_body_carrying_one_proof_of_work_under_two_encodings_is_a_repeat() {
     assert!(error.message.contains("more than once"), "{error}");
 }
 
+/// A share whose two weak shares pay two payees, with them pruned: their
+/// leaf root and summary in place of the whole weak shares.
+fn pruned_share() -> ShareBlock {
+    let mut first = body_weak_share(1);
+    first.header.miner_bitcoin_address =
+        Address::p2pkh(PubkeyHash::from_byte_array([0x31; 20]), Network::Regtest).into();
+    let mut share = TestShareBlockBuilder::new()
+        .share_owner(ShareOwner::CashP2pkh([0x22; 20]))
+        .weak_shares(vec![first, body_weak_share(2)])
+        .build();
+    share.pruned_weak_shares = Some(PrunedWeakShares::of(&share.weak_shares));
+    share.weak_shares.clear();
+    share
+}
+
+/// A body served with its weak shares pruned matches its header by their
+/// leaf root and summary: the header's weak root commits both.
+#[test]
+fn a_body_with_its_weak_shares_pruned_matches_its_header_by_the_summary() {
+    assert!(check_weak_shares_match_header(&pruned_share()).is_ok());
+}
+
+/// A summary changed by a peer under the same leaf root, here one weak
+/// share's credit moved to the other payee, fails the root: a bad copy.
+#[test]
+fn a_pruned_body_with_a_tampered_summary_is_a_bad_copy() {
+    let mut share = pruned_share();
+    let summary = &mut share.pruned_weak_shares.as_mut().unwrap().summary;
+    summary.groups[0].count += 1;
+    summary.groups[1].count -= 1;
+
+    let error = check_weak_shares_match_header(&share).unwrap_err();
+    assert_eq!(error.kind, FailureKind::Consensus);
+    assert!(error.message.contains("root"), "{error}");
+}
+
+/// A summary whose groups count fewer weak shares than its proof-of-work
+/// hashes is refused before the root is computed.
+#[test]
+fn a_pruned_body_whose_groups_miscount_is_a_bad_copy() {
+    let mut share = pruned_share();
+    share.pruned_weak_shares.as_mut().unwrap().summary.groups[0].count += 1;
+
+    let error = check_weak_shares_match_header(&share).unwrap_err();
+    assert!(error.message.contains("group 3"), "{error}");
+}
+
+/// A changed leaf root, which binds the weak shares' other fields, fails the
+/// root too.
+#[test]
+fn a_pruned_body_with_another_leaf_root_is_a_bad_copy() {
+    let mut share = pruned_share();
+    share.pruned_weak_shares.as_mut().unwrap().leaf_root = sha256d::Hash::all_zeros();
+
+    let error = check_weak_shares_match_header(&share).unwrap_err();
+    assert!(error.message.contains("root"), "{error}");
+}
+
+/// The pruned form round-trips through the share block encoding, where a
+/// zero weak share count is followed by its form byte.
+#[test]
+fn a_pruned_body_round_trips_through_the_share_block_encoding() {
+    let share = pruned_share();
+    let decoded: ShareBlock = deserialize(&serialize(&share)).unwrap();
+
+    assert_eq!(decoded, share);
+    assert!(check_weak_shares_match_header(&decoded).is_ok());
+}
+
 /// Weak shares under the cap in count but past `WEAK_BYTES` in size are
 /// refused. A branch longer than a decoded one may be makes each large.
 #[test]
@@ -140,7 +213,171 @@ fn more_weak_shares_than_the_cap_are_refused() {
     let weak_shares = vec![body_weak_share(1); WEAK_CAP + 1];
 
     let error = check_weak_shares_size(&weak_shares).unwrap_err();
-    assert!(error.message.contains("more than 64"), "{error}");
+    assert!(error.message.contains("more than 640"), "{error}");
+}
+
+#[test]
+fn as_many_weak_shares_as_the_cap_in_its_bytes_are_within_the_size() {
+    let weak_shares = vec![body_weak_share(1); WEAK_CAP];
+
+    assert!(check_weak_shares_size(&weak_shares).is_ok());
+}
+
+/// A weak share that asks, one that does not, both passing the header rules
+/// on one parent, the store that answers for that parent as the carrier's
+/// parent too, and the difficulty their validator needs.
+///
+/// The parent's weak ratio is one, so its weak target is its minimum, a step
+/// below the validator's ceiling `EASY`: nearly every hash meets it, and
+/// `EASY` is easier than it. The asking weak share wants `EASY`.
+fn asking_fixture() -> (
+    WeakShare,
+    WeakShare,
+    MockChainStoreHandle,
+    MockPoolDifficulty,
+) {
+    let parent = TestShareBlockBuilder::new()
+        .share_owner(ShareOwner::CashP2pkh([0x11; 20]))
+        .bits(CompactTarget::from_consensus(0x2100_fffe))
+        .weak_ratio(WEAK_RATIO_UNIT)
+        .build()
+        .header;
+    let parent_hash = parent.block_hash();
+    let distribution = HashMap::from([(
+        PayoutAddress::from(Address::p2pkh(
+            PubkeyHash::from_byte_array([0x55; 20]),
+            Network::Regtest,
+        )),
+        1u128,
+    )]);
+    let asking = build_test_weak_share_wanting(
+        TestWeakShare {
+            parent_hash,
+            bits: CompactTarget::from_consensus(HARD),
+            minimum: CompactTarget::from_consensus(HARD),
+            weak_ratio: next_weak_ratio(WEAK_RATIO_UNIT, 0, 0),
+            distribution: &distribution,
+            time: WEAK_TIME,
+            nonce: 1,
+        },
+        CompactTarget::from_consensus(EASY),
+    );
+    let silent = build_test_weak_share(TestWeakShare {
+        parent_hash,
+        bits: CompactTarget::from_consensus(HARD),
+        minimum: CompactTarget::from_consensus(HARD),
+        weak_ratio: next_weak_ratio(WEAK_RATIO_UNIT, 0, 0),
+        distribution: &distribution,
+        time: WEAK_TIME,
+        nonce: 2,
+    });
+    let mut pool_difficulty = MockPoolDifficulty::default();
+    pool_difficulty
+        .expect_calculate_target_clamped()
+        .returning(|_| CompactTarget::from_consensus(HARD));
+    let mut store = MockChainStoreHandle::default();
+    let asert_parent = AsertParent::from_header(&parent, 0, 0);
+    store
+        .expect_get_asert_parent()
+        .returning(move |_| Ok(asert_parent));
+    store
+        .expect_get_share_header()
+        .returning(move |_| Ok(parent.clone()));
+    store.expect_get_block_metadata().returning(|_| {
+        Ok(BlockMetadata {
+            expected_height: Some(0),
+            chain_work: Work::from_le_bytes([0u8; 32]),
+            status: Status::BlockValid,
+            chain: ChainMembership::Confirmed,
+        })
+    });
+    store.expect_get_block_metadata_batch().returning(move |_| {
+        Ok(vec![(
+            parent_hash,
+            BlockMetadata {
+                expected_height: Some(0),
+                chain_work: Work::from_le_bytes([0u8; 32]),
+                status: Status::BlockValid,
+                chain: ChainMembership::Confirmed,
+            },
+        )])
+    });
+    (asking, silent, store, pool_difficulty)
+}
+
+/// A share committing as many asking weak shares as its body carries is
+/// valid: one of its two wants a target easier than the weak target it met.
+#[test]
+fn a_share_counting_the_weak_shares_that_ask_passes() {
+    let (asking, silent, store, pool_difficulty) = asking_fixture();
+    let carrier = TestShareBlockBuilder::new()
+        .share_owner(ShareOwner::CashP2pkh([0x22; 20]))
+        .prev_share_blockhash(asking.header.prev_share_blockhash.to_string())
+        .weak_shares(vec![asking, silent])
+        .weak_asking(1)
+        .build();
+    let validator = DefaultShareValidator::new(pool_difficulty)
+        .for_chain(Chain::BitcoinCash)
+        .with_target_ceiling(CompactTarget::from_consensus(EASY));
+
+    let result = validator.validate_carried_weak_headers(&carrier, &store);
+
+    assert!(result.is_ok(), "{}", result.unwrap_err());
+}
+
+/// A share cannot claim asks its weak shares do not make: that would lift
+/// the weak ratio for a pool whose miners did not ask.
+#[test]
+fn a_share_counting_more_asking_weak_shares_than_ask_is_refused() {
+    let (asking, silent, store, pool_difficulty) = asking_fixture();
+    let carrier = TestShareBlockBuilder::new()
+        .share_owner(ShareOwner::CashP2pkh([0x22; 20]))
+        .prev_share_blockhash(asking.header.prev_share_blockhash.to_string())
+        .weak_shares(vec![asking, silent])
+        .weak_asking(2)
+        .build();
+    let validator = DefaultShareValidator::new(pool_difficulty)
+        .for_chain(Chain::BitcoinCash)
+        .with_target_ceiling(CompactTarget::from_consensus(EASY));
+
+    let error = validator
+        .validate_carried_weak_headers(&carrier, &store)
+        .unwrap_err();
+
+    assert_eq!(error.kind, FailureKind::Consensus);
+    assert!(
+        error
+            .message
+            .contains("commits 2 asking weak shares, its body carries 1"),
+        "{error}"
+    );
+}
+
+/// Nor can a share hide the asks of the weak shares it carries: that would
+/// hold the weak ratio down while small miners ask.
+#[test]
+fn a_share_counting_fewer_asking_weak_shares_than_ask_is_refused() {
+    let (asking, silent, store, pool_difficulty) = asking_fixture();
+    let carrier = TestShareBlockBuilder::new()
+        .share_owner(ShareOwner::CashP2pkh([0x22; 20]))
+        .prev_share_blockhash(asking.header.prev_share_blockhash.to_string())
+        .weak_shares(vec![asking, silent])
+        .build();
+    let validator = DefaultShareValidator::new(pool_difficulty)
+        .for_chain(Chain::BitcoinCash)
+        .with_target_ceiling(CompactTarget::from_consensus(EASY));
+
+    let error = validator
+        .validate_carried_weak_headers(&carrier, &store)
+        .unwrap_err();
+
+    assert_eq!(error.kind, FailureKind::Consensus);
+    assert!(
+        error
+            .message
+            .contains("commits 0 asking weak shares, its body carries 1"),
+        "{error}"
+    );
 }
 
 /// A weak share that passes the header rules, the store that answers for its
@@ -155,7 +392,7 @@ fn header_rule_fixture() -> (WeakShare, MockChainStoreHandle, MockPoolDifficulty
         parent_hash: parent.block_hash(),
         bits: CompactTarget::from_consensus(HARD),
         minimum: CompactTarget::from_consensus(HARD),
-        weak_ratio: next_weak_ratio(GENESIS_WEAK_RATIO, 0),
+        weak_ratio: next_weak_ratio(WEAK_RATIO_MAX, 0, 0),
         distribution: &HashMap::from([(
             PayoutAddress::from(Address::p2pkh(
                 PubkeyHash::from_byte_array([0x55; 20]),
@@ -299,7 +536,7 @@ fn a_weak_share_meeting_its_own_bits_is_refused() {
         parent_hash: parent.block_hash(),
         bits: CompactTarget::from_consensus(EASY),
         minimum: CompactTarget::from_consensus(EASY),
-        weak_ratio: next_weak_ratio(GENESIS_WEAK_RATIO, 0),
+        weak_ratio: next_weak_ratio(WEAK_RATIO_MAX, 0, 0),
         distribution: &HashMap::from([(
             PayoutAddress::from(Address::p2pkh(
                 PubkeyHash::from_byte_array([0x55; 20]),
@@ -340,8 +577,6 @@ fn a_weak_share_meeting_its_own_bits_is_refused() {
 #[cfg(not(feature = "sim"))]
 #[test]
 fn a_weak_share_missing_its_parents_weak_target_is_refused() {
-    use crate::shares::weak::WEAK_RATIO_UNIT;
-
     let parent = TestShareBlockBuilder::new()
         .share_owner(ShareOwner::CashP2pkh([0x11; 20]))
         .bits(CompactTarget::from_consensus(HARD))
@@ -352,7 +587,7 @@ fn a_weak_share_missing_its_parents_weak_target_is_refused() {
         parent_hash: parent.block_hash(),
         bits: CompactTarget::from_consensus(HARD),
         minimum: CompactTarget::from_consensus(HARD),
-        weak_ratio: next_weak_ratio(WEAK_RATIO_UNIT, 0),
+        weak_ratio: next_weak_ratio(WEAK_RATIO_UNIT, 0, 0),
         distribution: &HashMap::from([(
             PayoutAddress::from(Address::p2pkh(
                 PubkeyHash::from_byte_array([0x55; 20]),
@@ -403,7 +638,7 @@ fn a_weak_share_from_a_job_above_the_minimum_is_refused() {
         parent_hash: parent.block_hash(),
         bits: CompactTarget::from_consensus(0x1c00_ffff),
         minimum: CompactTarget::from_consensus(HARD),
-        weak_ratio: next_weak_ratio(GENESIS_WEAK_RATIO, 0),
+        weak_ratio: next_weak_ratio(WEAK_RATIO_MAX, 0, 0),
         distribution: &HashMap::from([(
             PayoutAddress::from(Address::p2pkh(
                 PubkeyHash::from_byte_array([0x55; 20]),

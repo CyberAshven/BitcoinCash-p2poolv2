@@ -19,11 +19,19 @@
 //! raced. Home miners' pay is their expected share of the window of each
 //! moment's blocks, with blocks at the pool's hashrate, so the only noise is
 //! the chain's own.
+//!
+//! With `asks` the weak ratio follows section 6's weak shares that ask
+//! (`crate::asks`), or one of the variants of that rule: a class at the
+//! minimum asks while the ratio in force is below the ratio at which one of
+//! its miners finds the node default's weak shares a month at the minimum
+//! of the moment, and a share carries what `carry_plan` in `crate::asks`
+//! lets it.
 
+use crate::asks::{WeakAsks, carry_plan, next_weak_ratio_with_asks};
 use crate::constants::{
     ASERT_HALF_LIFE_SECONDS, BCH_BLOCK_INTERVAL_SECONDS, BCH_PPLNS_WINDOW_BLOCKS,
     BLOCK_REWARD_SATOSHIS, DONATION_FRACTION, FIXED_POINT_ONE, HASHES_PER_DIFFICULTY,
-    MATURITY_SKIP_SHARES, WINDOW_CAP_SECONDS,
+    MATURITY_SKIP_SHARES, MONTH_SECONDS, WEAK_CAP, WEAK_FILL_MAX, WINDOW_CAP_SECONDS,
 };
 use crate::difficulty::{found_share_rate, node_default_shares_per_month, wanted_ratio};
 use crate::miners::{MinerClass, MinerKind};
@@ -103,9 +111,15 @@ pub struct TransitionInputs {
     pub event_seconds: f64,
     /// Seconds simulated after the event.
     pub after_seconds: f64,
+    /// Weak shares that ask, under section 6's rule or a variant of it, or
+    /// `None` for the rules as they are. With asks the run takes the fill,
+    /// the cap, the ratio limits and the genesis ratio from the rule instead
+    /// of `weak_cap`, `weak_fill` and `ratio_max`.
+    pub asks: Option<WeakAsks>,
 }
 
-/// One hour's measures.
+/// One hour's measures. [`HourSample::add`] sums every field but
+/// `largest_carried`, of which it keeps the larger.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct HourSample {
     /// Seconds of the hour simulated.
@@ -124,10 +138,23 @@ pub struct HourSample {
     pub weak_found: f64,
     /// Weak shares that expired uncarried.
     pub weak_expired: f64,
+    /// Chain shares added.
+    pub shares: f64,
+    /// Weak shares those shares carried.
+    pub weak_carried: f64,
+    /// Of those, the ones that ask.
+    pub weak_asking: f64,
+    /// Shares that carried more than today's `WEAK_CAP`, 64.
+    pub shares_above_cap: f64,
+    /// Shares that carried more than `WEAK_FILL_MAX`, 320.
+    pub shares_above_fill_max: f64,
+    /// The most weak shares one share carried.
+    pub largest_carried: f64,
 }
 
 impl HourSample {
-    /// Add another sample's sums to this one's.
+    /// Add another sample's sums to this one's, and keep the larger of the
+    /// two largest shares.
     pub fn add(&mut self, other: &HourSample) {
         self.seconds += other.seconds;
         self.minimum_seconds += other.minimum_seconds;
@@ -137,6 +164,30 @@ impl HourSample {
         self.home_fair_income += other.home_fair_income;
         self.weak_found += other.weak_found;
         self.weak_expired += other.weak_expired;
+        self.shares += other.shares;
+        self.weak_carried += other.weak_carried;
+        self.weak_asking += other.weak_asking;
+        self.shares_above_cap += other.shares_above_cap;
+        self.shares_above_fill_max += other.shares_above_fill_max;
+        self.largest_carried = self.largest_carried.max(other.largest_carried);
+    }
+
+    /// Weak shares carried a chain share, zero without shares.
+    pub fn carried_per_share(&self) -> f64 {
+        if self.shares > 0.0 {
+            self.weak_carried / self.shares
+        } else {
+            0.0
+        }
+    }
+
+    /// Part of the weak shares found that expired, zero without any found.
+    pub fn expired_fraction(&self) -> f64 {
+        if self.weak_found > 0.0 {
+            self.weak_expired / self.weak_found
+        } else {
+            0.0
+        }
     }
 
     /// Time-weighted mean minimum difficulty.
@@ -199,21 +250,38 @@ impl WeakSlots {
     fn carry(&mut self, cap: u64) -> WeakBatch {
         let mut carried = WeakBatch::default();
         (0..self.count.len()).rev().for_each(|depth| {
-            let waiting = self.count[depth];
-            let taken = (cap - carried.count).min(waiting);
-            if taken > 0 {
-                let part = taken as f64 / waiting as f64;
-                let work = self.work[depth] * part;
-                let home_work = self.home_work[depth] * part;
-                self.count[depth] -= taken;
-                self.work[depth] -= work;
-                self.home_work[depth] -= home_work;
-                carried.count += taken;
-                carried.work += work;
-                carried.home_work += home_work;
-            }
+            let taken = (cap - carried.count).min(self.count[depth]);
+            carried.add(&self.take(depth, taken));
         });
         carried
+    }
+
+    /// Take `taken` of the weak shares at `depth`, with their part of its
+    /// work.
+    fn take(&mut self, depth: usize, taken: u64) -> WeakBatch {
+        let waiting = self.count[depth];
+        if taken == 0 {
+            return WeakBatch::default();
+        }
+        let part = taken as f64 / waiting as f64;
+        let work = self.work[depth] * part;
+        let home_work = self.home_work[depth] * part;
+        self.count[depth] -= taken;
+        self.work[depth] -= work;
+        self.home_work[depth] -= home_work;
+        WeakBatch {
+            count: taken,
+            work,
+            home_work,
+        }
+    }
+}
+
+impl WeakBatch {
+    fn add(&mut self, other: &WeakBatch) {
+        self.count += other.count;
+        self.work += other.work;
+        self.home_work += other.home_work;
     }
 }
 
@@ -266,6 +334,7 @@ struct Tip {
     wanted: f64,
     weak_ratio: u64,
     carried: u64,
+    asking: u64,
 }
 
 /// What every present class mines at for the next share.
@@ -288,7 +357,11 @@ struct Transition<'a> {
     big_present: bool,
     tip: Tip,
     tip_time: f64,
+    /// Weak shares that ask, waiting; empty without asks.
+    asking: WeakSlots,
+    /// Weak shares that do not ask, waiting.
     slots: WeakSlots,
+    found_asking: WeakBatch,
     found_on_tip: WeakBatch,
     ledger: CreditLedger,
     hours: Vec<HourSample>,
@@ -319,10 +392,16 @@ impl<'a> Transition<'a> {
                 interval: inputs.period_seconds,
                 band_cap: FIXED_POINT_ONE,
                 wanted: 1.0,
-                weak_ratio: inputs.ratio_max * FIXED_POINT_ONE,
+                weak_ratio: inputs
+                    .asks
+                    .map_or(inputs.ratio_max, |asks| asks.rule.genesis_ratio)
+                    * FIXED_POINT_ONE,
                 carried: 0,
+                asking: 0,
             },
+            asking: WeakSlots::new(inputs.weak_depth),
             slots: WeakSlots::new(inputs.weak_depth),
+            found_asking: WeakBatch::default(),
             found_on_tip: WeakBatch::default(),
             ledger: CreditLedger::with_capacity(expected_shares + expected_shares / 4),
             hours: vec![HourSample::default(); hour_count],
@@ -453,25 +532,108 @@ impl<'a> Transition<'a> {
         }
     }
 
-    /// Weak shares found on the tip in `seconds`, the home miners' apart.
+    /// Weak shares found on the tip in `seconds`, the home miners' apart:
+    /// those that ask, then those that do not.
     fn find_weak(
         &self,
         seconds: f64,
         jobs: &Jobs,
         ratio: f64,
         random: &mut SimulationRandom,
-    ) -> WeakBatch {
+    ) -> (WeakBatch, WeakBatch) {
         let weak_work = jobs.minimum * HASHES_PER_DIFFICULTY / ratio;
         let per_share = ratio - 1.0;
-        let home = poisson(random, per_share * jobs.home_minimum_rate * seconds);
-        let others = poisson(
-            random,
-            per_share * (jobs.minimum_rate - jobs.home_minimum_rate) * seconds,
-        );
-        WeakBatch {
-            count: home + others,
-            work: (home + others) as f64 * weak_work,
-            home_work: home as f64 * weak_work,
+        let Some(asks) = &self.inputs.asks else {
+            let home = poisson(random, per_share * jobs.home_minimum_rate * seconds);
+            let others = poisson(
+                random,
+                per_share * (jobs.minimum_rate - jobs.home_minimum_rate) * seconds,
+            );
+            let silent = WeakBatch {
+                count: home + others,
+                work: (home + others) as f64 * weak_work,
+                home_work: home as f64 * weak_work,
+            };
+            return (WeakBatch::default(), silent);
+        };
+        //* Each class at the minimum in three parts: one that follows the
+        //* node default, one that always asks and one that never does. No
+        //* weak share asks at or above the ratio of the chain's ceiling.
+        let ceiling_ratio = jobs.minimum / self.inputs.ceiling_difficulty;
+        let follows_default = (1.0 - asks.always_asking - asks.never_asking).max(0.0);
+        let mut asking = WeakBatch::default();
+        let mut silent = WeakBatch::default();
+        self.inputs
+            .classes
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| jobs.multiples[*index] <= 1.0 && jobs.found_rates[*index] > 0.0)
+            .for_each(|(index, class)| {
+                let asks_below_ratio =
+                    asks.weak_shares_per_month * jobs.minimum * HASHES_PER_DIFFICULTY
+                        / (class.hashrate * MONTH_SECONDS);
+                [
+                    (follows_default, asks_below_ratio),
+                    (asks.always_asking, f64::INFINITY),
+                    (asks.never_asking, 0.0),
+                ]
+                .into_iter()
+                .filter(|(part, _)| *part > 0.0)
+                .for_each(|(part, below)| {
+                    let count =
+                        poisson(random, per_share * jobs.found_rates[index] * part * seconds);
+                    let work = count as f64 * weak_work;
+                    let found = WeakBatch {
+                        count,
+                        work,
+                        home_work: if class.kind == MinerKind::Home {
+                            work
+                        } else {
+                            0.0
+                        },
+                    };
+                    if ratio < below.min(ceiling_ratio) {
+                        asking.add(&found);
+                    } else {
+                        silent.add(&found);
+                    }
+                });
+            });
+        (asking, silent)
+    }
+
+    /// What the next share carries: up to `WEAK_CAP` of the weak shares
+    /// waiting without asks, what [`carry_plan`] lets it with them.
+    fn carry(&mut self, random: &mut SimulationRandom) -> (WeakBatch, WeakBatch) {
+        let Some(asks) = &self.inputs.asks else {
+            return (WeakBatch::default(), self.slots.carry(self.inputs.weak_cap));
+        };
+        let censoring = asks.censoring_shares > 0.0 && random.next_bool(asks.censoring_shares);
+        let plan = carry_plan(&self.asking.count, &self.slots.count, &asks.rule, censoring);
+        let mut asking = WeakBatch::default();
+        let mut silent = WeakBatch::default();
+        plan.iter().enumerate().for_each(|(depth, taken)| {
+            asking.add(&self.asking.take(depth, taken.carrying));
+            silent.add(&self.slots.take(depth, taken.non_carrying));
+        });
+        (asking, silent)
+    }
+
+    /// Count a share that carried `carried` weak shares, `asking` of them
+    /// asking.
+    fn count_share(&mut self, carried: u64, asking: u64) {
+        if let Some(index) = self.hour_index(self.time) {
+            let sample = &mut self.hours[index];
+            sample.shares += 1.0;
+            sample.weak_carried += carried as f64;
+            sample.weak_asking += asking as f64;
+            if carried > WEAK_CAP {
+                sample.shares_above_cap += 1.0;
+            }
+            if carried > WEAK_FILL_MAX {
+                sample.shares_above_fill_max += 1.0;
+            }
+            sample.largest_carried = sample.largest_carried.max(carried as f64);
         }
     }
 
@@ -490,12 +652,15 @@ impl<'a> Transition<'a> {
                 running > point
             })
             .unwrap_or(jobs.found_rates.len() - 1);
-        let expired = self.slots.deepen(self.found_on_tip);
+        let expired = self.slots.deepen(self.found_on_tip) + self.asking.deepen(self.found_asking);
         self.found_on_tip = WeakBatch::default();
+        self.found_asking = WeakBatch::default();
         if let Some(index) = self.hour_index(self.time) {
             self.hours[index].weak_expired += expired as f64;
         }
-        let carried = self.slots.carry(inputs.weak_cap);
+        let (carried_asking, mut carried) = self.carry(random);
+        carried.add(&carried_asking);
+        self.count_share(carried.count, carried_asking.count);
         let multiple = jobs.multiples[finder];
         let own = if multiple <= 1.0 {
             jobs.minimum * HASHES_PER_DIFFICULTY / ratio
@@ -510,18 +675,28 @@ impl<'a> Transition<'a> {
                 0.0
             };
         self.ledger.push(own + carried.work, home);
-        self.tip = Tip {
-            minimum: jobs.minimum,
-            interval,
-            band_cap: jobs.band_cap,
-            wanted: jobs.wanted[finder],
-            weak_ratio: next_weak_ratio(
+        let weak_ratio = match &inputs.asks {
+            Some(asks) => next_weak_ratio_with_asks(
+                self.tip.weak_ratio,
+                self.tip.carried,
+                self.tip.asking,
+                &asks.rule,
+            ),
+            None => next_weak_ratio(
                 self.tip.weak_ratio,
                 self.tip.carried,
                 inputs.weak_fill,
                 inputs.ratio_max,
             ),
+        };
+        self.tip = Tip {
+            minimum: jobs.minimum,
+            interval,
+            band_cap: jobs.band_cap,
+            wanted: jobs.wanted[finder],
+            weak_ratio,
             carried: carried.count,
+            asking: carried_asking.count,
         };
     }
 
@@ -539,11 +714,10 @@ impl<'a> Transition<'a> {
         } else {
             (interval, true)
         };
-        let found = self.find_weak(seconds, &jobs, ratio, random);
-        self.record(seconds, &jobs, ratio, found.count);
-        self.found_on_tip.count += found.count;
-        self.found_on_tip.work += found.work;
-        self.found_on_tip.home_work += found.home_work;
+        let (found_asking, found) = self.find_weak(seconds, &jobs, ratio, random);
+        self.record(seconds, &jobs, ratio, found.count + found_asking.count);
+        self.found_on_tip.add(&found);
+        self.found_asking.add(&found_asking);
         if reaches_share {
             let share_time = self.time + seconds;
             self.add_share(&jobs, ratio, share_time - self.tip_time, random);
@@ -580,6 +754,18 @@ pub fn reach_hour(values: &[f64], settled: f64, tolerance: f64) -> Option<usize>
     values
         .iter()
         .position(|value| (value - settled).abs() <= tolerance * settled.abs())
+}
+
+/// The first hour of `values` from which every later one is within
+/// `tolerance` (a fraction) of `settled`: zero when all are, `None` when
+/// the last one is not.
+pub fn stay_hour(values: &[f64], settled: f64, tolerance: f64) -> Option<usize> {
+    let outside = |value: &f64| (value - settled).abs() > tolerance * settled.abs();
+    match values.iter().rposition(outside) {
+        None => Some(0),
+        Some(last) if last + 1 < values.len() => Some(last + 1),
+        Some(_) => None,
+    }
 }
 
 #[cfg(test)]

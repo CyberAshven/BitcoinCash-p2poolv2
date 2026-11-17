@@ -7,12 +7,290 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+A node keeps at least 16 outgoing peers (`[network] target_outgoing_peers`),
+at most one per IPv4 /16 or IPv6 /32, with a 60-second backoff that doubles;
+the sample configs raise `max_established_incoming` from 50 to 128 (#122).
+
+Share-chain rule change on Bitcoin Cash, a flag day: P2Pool follows Bitcoin
+Cash's one-minute blocks (CHIP-2025-03) the way BCHN does (protocol
+segments `bch-prev-1off-ticks` and `mm2-roots-asert8-ticks`, store format
+12). Nodes start from fresh stores: delete the share-chain store directory
+and restart. Chipnet activated one-minute blocks on 2026-11-15; block
+332,450 is its last ten-minute block. Mainnet, testnet, scalenet and regtest
+switch at median time past 1810382400 (2027-05-15 12:00 UTC), as in BCHN.
+
+- A block's ticks are the sum of the target intervals up to it. Each known
+  Bitcoin Cash header now carries its ticks and the interval of a block
+  built on it, as BCHN's block index does: its ticks are its parent's plus
+  its parent's next interval, and its next interval is 60 once its own
+  median time past (it and its ten ancestors) has reached the network's
+  activation time, else 600. Every node that knows a branch gives its blocks
+  the same values, and a reorg onto a branch that switched at another block
+  follows that branch. Before, each node learned the switch while running,
+  from its own Bitcoin Cash node: nodes learned it at different moments or
+  not at all, forgot it on restart, and kept it across a reorg onto a branch
+  that switched elsewhere, so they could require different nBits of one
+  header and split the share chain.
+- The rules that read those values: the exact nBits a peer's header must
+  carry (ASERT counts ticks from its anchor and makes a one-minute block's
+  target ten times easier; a test network block may take the proof-of-work
+  limit after twice its parent's next interval, 2 minutes instead of 20),
+  the nBits that size a payout window, and a token share's ASERT band, which
+  block validation now computes from the share's BCH prev, while the header
+  gate, which has no store, uses the network's pinned switches by height.
+- The switches are a list of timed switches per network, each an interval
+  the CHIP allows. Chipnet's activation block is also pinned at 332,450,
+  only for headers with fewer than ten known ancestors (the oldest of a new
+  store) and where no header is known; the tests check that the timed rule
+  switches at that block.
+- Headers from this node's Bitcoin Cash node get their values the same way.
+  The node's `ticks`, `target_time` and `next_target_time` only anchor a new
+  store's first walk; elsewhere a disagreement is logged as an error and
+  never followed. A new store learns its tip's height first and stores
+  headers in chunks of 2,000 as the walk goes back, so the tip region is
+  known within seconds, and the template relay no longer waits for the whole
+  walk. It learns 58 days of headers counted in ticks, 84,000 one-minute
+  blocks.
+- A first walk's starting ticks must give the chain's own nBits: before its
+  first chunk is stored, every walked header's nBits is checked against the
+  ASERT target its counted parent requires. The node's report is tried
+  first, then the pins; where neither fits, nothing is stored and the walk
+  is retried. A node backed by a Bitcoin Cash node that reports no ticks,
+  on mainnet after its switch and before a release pins it, would otherwise
+  have counted ten-minute ticks and required different nBits of peers'
+  headers. A walk that stored chunks and then reaches a known header keeps
+  the values worked up from that header, storing the counted ones again if
+  they differ.
+- A walk that stops part way (a Bitcoin Cash node error, a restart, or the
+  five-minute limit on the round before share sync) is finished in later
+  rounds: the feeder finds the lowest header below the best block and walks
+  on below it. Before, a stopped first walk left the store short for good,
+  so shares on older BCH blocks could never be settled.
+- Node-local: the payout tree spends a coinbase once the block on the tip is
+  60,000 ticks past the coinbase's block, from both known headers (1,000
+  one-minute blocks); the found-block verifier counts BCHN's finalization
+  depth as 6,000 ticks (100 one-minute blocks); a Template Provider's block
+  size floor follows the interval the node reports for the new block; a
+  share message carries up to 100 headers on a path, BCHN's 6,000-tick reorg
+  limit in one-minute blocks, still within one message's 128; the dashboards
+  estimate the network hashrate over the current block interval, and `/hashrate`
+  reports it as `block_interval_secs`; `p2poolv2_cli bch-trade refund`
+  prints the first block a Bitcoin Cash refund is valid in, since a lock
+  height counts ten-minute units.
+- Open before any token deployment: the SAFA covenant (`p2poolv2_safa`, not
+  deployed) still computes ASERT by height with ten-minute blocks, so after
+  a network's switch it computes a target ten times harder than P2Pool's
+  token band, and a token share P2Pool accepts would fail the covenant. The
+  covenant is not changed here. Mainnet's activation block is not pinned
+  yet, so until a release pins it the header gate refuses mainnet token
+  shares after the switch. Pinning it changes the gate's verdicts, so it is
+  a share-chain rule change of its own, with a new protocol segment. Token
+  jobs (also Stratum V2 custom jobs) and token wins are offered only when
+  the header passes both bands peers check: the pins' and the known BCH
+  prev's.
+
+The CHIP's ASERT and tick vectors pass, and real chipnet headers 332,429 to
+332,460 fed through the header path get the ticks and next intervals Knuth
+reports and require each block's real nBits.
+
+Whole weak shares are pruned one payout depth below the tip (#129, on #118's
+flag day): protocol segment `weak4-640-100-48-256-320-64-4096-64-32-summary`,
+store format 11. The weak root commits the weak shares' summary, so a deeper
+body is served with the summary and checked against the header; a node keeps
+4.3 GB of weak shares instead of 7.4 at 32 a share.
+`store.keep_whole_weak_shares = true` keeps them whole, for an archive.
+
+A syncing Bitcoin Cash node no longer marks an honest share invalid over a
+weak share paid from shares it never fetched: the body prune depth adds
+`WEAK_DEPTH` (242,174 shares, 414 in the sim). No share-chain rule change.
+
+Weak shares follow the asks (#118, issue #79 part 6), a flag day: protocol
+segment `weak4-640-100-48-256-320-64-4096-64-32`, store format 10, new
+genesis shares. A share header counts the weak shares it carries that ask
+for an easier target (`weak_asking`); while more than one in 64 ask, the weak
+ratio rises (up to 4096) and a share may carry more than 64 of them (up to
+640). A new chain starts at a weak ratio of 32.
+
+Upstream P2Poolv2 is merged through fdbf85df (its 0.18.0 and two commits
+after it). A node now dials only the host names listed in `dial_peers`, never
+a `/dns` address learned from a peer, and checks `blocked_ips` after it
+resolves a name; a dial that fails later backs off by connection. A
+`d=` difficulty in the password is no longer overridden by the miner's own
+`mining.suggest_difficulty`, as Whatsminer firmware sends right after
+authorizing. Debug logs carry each notify and the address of a stratum
+timeout. Testnet5's new genesis is not taken, as testnet5 is not, and the
+fork stays at 0.0.1-alpha.
+
+A node can take its block templates from a Stratum V2 Template Provider
+behind Tor or I2P. `template_provider_proxy` names a SOCKS5 proxy, Tor's
+SOCKS port for a `.onion` provider or an I2P router's SOCKS proxy for a
+`.b32.i2p` one, and every connection to the provider, a redirected one
+included, goes through it. The provider's name goes to the proxy unresolved
+and nothing is dialed directly, also when the proxy fails. Each connection
+sends its own random SOCKS username, so Tor puts it on its own circuit. A
+provider behind a proxy has 20 seconds to accept a connection and 15 for
+each setup answer (an I2P name 90 and 45), where a direct one has 10 for
+each. A proxy needs the provider's authority key, and a `.onion` or `.i2p`
+address needs a proxy. The Job Declaration page says what a node behind an
+onion service must change: every miner then connects from this computer's
+own address, which the default `sv2_coinbase_only_from` lets declare
+Coinbase-Only jobs.
+
+Both Umbrel apps run Prometheus and Grafana beside the node, as upstream's
+Umbrel app does (`dbf8ae48`), on the repository's Bitcoin Cash dashboards.
+Grafana is on port 3342 (`bch-p2pool`) or 3343 (the external node app),
+open to view, with the admin password the app's Umbrel password. Both
+images are pinned by version and digest; a test keeps each app's copy of the
+dashboards equal to `prometheus/grafana`.
+
+The Umbrel apps' dashboards move from ports 46890 and 46891 to 36890 and
+36891. umbrelOS 2.0 keeps host ports 40000 to 49999 for Umbrel Machines'
+port forwards, and upstream's Umbrel app left 46884 for 36884 for the same
+reason; a test now keeps every app port out of that range. The nightly fuzz
+run also starts from upstream's shared corpus for the same decoder target
+(`p2poolv2/fuzz-corpus`). Upstream's website, docs and difficulty analysis
+repositories have nothing new to port.
+
+The terminal UI follows upstream's PDM through `b7d97c34` (2026-11-04). A
+System tab on P2Pool Status starts, stops and restarts the node when it
+runs as the systemd user service `p2poolv2@<instance>`, from PDM's unit,
+now in `p2poolv2_tui/systemd/user`, with its config at
+`~/.config/p2poolv2/config-<instance>.toml`; `systemctl` runs off the
+screen's thread, since a stop waits for the node to close its store. The
+colours come from PDM's theme, readable on light and dark terminals.
+
+The network and payout simulators model one-minute Bitcoin Cash blocks
+(CHIP-2025-03): a block every minute paying a tenth of a ten-minute block,
+and a tenth of the ABLA floors (3.2 MB on mainnet, 200 kB on chipnet, 25.6
+MB to start on scalenet). Every block-time value is derived from
+`BCH_BLOCK_INTERVAL_SECONDS`. A month's reward and a miner's fair income
+are unchanged, but the PPLNS window, three blocks of the pool's work, is a
+tenth as long, so the 120,960-share cap binds only below about 0.015% of
+Bitcoin Cash; the node default aims a miner at ten times the shares a
+month, so the band changes nothing in a pool at 10% of Bitcoin Cash or
+more; and a coinbase at the default payout level pays at most 1,788
+outputs, while no level reaches the payout tree from the reward alone. The
+documented tables are regenerated, and where a conclusion moved the text
+says so. The study of the weak ratio's path with the asks (#124) is rerun
+too, and its rule v4 still fixes the start. No node code changes.
+
+A share a peer sent is relayed once its header checks out, before its body
+is validated, as BIP152 high-bandwidth peers relay compact blocks (#128).
+Uncles are now chosen from fully validated shares only. No share-chain rule,
+message or store change.
+
+P2Poolv2 takes templates from a node that serves no long polling, such as
+Knuth. Every Knuth template failed to parse ("missing field `longpollid`"),
+so the pool gave its miners no work. BIP 22 makes `longpollid` part of long
+polling, which Knuth does not serve, and the pool never long-polls, so a
+template without it now reads as one with an empty id. No share-chain rule
+changes.
+
+A new share is relayed with the weak shares it carries listed by hash, not
+whole (protocol segment `weak-by-hash`). Weak shares already travel ahead of
+the share that carries them: a node pushes the ones its miners find to every
+peer and announces the ones it takes by hash, each fetched once. The share
+message still carried every one of them whole, so a node downloaded each
+weak share twice and the share message grew with every weak share in it. On
+1,000 nodes at 10-second shares and one-minute blocks the network
+simulation put stale shares at 5.53% with 32 weak shares a share carried
+whole, 9.99% with 160 and 14.99% with 320, against 4.91% when they travel
+only beside the shares (5.27%, 8.66% and 14.11% against 4.20% with
+ten-minute blocks); the weak
+shares that follow the asks (#117, #118) let a share carry 320. A share
+carrying weak shares now goes as `ShareWithWeakHashes`: every weak share it
+carries listed by proof-of-work hash, 32 bytes each, and the ones its peers
+probably lack also sent whole beside the list, as BIP152 prefills
+transactions. Those are the weak shares this node's weak pool took less
+than 400 ms ago, two of the weak share announce intervals (one for this
+node's announcement to go out, one for a peer's fetch and check), and those
+it does not hold at all. The receiver fills the list from its weak pool's
+checked weak shares, then from the prefilled ones, asks the sender for the
+rest (`GetCarriedWeakShares`, answered from the sender's store with
+`CarriedWeakShares`), and checks the rebuilt share exactly as a share sent
+whole, weak root included. A prefilled or fetched weak share that filled a
+gap also goes to the weak share worker, checked as any relayed weak share,
+so the gossip does not fetch it again. A share still missing a weak share
+after 10 seconds, or whose weak shares do not rebuild its weak root, is
+never stored or validated: the block fetcher fetches it whole, from another
+peer that relayed it meanwhile if one did. A list that does not hold
+exactly the weak shares the header counts, each once, or that prefills a
+weak share it does not list or one twice, is refused as a bad copy is.
+Header sync and block requests still send weak shares whole: a node
+catching up was never sent old weak shares. On a 12-node swarm before the
+prefilling, a relayed share message fell from 23.4 KB to 4.7 KB and 2.4% of
+the weak shares were fetched, but the round trip for them took shares that
+did not make the chain from 9.69% to 12.37%. No share-chain rule changes
+and no store change; nodes before it cannot read the new messages, so the
+two derive different protocol strings and fail the handshake, and every
+node restarts on the new binary. New series:
+`p2p_share_relay_messages_total`, `p2p_share_relay_bytes_total`,
+`p2p_share_relay_whole_bytes_total` (what the same messages would have taken
+with every weak share whole) and `p2p_share_relay_prefilled_weak_shares_total`,
+and `weak_shares_filled_from_pool_total`, `weak_shares_prefilled_total`,
+`weak_shares_prefilled_unused_total` (prefilled ones the pool already had),
+`weak_shares_fetched_for_shares_total` and
+`weak_share_fills_fetched_whole_total`.
+
+The payout simulator runs the weak ratio's path under the weak shares that
+ask, share by share, in five tables (`weak-asks-genesis`,
+`weak-asks-big-miner`, `weak-asks-rules`, `weak-asks-rule-mixes`,
+`weak-asks-rule-attacks`), for the rule as #118 builds it and five
+variants; its transition model gains the asks. From genesis in a pool at
+10% of today's Bitcoin Cash, where nobody asks, the rule as written carries
+132 weak shares a share in the first hour and more than 64 in 769 of the
+first 2,100 shares, where today's cap holds 64; a 1 TH/s miner joining a
+10 GH/s test network pool, whose ratio the ceiling held, does the same. A
+faster way down (to `R * 32 / count`) settles far below the asks in every
+pool and makes every attack worse; a genesis ratio of 32 fixes only
+genesis. A cap that follows the asks (more than 64 weak shares only when
+more than one in 64 of them ask) with a genesis ratio of 32 keeps every
+start at or under 64 where nobody asks, loses no weak share at genesis and
+keeps section 6's steady states where the asks open the count; where fewer
+than one weak share in 64 asks (the 99% industrial mix) it opens less, 50 a
+share instead of 82. No node code changes.
+
+The small miners design page has a section 6, a proposal that is not built:
+weak shares that follow the asks. A weak share would ask for an easier weak
+target when its node wanted one for its miner, and while more than one in 64
+of the weak shares a share carried ask, the weak ratio would rise instead of
+steering towards 32 weak shares a share, up to 320. Without asks the rule is
+today's. The payout simulator runs it share by share in four tables
+(`weak-asks`, `weak-asks-mixes`, `weak-asks-constants`,
+`weak-asks-attacks`): a pool whose small miners find enough weak shares
+stays near today's count, and one at 30% of a Bitcoin Cash ten times today's
+opens to the ceiling, where a Bitaxe's months without a payment go from
+40.5% to 2.8% with one-minute blocks (41% to 2.7% with ten-minute ones). An
+attacker can hold the count at the ceiling or at the floor, no further. The
+section lists what the ceiling costs a node and what has to be built first.
+
+The payout simulator has a `window-cap` table and a `storage` table. The
+first runs pools at 0.01 to 1% of Bitcoin Cash with the PPLNS window capped
+at 14, 30 and 60 days: with one-minute blocks the cap binds only under
+about 0.015% (0.15% with ten-minute ones), and a longer one leaves a miner
+that keeps mining as often without a payment (0.9% of its months at 0.01%
+with every cap; 63%, 66% and 65% with ten-minute blocks), since each block
+pays it its part of the window's work; it only lets more single shares be
+paid, at the cost of a longer payout depth and twice the bodies kept. The
+14-day cap stays. The second is arithmetic of what a node
+keeps: the payout level bounds a coinbase (1,788 outputs, 61 KB, at the
+default level, with 10,000 payees or more; 17,885 and 608 KB with
+ten-minute blocks), and even the lowest level, 28,617 outputs, no longer
+reaches the payout tree from the reward alone; coinbases are most of the
+store, 8.3 GB for 28 days at 1,000 payees up to 236 GB at the lowest
+level's ceiling; stored without their payouts they take 0.09 GB; weak
+shares take 6.2 GB at 32 a share and 62 GB at 320, half that kept for one
+payout depth; headers take 3.15 GB a year.
+`Scenario` gains `window_cap_seconds`, 14 days everywhere else.
+
 The payout simulator has a `scale-levers` table for part 5 of the small
 miners design, the dynamic share period: pools at 10 and 30% of a Bitcoin
 Cash at 1, 10, 100 and 270 times today's hashrate, with share periods of 5,
 2 and 1 seconds and with 10-second shares that carry 2, 5 and 10 times the
 weak shares. Both pay a small miner the same, and only the shorter period
-adds stale shares: 7.8%, 17.8% and 30.7% on 1,000 nodes against 4.2%. A
+adds stale shares: 8.0%, 17.9% and 30.4% on 1,000 nodes against 3.8% with
+one-minute Bitcoin Cash blocks (7.8%, 17.8% and 30.7% against 4.2% with
+ten-minute ones). A
 Bitaxe first needs more weak shares when the pool itself holds about 3.7
 EH/s, as much as all of Bitcoin Cash has today. Section 5 of the design page
 records it and stays an outline.
@@ -1099,6 +1377,26 @@ earlier; they leave the window as the chain grows. The sync changes no
 share-chain rule: Bitcoin Cash genesis shares, protocol strings, the band,
 payout levels, weak shares, per-share cuts, the hybrid payout, the genesis
 last-resort rule and store format 5 are as they were.
+
+Synced with upstream P2Poolv2 through `fdbf85df` (its v0.18.0 and the
+Whatsminer change after it). The fork keeps version `0.0.1-alpha`. Taken
+from upstream: host names in `dial_peers` through upstream's DNS transport,
+which replaces the fork's own: only host names listed in `dial_peers` are
+resolved and dialed, never a `/dns` address learned from a peer; a name
+that resolves to an address in `blocked_ips`, or one blocked through the
+API, is not dialed; and a host with no usable resolver configuration warns
+and keeps `/ip4` and `/ip6` peers, where the node used to refuse to start.
+The first dial of a `dial_peers` peer now goes through the reconnector,
+which does not redial while a dial is pending and backs off after a dial
+that fails later. A `d=` or `th=` difficulty in the login is no longer
+overridden by the miner's own `mining.suggest_difficulty`, which Whatsminer
+firmware sends right after authorizing; on Bitcoin Cash the session
+difficulty still never goes above the job's share difficulty. Debug logs
+carry each notify sent and the address of a stratum timeout. Left out:
+testnet5's new genesis, as testnet5 is not here. The sync changes no
+share-chain rule: Bitcoin Cash genesis shares, protocol strings, the band,
+payout levels, weak shares, per-share cuts, the hybrid payout, the genesis
+last-resort rule and store format 9 are as they were.
 
 ### Added
 

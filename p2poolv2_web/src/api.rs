@@ -180,6 +180,11 @@ pub struct Hashrate {
     /// Current network difficulty from the newest prepared template. None
     /// until the first notify is built.
     pub network_difficulty: Option<f64>,
+    /// Seconds between Bitcoin Cash blocks now: 600, or 60 after a
+    /// network's switch to one-minute blocks. `None` from an older node,
+    /// which estimated with ten minutes.
+    #[serde(default)]
+    pub block_interval_secs: Option<f64>,
     /// Oldest first.
     pub history: Vec<HashratePoint>,
 }
@@ -270,14 +275,40 @@ pub struct ShareDetail {
     pub bitcoin_header: BitcoinHeader,
     /// How many weak shares this share carries, from its header.
     pub weak_count: u16,
+    /// How many of the carried weak shares ask for an easier weak target,
+    /// from its header.
+    pub weak_asking: u16,
     /// This share's weak ratio `R`: its weak target over the minimum, in
     /// 1024 parts (`p2poolv2_lib::shares::weak::WEAK_RATIO_UNIT`).
     pub weak_ratio: u32,
     /// The root committing the carried weak shares, hex.
     pub weak_root: String,
     /// The carried weak shares' bodies: empty when the share carries none
-    /// or the body was pruned, then `weak_count` alone reports the count.
+    /// or they were pruned, then `weak_summary` sums them up while the body
+    /// is kept and `weak_count` alone reports the count after.
     pub weak_shares: Vec<WeakShareDetail>,
+    /// The summary of the carried weak shares, reported once their whole
+    /// bodies were pruned one payout depth below the tip.
+    #[serde(default)]
+    pub weak_summary: Option<WeakSummaryDetail>,
+}
+
+/// The summary of a share's pruned weak shares, as `/share?hash=` reports
+/// it: who their credit goes to.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct WeakSummaryDetail {
+    pub groups: Vec<WeakCreditGroupDetail>,
+}
+
+/// Weak shares of one share that pay one payee alike.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct WeakCreditGroupDetail {
+    /// The miner they pay out to.
+    pub miner_bitcoin_address: String,
+    /// Their payout level.
+    pub payout_level: u8,
+    /// How many of the carried weak shares the group holds.
+    pub count: u32,
 }
 
 /// One weak share a share's body carries, as `/share?hash=` reports it.

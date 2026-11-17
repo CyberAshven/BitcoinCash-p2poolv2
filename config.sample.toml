@@ -10,12 +10,23 @@ listen_address = "/ip4/0.0.0.0/tcp/6884"
 # Share chain peers to dial at startup and keep reconnecting to. A Bitcoin
 # Cash node finds peers only here: there are no Bitcoin Cash DNS seeds yet,
 # and dns_seed is ignored and always off on chain = "bitcoin-cash". A peer
-# is an IP address or a host name, which is looked up again on every dial.
+# is an IP address or a host name, as /dns4/, /dns6/ or /dns/; only host
+# names listed here are ever dialed, never ones learned from peers.
 # dial_peers = ["/ip4/203.0.113.1/tcp/6884", "/dns4/pool.example.com/tcp/6884"]
 max_pending_incoming = 10
 max_pending_outgoing = 10
-max_established_incoming = 50
+# Inbound peers. Each outgoing peer is another node's inbound one, so with
+# 16 outgoing a node takes 16 on average; 128 leaves room for that while
+# one node in four accepts inbound connections.
+max_established_incoming = 128
 max_established_outgoing = 50
+# Outgoing peers to keep, 16 unless set. While the node has fewer, it dials
+# a peer that its peers told it of (Kademlia and Identify) once a second,
+# never past max_established_outgoing and never in an IPv4 /16 or IPv6 /32
+# where it already has an outgoing peer (dial_peers do not count). It only
+# dials public IP addresses, so list peers on a LAN or on this machine in
+# dial_peers. 0 turns it off.
+# target_outgoing_peers = 16
 # Two, not one: room for an inbound and an outbound connection when two
 # nodes dial each other at once. More only duplicates traffic -- libp2p
 # multiplexes every protocol over a single connection.
@@ -34,6 +45,13 @@ dial_timeout_secs = 30
 [store]
 path = "./store.db"
 pplns_ttl_days = 7
+# Keep the whole weak shares a Bitcoin Cash share carries until its body is
+# pruned (242,534 shares), for an explorer or an archive.
+# By default they are pruned one payout depth (121,423 shares) below the tip
+# and only their summary, which the payouts read, stays with the body. Every
+# node serves every body a syncing peer asks for either way. A node that
+# syncs late keeps whole only the weak shares a peer still holds whole.
+# keep_whole_weak_shares = false
 
 [stratum]
 # Mine Bitcoin Cash: BCHN templates, CashAddr payouts, the Bitcoin Cash
@@ -171,6 +189,12 @@ zmqpubhashblock = "tcp://127.0.0.1:28332"
 # runs the Noise handshake; it is required unless the provider is on this
 # computer (a loopback address).
 # template_provider_authority_public_key = "9b..."
+# HOST:PORT of a SOCKS5 proxy to reach the provider through: Tor's SOCKS port
+# (127.0.0.1:9050) for a .onion address, or an I2P router's SOCKS proxy
+# (i2pd: 127.0.0.1:4447) for a .b32.i2p address. The provider's name goes to
+# the proxy and is never resolved on this computer, and nothing is dialed
+# directly. Needs the provider's authority public key.
+# template_provider_proxy = "127.0.0.1:9050"
 # Version rolling mask offered to miners (BIP 310 negotiation): the 16 general
 # purpose bits of BIP 320, 0x1fffe000, which ASIC firmware rolls on Bitcoin
 # Cash as on Bitcoin. It is the code default and what Stratum V2 channels allow

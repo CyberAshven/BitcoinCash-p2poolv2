@@ -239,6 +239,14 @@ pub enum WriteCommand {
         to: u32,
         reply: oneshot::Sender<Result<PruneStats, StoreError>>,
     },
+
+    /// Delete the whole weak shares at heights `[from, to)` in one batch,
+    /// keeping their leaf root and summary.
+    PruneWeakSharesChunk {
+        from: u32,
+        to: u32,
+        reply: oneshot::Sender<Result<usize, StoreError>>,
+    },
 }
 
 /// Sender type for write commands (std::sync::mpsc for sync StoreWriter)
@@ -472,6 +480,17 @@ impl StoreWriter {
                     .and_then(|stats| {
                         self.store.commit_batch(batch).map_err(StoreError::from)?;
                         Ok(stats)
+                    });
+                let _ = reply.send(result);
+            }
+            WriteCommand::PruneWeakSharesChunk { from, to, reply } => {
+                let mut batch = Store::get_write_batch();
+                let result = self
+                    .store
+                    .prune_weak_shares_chunk(from, to, &mut batch)
+                    .and_then(|pruned| {
+                        self.store.commit_batch(batch).map_err(StoreError::from)?;
+                        Ok(pruned)
                     });
                 let _ = reply.send(result);
             }

@@ -11,9 +11,12 @@
 //! whatever the share's later status on the share chain, and on each new BCH
 //! tip:
 //!
-//! - waits until the block holding the tree's coinbase has 100
-//!   confirmations, so the coinbase output can be spent in the next block
-//!   (BCH's `COINBASE_MATURITY`);
+//! - waits until the coinbase output can be spent in the next block: 100
+//!   confirmations before one-minute blocks, 1,000 one-minute blocks after
+//!   (BCH's coinbase maturity, 60,000 ticks under CHIP-2025-03), counted
+//!   from the ticks of the known headers of the tip and the coinbase's
+//!   block (`TickInfo::coinbase_spendable_in_next_block`), or by the
+//!   network's pins while either is not known;
 //! - broadcasts the tree's node transactions at
 //!   `BCH_TREE_EXECUTION_FEE_RATE`, 1 satoshi per byte, root first and each
 //!   node before its children, and the child nodes of the other accepted
@@ -32,6 +35,7 @@
 //! node-local task, not a share-chain rule.
 
 use crate::accounting::payout::payout_tree::{BCH_TREE_EXECUTION_FEE_RATE, BCH_TREE_FEE_RATES};
+use crate::shares::bch_asert::TickSchedule;
 #[cfg(test)]
 #[mockall_double::double]
 use crate::shares::chain::chain_store_handle::ChainStoreHandle;
@@ -51,9 +55,14 @@ use tracing::{debug, info, warn};
 /// How often the executor asks BCHN for its tip.
 pub const EXECUTOR_POLL_INTERVAL: Duration = Duration::from_secs(30);
 
-/// Confirmations the coinbase's block needs before its outputs can be spent
-/// in the next block: BCH's `COINBASE_MATURITY`, 100.
-pub const COINBASE_MATURITY_CONFIRMATIONS: i64 = 100;
+/// Where a block is on the node's chain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlockDepth {
+    /// The block's height.
+    pub height: u32,
+    /// Its confirmations: -1 when it is off the main chain.
+    pub confirmations: i64,
+}
 
 /// New tips in a row with every transaction of a root variant confirmed
 /// before a tree counts as executed.
@@ -101,9 +110,10 @@ pub trait TreeExecutionNode: Send + Sync {
     /// Whether the node is still in initial block download, when its not
     /// knowing a block says nothing.
     async fn in_initial_block_download(&self) -> Result<bool, String>;
-    /// Confirmations of `blockhash`: -1 when it is off the main chain, `None`
-    /// when the node does not know it.
-    async fn block_confirmations(&self, blockhash: BlockHash) -> Result<Option<i64>, String>;
+    /// Height and confirmations of `blockhash`, `None` when the node does
+    /// not know it.
+    async fn block_confirmations(&self, blockhash: BlockHash)
+    -> Result<Option<BlockDepth>, String>;
     /// Broadcast `transaction`.
     async fn send_raw_transaction(&self, transaction: &Transaction) -> BroadcastOutcome;
     /// Whether `outpoint` is an unspent output of a confirmed transaction.
@@ -126,7 +136,10 @@ impl TreeExecutionNode for BitcoindRpcClient {
             .map_err(|error| error.to_string())
     }
 
-    async fn block_confirmations(&self, blockhash: BlockHash) -> Result<Option<i64>, String> {
+    async fn block_confirmations(
+        &self,
+        blockhash: BlockHash,
+    ) -> Result<Option<BlockDepth>, String> {
         let header: Result<serde_json::Value, BitcoindRpcError> = self
             .request(
                 "getblockheader",
@@ -137,7 +150,19 @@ impl TreeExecutionNode for BitcoindRpcClient {
             )
             .await;
         match header {
-            Ok(header) => Ok(header.get("confirmations").and_then(|value| value.as_i64())),
+            Ok(header) => Ok(header
+                .get("confirmations")
+                .and_then(|value| value.as_i64())
+                .zip(
+                    header
+                        .get("height")
+                        .and_then(|value| value.as_u64())
+                        .and_then(|height| u32::try_from(height).ok()),
+                )
+                .map(|(confirmations, height)| BlockDepth {
+                    height,
+                    confirmations,
+                })),
             Err(BitcoindRpcError::RpcError { code, .. }) if code == RPC_INVALID_ADDRESS_OR_KEY => {
                 Ok(None)
             }
@@ -199,6 +224,9 @@ pub struct PayoutTreeExecutor<N: TreeExecutionNode> {
     last_tip: Option<BlockHash>,
     /// New tips in a row each tree has looked settled, by coinbase txid.
     settled_tips: HashMap<Txid, u32>,
+    /// The network's pins, which count a coinbase's maturity by height
+    /// while the known headers cannot.
+    tick_schedule: TickSchedule,
 }
 
 impl<N: TreeExecutionNode> PayoutTreeExecutor<N> {
@@ -215,7 +243,16 @@ impl<N: TreeExecutionNode> PayoutTreeExecutor<N> {
             found_rx,
             last_tip: None,
             settled_tips: HashMap::new(),
+            tick_schedule: TickSchedule::TEN_MINUTES,
         }
+    }
+
+    /// The executor for a network whose pins are `tick_schedule`, for when
+    /// the known headers cannot count a coinbase's maturity. Without it,
+    /// that count takes every block as a ten-minute block.
+    pub fn with_tick_schedule(mut self, tick_schedule: TickSchedule) -> Self {
+        self.tick_schedule = tick_schedule;
+        self
     }
 
     /// Keep every tree sent on the channel and execute on each poll, until
@@ -271,6 +308,33 @@ impl<N: TreeExecutionNode> PayoutTreeExecutor<N> {
         }
     }
 
+    /// Whether the coinbase of `stored`'s block, at `depth` on the node's
+    /// chain, can be spent in a block on `bitcoin_tip`: the block's on the
+    /// node's main chain, and a block on the tip is at least 60,000 ticks
+    /// past it, as BCHN's `CheckTxInputs` counts, `tip.ticks +
+    /// tip.next_interval - coin_block.ticks`. Both blocks' ticks come from
+    /// their known headers; while either is not known yet, the network's pins
+    /// count by height.
+    fn coinbase_spendable_in_next_block(
+        &self,
+        stored: &StoredPayoutTree,
+        bitcoin_tip: BlockHash,
+        depth: BlockDepth,
+    ) -> bool {
+        if depth.confirmations <= 0 {
+            return false;
+        }
+        let known = |hash: &BlockHash| self.chain_store_handle.get_bch_header(hash).ok().flatten();
+        match (known(&bitcoin_tip), known(&stored.bitcoin_blockhash)) {
+            (Some(tip), Some(coin_block)) => tip
+                .tick_info()
+                .coinbase_spendable_in_next_block(coin_block.ticks),
+            _ => self
+                .tick_schedule
+                .coinbase_spendable_in_next_block(depth.height, depth.confirmations),
+        }
+    }
+
     /// Broadcast one tree if it is mature, and mark it executed once it has
     /// settled.
     async fn execute_tree(
@@ -284,7 +348,8 @@ impl<N: TreeExecutionNode> PayoutTreeExecutor<N> {
             .block_confirmations(stored.bitcoin_blockhash)
             .await
         {
-            Ok(Some(confirmations)) if confirmations >= COINBASE_MATURITY_CONFIRMATIONS => {}
+            Ok(Some(depth))
+                if self.coinbase_spendable_in_next_block(stored, bitcoin_tip, depth) => {}
             Ok(None) => {
                 self.settled_tips.remove(&stored.coinbase_txid);
                 if !synced {

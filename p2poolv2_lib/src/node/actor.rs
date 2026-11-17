@@ -27,6 +27,7 @@ use crate::node::p2p_message_handlers::receivers::block_receiver::{
 };
 use crate::node::p2p_message_handlers::senders::build_getheaders_message;
 use crate::node::p2p_message_handlers::senders::send_share_block_broadcast;
+use crate::node::p2p_message_handlers::senders::share_block::weak_shares_to_prefill;
 use crate::node::payout_tree_executor::{
     PayoutTreeExecutor, PayoutTreeSender, payout_tree_channel,
 };
@@ -42,6 +43,7 @@ use crate::node::weak_share_worker::{WeakShareNetwork, WeakShareWorker};
 use crate::pool_difficulty::PoolDifficulty;
 #[cfg(not(test))]
 use crate::pool_difficulty::PoolDifficulty;
+use crate::shares::bch_asert::TickSchedule;
 #[cfg(test)]
 #[mockall_double::double]
 use crate::shares::chain::chain_store_handle::ChainStoreHandle;
@@ -54,7 +56,7 @@ use crate::shares::transaction_pool::{
 use crate::shares::validation::{DefaultShareValidator, ShareValidator};
 use crate::shares::weak::{WEAK_CAP, WeakShare};
 use crate::shares::weak_pool::{
-    MAX_POOL_WEAK_SHARES, RelayWeakShare, WeakPool, WeakPoolStats, WeakRelayReceiver,
+    MAX_POOL_WEAK_SHARES, RelayWeakShare, WeakPool, WeakPoolStats, WeakRelayReceiver, now_millis,
 };
 use crate::stratum::emission::EmissionReceiver;
 use crate::stratum::work::notify::NotifySender;
@@ -131,9 +133,13 @@ impl NodeHandle {
                 &config.bitcoinrpc.username,
                 &config.bitcoinrpc.password,
             )?;
-            BchHeaderFeeder::new(client, chain_store_handle.clone())
-                .first_sync(FIRST_SYNC_LIMIT)
-                .await;
+            BchHeaderFeeder::new(
+                client,
+                chain_store_handle.clone(),
+                config.stratum.bitcoin_cash_network,
+            )
+            .first_sync(FIRST_SYNC_LIMIT)
+            .await;
         }
         let (node_actor, stopping_rx) = NodeActor::new(
             config,
@@ -429,10 +435,10 @@ const MAX_PENDING_WEAK_ANNOUNCEMENTS: usize = MAX_POOL_WEAK_SHARES;
 
 /// How often pending weak-share hashes are announced.
 ///
-/// One inventory carries [`WEAK_CAP`] hashes. At 200ms that is 320 hashes
-/// a second per peer, enough for a chain finding weak shares 256 times as
-/// fast as shares.
-const WEAK_ANNOUNCE_INTERVAL: Duration = Duration::from_millis(200);
+/// One inventory carries [`WEAK_CAP`] hashes. At 200ms that is 3,200 hashes
+/// a second per peer, enough for a chain finding weak shares 4,096 times as
+/// fast as shares, the most the asks allow (`R_ASK_MAX`).
+pub(crate) const WEAK_ANNOUNCE_INTERVAL: Duration = Duration::from_millis(200);
 
 struct PendingWeakAnnouncement {
     hash: BlockHash,
@@ -608,7 +614,8 @@ fn start_payout_tree_executor(
         }
     };
     let (sink, found) = payout_tree_channel();
-    let executor = PayoutTreeExecutor::new(client, chain_store_handle.clone(), found);
+    let executor = PayoutTreeExecutor::new(client, chain_store_handle.clone(), found)
+        .with_tick_schedule(bitcoin_cash_tick_schedule(config));
     tokio::spawn(executor.run());
     Some(sink)
 }
@@ -693,13 +700,20 @@ impl NodeActor {
                 &config.bitcoinrpc.password,
             )?;
             (
-                Some(FoundBlockVerifier::new(
-                    client.clone(),
-                    chain_store_handle.clone(),
-                    metrics.clone(),
-                )),
+                Some(
+                    FoundBlockVerifier::new(
+                        client.clone(),
+                        chain_store_handle.clone(),
+                        metrics.clone(),
+                    )
+                    .with_tick_schedule(bitcoin_cash_tick_schedule(&config)),
+                ),
                 // Follows BCHN's headers for mining on the current chain.
-                Some(BchHeaderFeeder::new(client, chain_store_handle.clone())),
+                Some(BchHeaderFeeder::new(
+                    client,
+                    chain_store_handle.clone(),
+                    config.stratum.bitcoin_cash_network,
+                )),
             )
         } else {
             (None, None)
@@ -798,7 +812,8 @@ impl NodeActor {
             block_fetcher_tx_for_receiver,
             validation_tx_for_worker.clone(),
         )
-        .with_depths(ChainDepths::for_chain(chain));
+        .with_depths(ChainDepths::for_chain(chain))
+        .with_relay(node.swarm_tx.clone());
         let block_receiver_id = workers
             .spawn(async move {
                 block_receiver.run().await;
@@ -887,6 +902,11 @@ impl NodeActor {
         // Skip the immediate first tick so we don't reconnect while initial dials are in progress
         reconnect_interval.tick().await;
 
+        let mut outgoing_target_interval = tokio::time::interval(
+            crate::node::outgoing_peer_target::OutgoingPeerTarget::check_interval(),
+        );
+        outgoing_target_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
         const SYNC_RETRY_INTERVAL: u64 = 60;
         let mut sync_retry_interval =
             tokio::time::interval(std::time::Duration::from_secs(SYNC_RETRY_INTERVAL));
@@ -956,6 +976,9 @@ impl NodeActor {
                 }
                 _ = reconnect_interval.tick(), if self.node.peer_reconnector.has_peers() => {
                     self.node.attempt_reconnections();
+                }
+                _ = outgoing_target_interval.tick(), if self.node.outgoing_peer_target.has_target() => {
+                    self.node.dial_toward_outgoing_target();
                 }
                 _ = sync_retry_interval.tick(), if !self.chain_store_handle.is_current() => {
                     self.on_sync_retry_tick();
@@ -1101,17 +1124,24 @@ impl NodeActor {
             }
             SwarmSend::BroadcastBlock(share_block, bch_headers) => {
                 let connected_peers = self.node.connected_peers();
+                let prefill = weak_shares_to_prefill(
+                    &share_block,
+                    self.node.request_response_handler.weak_pool().as_ref(),
+                    now_millis(),
+                );
                 let peer_knowledge = self
                     .node
                     .request_response_handler
                     .peer_block_knowledge_mut();
-                send_share_block_broadcast(
+                let sent = send_share_block_broadcast(
                     share_block,
                     bch_headers,
+                    &prefill,
                     &connected_peers,
                     peer_knowledge,
                     &mut self.node.swarm,
                 );
+                self.node.request_response_handler.record_share_relay(sent);
             }
             SwarmSend::Disconnect(peer_id) => {
                 if self.node.swarm.disconnect_peer_id(peer_id).is_err() {
@@ -1276,6 +1306,16 @@ impl NodeActor {
 /// to compare against, so it is not progress and the sync retry still fires.
 fn confirmed_tip_progressed(last_seen: Option<BlockHash>, current: BlockHash) -> bool {
     last_seen.is_some_and(|seen| seen != current)
+}
+
+/// The configured Bitcoin Cash network's block intervals (its timed
+/// switches and pins), or ten-minute blocks when the node runs no Bitcoin
+/// Cash network.
+pub(crate) fn bitcoin_cash_tick_schedule(config: &Config) -> TickSchedule {
+    config
+        .stratum
+        .bitcoin_cash_network
+        .map_or(TickSchedule::TEN_MINUTES, TickSchedule::for_network)
 }
 
 #[cfg(test)]

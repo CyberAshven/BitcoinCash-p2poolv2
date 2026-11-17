@@ -1,0 +1,13 @@
+# Prometheus for this app's node, as prometheus/prometheus.yml in the
+# repository root, scraping the node by its service name on the app's own
+# network. The node's API has no login on Umbrel, so neither has /metrics.
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: "p2pool"
+    scrape_interval: 5s
+    static_configs:
+      - targets:
+          - p2pool:46884
+    metrics_path: "/metrics"
