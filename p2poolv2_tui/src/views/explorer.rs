@@ -7,6 +7,7 @@
 //! markers in place of its icons.
 
 use crate::explorer::{Entry, FileExplorer};
+use crate::theme;
 use ratatui::{
     prelude::*,
     widgets::{Block, Borders, List, ListItem, ListState},
@@ -30,7 +31,7 @@ pub fn render(frame: &mut Frame, area: Rect, explorer: &FileExplorer) {
                 .borders(Borders::ALL)
                 .title(format!(" {what} (in {}) ", explorer.current_dir.display())),
         )
-        .highlight_style(Style::default().bg(Color::Blue).fg(Color::White))
+        .highlight_style(theme::HIGHLIGHT)
         .highlight_symbol(">> ");
     let mut state = ListState::default();
     state.select(Some(explorer.selected_index));

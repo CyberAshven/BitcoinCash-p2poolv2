@@ -6,6 +6,7 @@
 //! The settings screen, ported from PDM's settings view: the node config
 //! file and where this tool keeps its own settings.
 
+use crate::theme;
 use ratatui::{
     prelude::*,
     widgets::{Block, Borders, List, ListItem, ListState},
@@ -47,23 +48,15 @@ pub fn render(frame: &mut Frame, area: Rect, screen: &SettingsScreen) {
         .enumerate()
         .map(|(index, (&(label, _), value))| {
             let (shown, style) = match value {
-                Some(value) => (
-                    value,
-                    Style::default()
-                        .fg(Color::White)
-                        .add_modifier(Modifier::BOLD),
-                ),
+                Some(value) => (value, theme::EMPHASIS),
                 None if index == 1 => (
                     format!("{} (default)", screen.default_settings_dir),
-                    Style::default().fg(Color::DarkGray),
+                    theme::MUTED,
                 ),
-                None => (
-                    "(not set)".to_string(),
-                    Style::default().fg(Color::DarkGray),
-                ),
+                None => ("(not set)".to_string(), theme::MUTED),
             };
             ListItem::new(vec![
-                Line::from(Span::styled(label, Style::default().fg(Color::Gray))),
+                Line::from(Span::styled(label, theme::MUTED)),
                 Line::from(Span::styled(shown, style)),
             ])
         })
@@ -71,7 +64,7 @@ pub fn render(frame: &mut Frame, area: Rect, screen: &SettingsScreen) {
     let border_style = if screen.focused {
         Style::default()
     } else {
-        Style::default().fg(Color::DarkGray)
+        theme::MUTED
     };
     let list = List::new(items)
         .block(
@@ -80,7 +73,7 @@ pub fn render(frame: &mut Frame, area: Rect, screen: &SettingsScreen) {
                 .title(" Settings ")
                 .border_style(border_style),
         )
-        .highlight_style(Style::default().bg(Color::DarkGray));
+        .highlight_style(theme::HIGHLIGHT);
     let mut state = ListState::default();
     state.select(Some(screen.selected));
     frame.render_stateful_widget(list, area, &mut state);

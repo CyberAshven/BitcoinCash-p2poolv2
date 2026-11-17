@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Upstream P2Poolv2 is merged through fdbf85df (its 0.18.0 and two commits
+after it). A node now dials only the host names listed in `dial_peers`, never
+a `/dns` address learned from a peer, and checks `blocked_ips` after it
+resolves a name; a dial that fails later backs off by connection. A
+`d=` difficulty in the password is no longer overridden by the miner's own
+`mining.suggest_difficulty`, as Whatsminer firmware sends right after
+authorizing. Debug logs carry each notify and the address of a stratum
+timeout. Testnet5's new genesis is not taken, as testnet5 is not, and the
+fork stays at 0.0.1-alpha.
+
+A node can take its block templates from a Stratum V2 Template Provider
+behind Tor or I2P. `template_provider_proxy` names a SOCKS5 proxy, Tor's
+SOCKS port for a `.onion` provider or an I2P router's SOCKS proxy for a
+`.b32.i2p` one, and every connection to the provider, a redirected one
+included, goes through it. The provider's name goes to the proxy unresolved
+and nothing is dialed directly, also when the proxy fails. Each connection
+sends its own random SOCKS username, so Tor puts it on its own circuit. A
+provider behind a proxy has 20 seconds to accept a connection and 15 for
+each setup answer (an I2P name 90 and 45), where a direct one has 10 for
+each. A proxy needs the provider's authority key, and a `.onion` or `.i2p`
+address needs a proxy. The Job Declaration page says what a node behind an
+onion service must change: every miner then connects from this computer's
+own address, which the default `sv2_coinbase_only_from` lets declare
+Coinbase-Only jobs.
+
 Both Umbrel apps run Prometheus and Grafana beside the node, as upstream's
 Umbrel app does (`dbf8ae48`), on the repository's Bitcoin Cash dashboards.
 Grafana is on port 3342 (`bch-p2pool`) or 3343 (the external node app),
@@ -21,6 +46,14 @@ reason; a test now keeps every app port out of that range. The nightly fuzz
 run also starts from upstream's shared corpus for the same decoder target
 (`p2poolv2/fuzz-corpus`). Upstream's website, docs and difficulty analysis
 repositories have nothing new to port.
+
+The terminal UI follows upstream's PDM through `b7d97c34` (2026-11-04). A
+System tab on P2Pool Status starts, stops and restarts the node when it
+runs as the systemd user service `p2poolv2@<instance>`, from PDM's unit,
+now in `p2poolv2_tui/systemd/user`, with its config at
+`~/.config/p2poolv2/config-<instance>.toml`; `systemctl` runs off the
+screen's thread, since a stop waits for the node to close its store. The
+colours come from PDM's theme, readable on light and dark terminals.
 
 The network and payout simulators model one-minute Bitcoin Cash blocks
 (CHIP-2025-03): a block every minute paying a tenth of a ten-minute block,
