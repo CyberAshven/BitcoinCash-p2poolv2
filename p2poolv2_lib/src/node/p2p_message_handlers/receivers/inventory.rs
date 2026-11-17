@@ -283,7 +283,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_handle_inventory_weak_share_hashes_forwards_the_first_64() {
+    async fn test_handle_inventory_weak_share_hashes_forwards_the_first_640() {
         use crate::node::weak_share_fetch::WeakFetchEvent;
         use crate::shares::weak::WEAK_CAP;
 
@@ -311,31 +311,35 @@ mod tests {
         )
         .await;
 
-        assert!(result.is_ok(), "65 weak share hashes are acknowledged");
+        assert!(result.is_ok(), "641 weak share hashes are acknowledged");
         match swarm_rx.recv().await {
             Some(SwarmSend::Response(channel, Message::Ack)) => {
-                assert_eq!(channel, 5u32, "ack channel for 65 weak share hashes");
+                assert_eq!(channel, 5u32, "ack channel for 641 weak share hashes");
             }
-            other => panic!("Expected Ack for 65 weak share hashes, got {other:?}"),
+            other => panic!("Expected Ack for 641 weak share hashes, got {other:?}"),
         }
         match fetch_rx.try_recv() {
             Ok(WeakFetchEvent::Announced {
                 peer,
                 hashes: forwarded,
             }) => {
-                assert_eq!(peer, peer_id, "announcer of 65 weak share hashes");
-                assert_eq!(forwarded.len(), WEAK_CAP, "65 weak share hashes forward 64");
+                assert_eq!(peer, peer_id, "announcer of 641 weak share hashes");
+                assert_eq!(
+                    forwarded.len(),
+                    WEAK_CAP,
+                    "641 weak share hashes forward 640"
+                );
                 assert_eq!(
                     forwarded.as_slice(),
                     &hashes[..WEAK_CAP],
-                    "the first 64 weak share hashes are forwarded"
+                    "the first 640 weak share hashes are forwarded"
                 );
                 assert!(
                     !forwarded.contains(&dropped),
-                    "the 65th weak share hash is not forwarded"
+                    "the 641st weak share hash is not forwarded"
                 );
             }
-            other => panic!("Expected an announcement of 64 hashes, got {other:?}"),
+            other => panic!("Expected an announcement of 640 hashes, got {other:?}"),
         }
     }
 }

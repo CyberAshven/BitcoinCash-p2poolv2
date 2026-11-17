@@ -148,10 +148,13 @@ pub fn execute(command: &AuxpowCommand) -> Result<(), Box<dyn Error>> {
             let proof_hex = String::from_utf8(read_bounded(File::open(proof)?)?)?;
             let proof = AuxProof::from_bytes(&hex::decode(proof_hex.trim())?)?;
             let token: TokenJson = serde_json::from_slice(&read_bounded(File::open(token)?)?)?;
+            // No known headers here: the network's pins give the parent's
+            // ticks and interval by the coinbase's height.
             proof.verify(
                 &token.leaf()?,
                 *max_height,
                 network.and_then(BchAsert::for_network),
+                None,
             )?;
             json!({
                 "valid_aux_proof": true,

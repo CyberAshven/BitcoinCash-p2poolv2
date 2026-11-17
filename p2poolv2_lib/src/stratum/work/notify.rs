@@ -24,16 +24,22 @@ use crate::shares::chain::chain_store_handle::ChainStoreHandle;
 use crate::shares::share_version::{ShareVersion, next_share_version};
 use crate::shares::transaction_pool::ShareTransactionPool;
 use crate::shares::validation::tally_share_version_votes;
-use crate::shares::weak::{WeakShare, next_weak_ratio, parent_weak_target};
+use crate::shares::weak::{
+    WEAK_DEPTH, WeakShare, keep_within_asks, next_weak_ratio, parent_weak_target, weak_share_asks,
+};
 use crate::shares::weak_pool::WeakPool;
+use crate::store::writer::StoreError;
 use crate::stratum::sv2::PoolTransactionCache;
 use crate::stratum::work::band_policy::{
     POOL_HASHRATE_SHARES, recent_pool_hashrate, share_rate_limit,
 };
 use crate::stratum::work::merge_tokens::{TokenFile, TokenSet};
-use crate::stratum::work::prepared_notify::{PreparedNotifyParams, PreparedNotifyParamsBuilder};
+use crate::stratum::work::prepared_notify::{
+    PreparedNotifyParams, PreparedNotifyParamsBuilder, fit_weak_shares,
+};
 use crate::stratum::work::tracker::JobTracker;
 use p2poolv2_wallet::payout_address::PayoutAddress;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{mpsc, watch};
 use tracing::{debug, error, warn};
@@ -168,8 +174,8 @@ fn build_prepared_notify(
     } else {
         (ShareVersion::CURRENT, BAND_CAP_UNIT, None, None)
     };
-    let (weak_ratio, weak_shares, weak_target) =
-        weak.unwrap_or((crate::shares::weak::GENESIS_WEAK_RATIO, Vec::new(), None));
+    let (weak_ratio, weak_shares, weak_asking, weak_target) =
+        weak.unwrap_or((crate::shares::weak::GENESIS_WEAK_RATIO, Vec::new(), 0, None));
     let share_rate_limit =
         pool_hashrate.and_then(|pool_hashrate| bch_share_rate_limit(template, pool_hashrate));
 
@@ -217,7 +223,7 @@ fn build_prepared_notify(
     .band_cap(band_cap)
     .share_rate_limit(share_rate_limit)
     .target_ceiling(Some(context.pool_difficulty.target_ceiling()))
-    .weak_shares(weak_ratio, weak_shares)
+    .weak_shares(weak_ratio, weak_shares, weak_asking)
     .weak_target(weak_target)
     .pool_hashrate(pool_hashrate)
     .payout_level(context.config.payout_level())
@@ -229,28 +235,96 @@ fn build_prepared_notify(
 /// The weak shares of a Bitcoin Cash template on `mining_base` (`tip`, at
 /// `mining_base_height`): the weak ratio its shares carry, one step from the
 /// mining base's; the weak shares they carry, from the node's weak pool,
-/// oldest parent first; and the mining base's weak target, which jobs at the
-/// minimum turn submissions into weak shares at. Without a weak pool the
-/// shares carry none.
+/// oldest parent first, as many as fit one share
+/// (`prepared_notify::fit_weak_shares`) and more than `WEAK_IDLE_CAP` only
+/// as far as the asking ones allow (`shares::weak::keep_within_asks`); how
+/// many of those ask for an easier weak target ([`asking_weak_shares`]); and
+/// the mining base's weak target, which jobs at the minimum turn submissions
+/// into weak shares at. Without a weak pool the shares carry none.
+///
+/// A share commits how many of its weak shares ask, so when that cannot be
+/// counted, a parent's header failing to read, the shares carry none, which
+/// is always valid.
 fn template_weak_shares(
     mining_base: &crate::shares::share_block::ShareHeader,
     tip: bitcoin::BlockHash,
     mining_base_height: u32,
     context: &NotifyContext,
-) -> (u32, Vec<WeakShare>, Option<bitcoin::Target>) {
-    let weak_shares = context
-        .weak_pool
-        .as_ref()
-        .map(|pool| pool.select_for_share(tip, mining_base_height))
-        .unwrap_or_default();
-    (
-        next_weak_ratio(mining_base.weak_ratio, mining_base.weak_count),
+) -> (u32, Vec<WeakShare>, u16, Option<bitcoin::Target>) {
+    let ceiling = context.pool_difficulty.target_ceiling();
+    let weak_target = parent_weak_target(mining_base, ceiling);
+    let weak_shares = fit_weak_shares(
+        context
+            .weak_pool
+            .as_ref()
+            .map(|pool| pool.select_for_share(tip, mining_base_height))
+            .unwrap_or_default(),
+    );
+    let (weak_shares, weak_asking) = match asking_weak_shares(
         weak_shares,
-        Some(parent_weak_target(
-            mining_base,
-            context.pool_difficulty.target_ceiling(),
-        )),
+        (tip, weak_target),
+        ceiling,
+        &context.chain_store_handle,
+    ) {
+        Ok(offered) => {
+            let kept = keep_within_asks(offered);
+            let weak_asking = kept.iter().filter(|(_, asks)| *asks).count();
+            (
+                kept.into_iter().map(|(weak_share, _)| weak_share).collect(),
+                //* At most WEAK_CAP, 640, of them.
+                weak_asking as u16,
+            )
+        }
+        Err(error) => {
+            debug!("No weak shares for a share on {tip}: cannot count the ones asking: {error}");
+            (Vec::new(), 0)
+        }
+    };
+    (
+        next_weak_ratio(
+            mining_base.weak_ratio,
+            mining_base.weak_count,
+            mining_base.weak_asking,
+        ),
+        weak_shares,
+        weak_asking,
+        Some(weak_target),
     )
+}
+
+/// `weak_shares`, each with whether it asks for an easier weak target
+/// (`shares::weak::weak_share_asks`): whether its `wanted_bits` is easier
+/// than the weak target it met, its own parent's. A share carrying them
+/// commits the number asking as `weak_asking`, exactly as every node counts
+/// it when it validates that share.
+///
+/// `mining_base` is the mining base's hash and its weak target, already in
+/// hand; the header of each other parent is read once, at most `WEAK_DEPTH`
+/// of them.
+fn asking_weak_shares(
+    weak_shares: Vec<WeakShare>,
+    mining_base: (bitcoin::BlockHash, bitcoin::Target),
+    ceiling: bitcoin::CompactTarget,
+    chain_store_handle: &ChainStoreHandle,
+) -> Result<Vec<(WeakShare, bool)>, StoreError> {
+    let mut weak_targets = HashMap::with_capacity(WEAK_DEPTH as usize);
+    weak_targets.insert(mining_base.0, mining_base.1);
+    let mut offered = Vec::with_capacity(weak_shares.len());
+    for weak_share in weak_shares {
+        let parent = weak_share.header.prev_share_blockhash;
+        let weak_target = match weak_targets.get(&parent) {
+            Some(weak_target) => *weak_target,
+            None => {
+                let parent_header = chain_store_handle.get_share_header(&parent)?;
+                let weak_target = parent_weak_target(&parent_header, ceiling);
+                weak_targets.insert(parent, weak_target);
+                weak_target
+            }
+        };
+        let asks = weak_share_asks(&weak_share.header, weak_target);
+        offered.push((weak_share, asks));
+    }
+    Ok(offered)
 }
 
 /// The Bitcoin Cash pool's hashrate from the newest
@@ -296,7 +370,9 @@ fn merge_token_payouts(
     let Some(merge_tokens) = merge_tokens else {
         return Ok((output_distribution, None));
     };
-    if let Err(reason) = template_meets_token_asert(template, &context.config) {
+    if let Err(reason) =
+        template_meets_token_asert(template, &context.config, &context.chain_store_handle)
+    {
         warn!(
             "Template at height {} fails the ASERT band token shares must meet ({reason}); it is mined without merge-mined tokens",
             template.height
@@ -332,20 +408,38 @@ fn merge_token_payouts(
     Ok((payouts, Some(merge_tokens)))
 }
 
-/// Whether a token share mined on `template` would pass the ASERT check
-/// peers run on token shares (`validate_token_share_asert`): its nBits at
-/// its height, with its `curtime` standing in for the header's time. A
-/// network without an ASERT anchor (regtest, scalenet) always passes.
+/// Whether a token share mined on `template` would pass the ASERT checks
+/// peers run on token shares (`validate_token_share_asert`): its nBits after
+/// its previous block, with its `curtime` standing in for the header's time.
+/// Peers check it at the header gate with the network's pins by height, and
+/// in block validation with the previous block's own ticks and interval, so
+/// it must pass both: the second where this node knows that block's header.
+/// A network without an ASERT anchor (regtest, scalenet) always passes.
 fn template_meets_token_asert(
     template: &BlockTemplate,
     config: &StratumConfig<crate::config::Parsed>,
+    chain_store_handle: &ChainStoreHandle,
 ) -> Result<(), String> {
     let Some(asert) = config.bitcoin_cash_network.and_then(BchAsert::for_network) else {
         return Ok(());
     };
     let bits = bitcoin::pow::CompactTarget::from_unprefixed_hex(&template.bits)
         .map_err(|error| format!("template bits {}: {error}", template.bits))?;
-    asert.check_header_bits(bits, template.curtime, u64::from(template.height))
+    let height = u64::from(template.height);
+    asert.check_header_bits(bits, template.curtime, height, None)?;
+    let prev = template
+        .previousblockhash
+        .parse::<bitcoin::BlockHash>()
+        .map_err(|error| format!("template previous block: {error}"))?;
+    let known_prev = chain_store_handle
+        .get_bch_header(&prev)
+        .map_err(|error| format!("reading header {prev}: {error}"))?;
+    match known_prev {
+        Some(known) => {
+            asert.check_header_bits(bits, template.curtime, height, Some(known.tick_info()))
+        }
+        None => Ok(()),
+    }
 }
 
 /// The address a miner's own `donation=` choice pays: the network's built-in
@@ -563,6 +657,7 @@ mod tests {
     use crate::config::BitcoinCashNetwork;
     use crate::pool_difficulty::AsertParent;
     use crate::shares::bch_asert::{U256, get_compact};
+    use crate::shares::bch_headers::KnownBchHeader;
     use crate::stratum::messages::Notify;
     use crate::stratum::work::block_template::{BlockTemplate, TemplateTransaction};
     use crate::stratum::work::coinbase::extract_outputs_from_coinbase2;
@@ -572,6 +667,7 @@ mod tests {
     use crate::stratum::work::tracker::{JobId, start_tracker_actor};
     use crate::test_utils::genesis_for_tests;
     use crate::test_utils::make_test_share_address;
+    use bitcoin::CompactTarget;
     use bitcoin::CompressedPublicKey;
     use bitcoin::hashes::Hash;
     use bitcoin::{Address, Amount, Network, ScriptBuf, TxOut};
@@ -1268,6 +1364,15 @@ mod tests {
         assert_eq!(extracted_txouts[4].value, Amount::ZERO);
     }
 
+    /// A store that knows `known` as every block's header.
+    fn store_knowing_bch(known: Option<KnownBchHeader>) -> ChainStoreHandle {
+        let mut chain_store_handle = ChainStoreHandle::default();
+        chain_store_handle
+            .expect_get_bch_header()
+            .returning(move |_| Ok(known));
+        chain_store_handle
+    }
+
     /// A template whose nBits fail the token ASERT band gets no tokens: its
     /// token shares would be refused by every peer. Regtest has no anchor.
     #[test]
@@ -1279,24 +1384,70 @@ mod tests {
         let chipnet = BchAsert::CHIPNET;
         template.height = chipnet.anchor_height + 1 + 120;
         template.curtime = (chipnet.anchor_parent_time + 600) as u32;
-        let computed = chipnet
-            .next_target(template.height - 1, template.curtime)
-            .unwrap();
+        let parent = chipnet.tick_schedule.tick_info(template.height - 1);
+        let computed = chipnet.next_target(parent, template.curtime).unwrap();
         let mut config = StratumConfig::new_for_test_default().parse().unwrap();
         config.bitcoin_cash_network = Some(BitcoinCashNetwork::Chipnet);
+        let unknown = store_knowing_bch(None);
 
         template.bits = format!("{:08x}", get_compact(computed).to_consensus());
-        template_meets_token_asert(&template, &config).unwrap();
+        template_meets_token_asert(&template, &config, &unknown).unwrap();
         template.bits = format!(
             "{:08x}",
             get_compact(computed / U256::from(16)).to_consensus()
         );
         assert!(
-            template_meets_token_asert(&template, &config)
+            template_meets_token_asert(&template, &config, &unknown)
                 .unwrap_err()
                 .contains("harder")
         );
         config.bitcoin_cash_network = Some(BitcoinCashNetwork::Regtest);
-        template_meets_token_asert(&template, &config).unwrap();
+        template_meets_token_asert(&template, &config, &unknown).unwrap();
+    }
+
+    /// Peers check a token share at the header gate by the pins and in block
+    /// validation by its previous block's own ticks: a template must pass
+    /// both. Here the known previous block has a one-minute next block where
+    /// the pins say ten minutes, so the pins' nBits are ten times harder than
+    /// the known block requires, past the band, and the template gets no
+    /// tokens.
+    #[test]
+    fn token_jobs_follow_the_known_previous_blocks_ticks_too() {
+        let data = include_str!(
+            "../../../../p2poolv2_tests/test_data/gbt/regtest/ckpool/one-txn/gbt.json"
+        );
+        let mut template: BlockTemplate = serde_json::from_str(data).unwrap();
+        let chipnet = BchAsert::CHIPNET;
+        template.height = chipnet.anchor_height + 1 + 120;
+        template.curtime = (chipnet.anchor_parent_time + 600) as u32;
+        let pinned = chipnet.tick_schedule.tick_info(template.height - 1);
+        let computed = chipnet.next_target(pinned, template.curtime).unwrap();
+        template.bits = format!("{:08x}", get_compact(computed).to_consensus());
+        let mut config = StratumConfig::new_for_test_default().parse().unwrap();
+        config.bitcoin_cash_network = Some(BitcoinCashNetwork::Chipnet);
+        let prev_header = bitcoin::block::Header {
+            version: bitcoin::block::Version::from_consensus(0x2000_0000),
+            prev_blockhash: bitcoin::BlockHash::all_zeros(),
+            merkle_root: bitcoin::TxMerkleNode::all_zeros(),
+            time: template.curtime,
+            bits: CompactTarget::from_consensus(0x1d00_ffff),
+            nonce: 0,
+        };
+        let same = KnownBchHeader {
+            height: template.height - 1,
+            header: prev_header,
+            ticks: pinned.ticks,
+            next_interval: pinned.next_interval,
+        };
+        template_meets_token_asert(&template, &config, &store_knowing_bch(Some(same))).unwrap();
+        let one_minute = KnownBchHeader {
+            next_interval: 60,
+            ..same
+        };
+        assert!(
+            template_meets_token_asert(&template, &config, &store_knowing_bch(Some(one_minute)))
+                .unwrap_err()
+                .contains("harder")
+        );
     }
 }

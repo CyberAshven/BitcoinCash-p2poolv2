@@ -6,9 +6,10 @@ use crate::pool_difficulty::AsertParent;
 #[mockall_double::double]
 use crate::pool_difficulty::PoolDifficulty;
 use crate::shares::validation::{BLOCK_TXS_SIZE_LIMIT, MockDefaultShareValidator, ValidationError};
+use crate::shares::weak::PrunedWeakShares;
 use crate::store::block_tx_metadata::{BlockMetadata, ChainMembership};
 use crate::store::writer::StoreError;
-use crate::test_utils::TestShareBlockBuilder;
+use crate::test_utils::{TestShareBlockBuilder, test_weak_share_on};
 use bitcoin::CompactTarget;
 use bitcoin::hashes::Hash;
 use p2poolv2_wallet::share_owner::ShareOwner;
@@ -702,6 +703,51 @@ async fn test_process_share_block_below_prune_height_is_dropped() {
         BlockFetcherEvent::BlockRequestCompleted(hash) => assert_eq!(hash, block_hash),
         other => panic!("Expected BlockRequestCompleted, got: {other}"),
     }
+    assert!(validation_rx.try_recv().is_err());
+}
+
+/// A body served with its weak shares pruned is dropped without being
+/// stored when the share is inside this node's payout depth: there it is
+/// checked with its weak shares whole, and the hash stays fetchable.
+#[tokio::test]
+async fn test_process_share_block_with_pruned_weak_shares_inside_the_payout_depth_is_dropped() {
+    let mut mock_store = ChainStoreHandle::default();
+    mock_store
+        .expect_get_candidate_tip_height()
+        .returning(|| Ok(Some(100)));
+    mock_store.expect_get_block_metadata().returning(|_| {
+        Ok(BlockMetadata {
+            expected_height: Some(90),
+            chain_work: bitcoin::Work::from_be_bytes([0u8; 32]),
+            status: Status::HeaderValid,
+            chain: ChainMembership::Candidate,
+        })
+    });
+    mock_store
+        .expect_add_share_block_and_organise_header()
+        .never();
+
+    let (_, event_rx) = create_block_receiver_channel();
+    let (block_fetcher_handle, _block_fetcher_rx) = block_fetcher::create_block_fetcher_channel();
+    let (validation_tx, mut validation_rx) = validation_worker::create_validation_channel();
+    let mut receiver = BlockReceiver::new(
+        event_rx,
+        Arc::new(MockDefaultShareValidator::default()),
+        mock_store,
+        block_fetcher_handle,
+        validation_tx,
+    );
+    let mut block = TestShareBlockBuilder::new()
+        .share_owner(ShareOwner::CashP2pkh([0x22; 20]))
+        .weak_shares(vec![test_weak_share_on(BlockHash::all_zeros(), 1)])
+        .build();
+    block.pruned_weak_shares = Some(PrunedWeakShares::of(&block.weak_shares));
+    block.weak_shares.clear();
+
+    let result = receiver.process_share_block(block).await;
+
+    assert!(result.is_ok(), "Expected Ok, got: {}", result.unwrap_err());
+    assert_eq!(receiver.pending_count(), 0);
     assert!(validation_rx.try_recv().is_err());
 }
 
@@ -1895,6 +1941,8 @@ async fn process_bch_block_with_prev(prev_known: bool) -> bool {
     let known = KnownBchHeader {
         height: 10,
         header: TestShareBlockBuilder::new().build().header.bitcoin_header,
+        ticks: 6_000,
+        next_interval: 600,
     };
     mock_store
         .expect_get_bch_header()
@@ -2295,10 +2343,11 @@ fn test_validate_asert_refuses_a_minimum_other_than_the_asert_target() {
     );
 }
 
-/// A share whose node wanted a target easier than its own is refused at
-/// block receipt.
+/// A share whose node wanted a target easier than its own is accepted at
+/// block receipt: `wanted_bits` is a signal only, and easier it asks for an
+/// easier weak target (`shares::weak::weak_share_asks`).
 #[test]
-fn test_validate_asert_refuses_wanted_bits_easier_than_bits() {
+fn test_validate_asert_accepts_wanted_bits_easier_than_bits() {
     let parent = TestShareBlockBuilder::new()
         .share_owner(ShareOwner::CashP2pkh([0x22; 20]))
         .bits(CompactTarget::from_consensus(0x1c40_0000))
@@ -2355,12 +2404,9 @@ fn test_validate_asert_refuses_wanted_bits_easier_than_bits() {
         validation_tx,
     );
 
-    let error = receiver.validate_asert(&child).unwrap_err().to_string();
+    let result = receiver.validate_asert(&child);
 
-    assert!(
-        error.contains("wanted bits 0x1c200000 are easier than the share's bits 0x1c100000"),
-        "{error}"
-    );
+    assert!(result.is_ok(), "{}", result.unwrap_err());
 }
 
 //* Header-check forwarding: a share a peer sent is relayed once it passes

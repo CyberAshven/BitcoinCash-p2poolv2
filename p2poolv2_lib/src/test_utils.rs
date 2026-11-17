@@ -1833,6 +1833,30 @@ pub fn build_test_weak_share_paying(
     weak: TestWeakShare<'_>,
     coinbase_value: u64,
 ) -> crate::shares::weak::WeakShare {
+    let wanted_bits = weak.bits;
+    build_test_weak_share_with(weak, coinbase_value, wanted_bits)
+}
+
+/// A weak share as [`build_test_weak_share`] builds it, whose node wanted
+/// `wanted_bits` for its miner instead of its own bits: easier than the weak
+/// target it meets, it asks for an easier one
+/// (`shares::weak::weak_share_asks`).
+#[cfg(test)]
+pub fn build_test_weak_share_wanting(
+    weak: TestWeakShare<'_>,
+    wanted_bits: CompactTarget,
+) -> crate::shares::weak::WeakShare {
+    build_test_weak_share_with(weak, 5_000_000_000, wanted_bits)
+}
+
+/// A weak share as [`build_test_weak_share`] builds it, paying
+/// `coinbase_value` satoshis and committing `wanted_bits`.
+#[cfg(test)]
+fn build_test_weak_share_with(
+    weak: TestWeakShare<'_>,
+    coinbase_value: u64,
+    wanted_bits: CompactTarget,
+) -> crate::shares::weak::WeakShare {
     let owner = [0x33; 20];
     let payout: PayoutAddress = Address::p2pkh(
         bitcoin::PubkeyHash::from_byte_array(owner),
@@ -1855,11 +1879,12 @@ pub fn build_test_weak_share_paying(
         pool_merge_mining: None,
         share_version: crate::shares::share_version::ShareVersion::CURRENT,
         asert_bits: weak.minimum,
-        wanted_bits: weak.bits,
+        wanted_bits,
         band_cap: crate::shares::band::BAND_CAP_UNIT,
         payout_level: MIN_PAYOUT_LEVEL,
         weak_ratio: weak.weak_ratio,
         weak_count: 0,
+        weak_asking: 0,
         weak_root: crate::shares::weak::empty_weak_root(),
     };
     let mut header = ShareHeader::from_commitment_and_header(
@@ -2111,6 +2136,7 @@ pub fn create_test_commitment() -> ShareCommitment {
         payout_level: 0,
         weak_ratio: 0,
         weak_count: 0,
+        weak_asking: 0,
         weak_root: crate::shares::weak::empty_weak_root(),
     }
 }
@@ -2273,6 +2299,7 @@ pub fn build_token_win_submit(
                             &result.coinbase,
                             &job.template_merkle_branches,
                             None,
+                            None,
                         )
                         .is_empty()
                 },
@@ -2361,6 +2388,7 @@ pub fn build_block_from_work_components(path: &str, nsecs: u64) -> ShareBlock {
         payout_level: 0,
         weak_ratio: 0,
         weak_count: 0,
+        weak_asking: 0,
         weak_root: crate::shares::weak::empty_weak_root(),
     };
     let commitment_hash = share_commitment.hash();
@@ -2430,6 +2458,7 @@ pub fn build_block_from_work_components(path: &str, nsecs: u64) -> ShareBlock {
         payout_level: 0,
         weak_ratio: 0,
         weak_count: 0,
+        weak_asking: 0,
         weak_root: crate::shares::weak::empty_weak_root(),
     };
 
@@ -2445,6 +2474,7 @@ pub fn build_block_from_work_components(path: &str, nsecs: u64) -> ShareBlock {
         template_merkle_branches,
         bitcoin_coinbase,
         weak_shares: Vec::new(),
+        pruned_weak_shares: None,
     }
 }
 
@@ -2467,6 +2497,7 @@ pub struct TestShareBlockBuilder {
     payout_level: u8,
     weak_ratio: Option<u32>,
     weak_shares: Vec<crate::shares::weak::WeakShare>,
+    weak_asking: u16,
 }
 
 /// The donation and fee a test share commits, in its header and in the
@@ -2641,6 +2672,13 @@ impl TestShareBlockBuilder {
         self
     }
 
+    /// Commit this many of the carried weak shares as asking for an easier
+    /// weak target (`ShareHeader::weak_asking`) instead of none.
+    pub fn weak_asking(mut self, weak_asking: u16) -> Self {
+        self.weak_asking = weak_asking;
+        self
+    }
+
     pub fn build(self) -> ShareBlock {
         let default_pubkey_hex =
             "020202020202020202020202020202020202020202020202020202020202020202";
@@ -2689,6 +2727,7 @@ impl TestShareBlockBuilder {
             TestShareWeak {
                 weak_ratio: self.weak_ratio,
                 weak_shares: self.weak_shares,
+                weak_asking: self.weak_asking,
             },
         )
     }
@@ -2712,27 +2751,33 @@ pub fn test_weak_share_on(parent: BlockHash, nonce: u32) -> crate::shares::weak:
     }
 }
 
-/// The weak shares a test share carries and the weak ratio it commits.
+/// The weak shares a test share carries, how many of them it commits as
+/// asking and the weak ratio it commits.
 #[cfg(any(test, feature = "test-utils"))]
 struct TestShareWeak {
     weak_ratio: Option<u32>,
     weak_shares: Vec<crate::shares::weak::WeakShare>,
+    weak_asking: u16,
 }
 
 #[cfg(any(test, feature = "test-utils"))]
 impl TestShareWeak {
-    /// The weak ratio, count and root a share owned by `share_owner`
-    /// commits: the set ratio or the genesis ratio, and its carried weak
-    /// shares, on Bitcoin Cash; zero on Bitcoin, which carries none.
-    fn commitment_fields(&self, share_owner: &ShareOwner) -> (u32, u16, sha256d::Hash) {
+    /// The weak ratio, count, number asking and root a share owned by
+    /// `share_owner` commits: the set ratio or `R_MAX`, and its carried weak
+    /// shares, on Bitcoin Cash; zero on Bitcoin, which carries none. A
+    /// parent at `R_MAX` carrying no weak shares keeps its ratio
+    /// (`shares::weak::next_weak_ratio`), so a test chain of such shares
+    /// keeps the weak ratio rule without setting it.
+    fn commitment_fields(&self, share_owner: &ShareOwner) -> (u32, u16, u16, sha256d::Hash) {
         match share_owner {
             ShareOwner::CashP2pkh(_) => (
                 self.weak_ratio
-                    .unwrap_or(crate::shares::weak::GENESIS_WEAK_RATIO),
+                    .unwrap_or(crate::shares::weak::WEAK_RATIO_MAX),
                 self.weak_shares.len() as u16,
+                self.weak_asking,
                 crate::shares::weak::weak_root(&self.weak_shares),
             ),
-            _ => (0, 0, crate::shares::weak::empty_weak_root()),
+            _ => (0, 0, 0, crate::shares::weak::empty_weak_root()),
         }
     }
 }
@@ -2770,6 +2815,7 @@ pub fn empty_share_block_from_header(header: ShareHeader) -> ShareBlock {
         template_merkle_branches: vec![],
         bitcoin_coinbase: empty_bitcoin_coinbase(),
         weak_shares: Vec::new(),
+        pruned_weak_shares: None,
     }
 }
 
@@ -2784,6 +2830,7 @@ pub fn valid_share_block_from_fixture() -> ShareBlock {
         template_merkle_branches: vec![],
         bitcoin_coinbase: empty_bitcoin_coinbase(),
         weak_shares: Vec::new(),
+        pruned_weak_shares: None,
     }
 }
 
@@ -2819,7 +2866,7 @@ fn test_share_block(
         0x01e0377ae * work.unwrap_or(1),
     ));
     let share_band = band.unwrap_or_else(|| TestShareBand::default_for(share_owner, share_bits));
-    let (weak_ratio, weak_count, weak_root) = weak.commitment_fields(share_owner);
+    let (weak_ratio, weak_count, weak_asking, weak_root) = weak.commitment_fields(share_owner);
     let share_time = time.unwrap_or(1700000000u32);
     let prev_blockhash = BlockHash::from_str(prev_share_blockhash).unwrap();
 
@@ -2861,6 +2908,7 @@ fn test_share_block(
                 payout_level,
                 weak_ratio,
                 weak_count,
+                weak_asking,
                 weak_root,
             };
 
@@ -2942,6 +2990,7 @@ fn test_share_block(
         payout_level,
         weak_ratio,
         weak_count,
+        weak_asking,
         weak_root,
     };
 
@@ -2951,6 +3000,7 @@ fn test_share_block(
         template_merkle_branches: vec![],
         bitcoin_coinbase,
         weak_shares: weak.weak_shares,
+        pruned_weak_shares: None,
     }
 }
 
@@ -3036,6 +3086,7 @@ impl TestShareHeaderBuilder {
             payout_level: 0,
             weak_ratio: 0,
             weak_count: 0,
+            weak_asking: 0,
             weak_root: crate::shares::weak::empty_weak_root(),
         }
     }

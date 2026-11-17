@@ -1167,6 +1167,62 @@ impl ChainStoreHandle {
         Ok(())
     }
 
+    /// Delete the whole weak shares at heights `[from, target)`, one writer
+    /// command per `PRUNE_INTERVAL` heights as `prune_block_bodies` does.
+    /// Returns how many blocks lost them.
+    pub async fn prune_weak_shares(&self, from: u32, target: u32) -> Result<usize, StoreError> {
+        let mut pruned = 0;
+        let mut chunk_start = from;
+        while chunk_start < target {
+            let chunk_end = chunk_start
+                .saturating_add(PRUNE_INTERVAL as u32)
+                .min(target);
+            pruned += self
+                .store_handle
+                .prune_weak_shares_chunk(chunk_start, chunk_end)
+                .await?;
+            chunk_start = chunk_end;
+        }
+        Ok(pruned)
+    }
+
+    /// Prune whole weak shares below the weak share prune target when due,
+    /// one payout depth below the confirmed tip
+    /// (`Store::weak_share_prune_target`), keeping their leaf root and
+    /// summary with the body. Nothing to do on a store that keeps them
+    /// (`store.keep_whole_weak_shares`).
+    ///
+    /// Gated like `prune_block_bodies_if_due`, while the node is current.
+    /// `next_weak_prune_start` holds where the previous run stopped; on the
+    /// first run it is the body prune target, below which no body is left.
+    pub async fn prune_weak_shares_if_due(
+        &self,
+        next_weak_prune_start: &mut Option<u32>,
+    ) -> Result<(), StoreError> {
+        let store = self.store_handle.store();
+        let Some(weak_share_prune_target) = store.weak_share_prune_target()? else {
+            return Ok(());
+        };
+        let Some(range) = get_range_to_prune(
+            self.is_current(),
+            weak_share_prune_target,
+            *next_weak_prune_start,
+            |_| store.prune_target(),
+        )?
+        else {
+            return Ok(());
+        };
+
+        let pruned = self.prune_weak_shares(range.start, range.end).await?;
+        *next_weak_prune_start = Some(range.end);
+        info!(
+            "Pruned whole weak shares at heights {}..{}: {pruned} blocks keep only their summary",
+            range.start, range.end
+        );
+
+        Ok(())
+    }
+
     /// Store the coinbase merkle branches of a batch of synced headers, so
     /// headers held without their bodies can be served on with their proofs.
     pub async fn add_header_template_merkle_branches(
@@ -1331,6 +1387,8 @@ mockall::mock! {
         pub fn find_prune_start(&self, target: u32) -> Result<u32, StoreError>;
         pub async fn prune_block_bodies(&self, from: u32, target: u32) -> Result<PruneStats, StoreError>;
         pub async fn prune_block_bodies_if_due(&self, next_prune_start: &mut Option<u32>) -> Result<(), StoreError>;
+        pub async fn prune_weak_shares(&self, from: u32, target: u32) -> Result<usize, StoreError>;
+        pub async fn prune_weak_shares_if_due(&self, next_weak_prune_start: &mut Option<u32>) -> Result<(), StoreError>;
         pub async fn add_header_template_merkle_branches(&self, entries: Vec<(BlockHash, Vec<TxMerkleNode>)>) -> Result<(), StoreError>;
         pub fn get_template_merkle_branches(&self, blockhash: &BlockHash) -> Result<Vec<TxMerkleNode>, StoreError>;
         pub async fn promote_block(&self, header: ShareHeader) -> Result<Option<u32>, StoreError>;

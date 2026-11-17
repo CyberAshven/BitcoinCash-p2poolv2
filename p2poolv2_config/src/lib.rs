@@ -1445,6 +1445,13 @@ pub struct StoreConfig {
     /// Time-to-live for PPLNS shares (in days)
     #[serde(default = "default_pplns_ttl_days")]
     pub pplns_ttl_days: u64,
+    /// Keep the whole weak shares a Bitcoin Cash share carries until its body
+    /// is pruned, two payout depths below the tip, as an explorer or an
+    /// archive wants. By default (false) they are pruned one payout depth
+    /// below the tip, and their leaf root and summary stay with the body;
+    /// either way the node serves every body a syncing peer asks for.
+    #[serde(default)]
+    pub keep_whole_weak_shares: bool,
 }
 
 fn default_wait_for_chain_sync() -> bool {
@@ -1667,6 +1674,13 @@ pub struct SimConfig {
     /// default, so other sim runs keep pacing by the share target.
     #[serde(default)]
     pub weak_shares: bool,
+    /// Bitcoin Cash: with `weak_shares`, every job this node's miner mines at
+    /// the minimum wants a target twice as easy as its weak target, never
+    /// easier than the chain's ceiling, so its weak shares ask for an easier
+    /// one whatever the node's default would ask. For the end-to-end check of
+    /// the weak shares that ask; off by default, so the miner wants its bits.
+    #[serde(default)]
+    pub weak_asks: bool,
     /// Bitcoin Cash: of the share blocks this node broadcasts that carry weak
     /// shares, every this many goes out with its first weak share's coinbase
     /// value one satoshi higher, as a peer serving an altered copy of an
@@ -2085,6 +2099,19 @@ mod tests {
             .with_pplns_ttl_days(9);
 
         assert_eq!(config.store.pplns_ttl_days, 9);
+    }
+
+    /// A node prunes whole weak shares at one payout depth unless its config
+    /// keeps them, as an explorer or an archive does.
+    #[test]
+    fn whole_weak_shares_are_pruned_unless_the_store_keeps_them() {
+        let config = Config::load("../config.sample.toml").unwrap();
+        assert!(!config.store.keep_whole_weak_shares, "sample default");
+
+        with_var("P2POOL_STORE__KEEP_WHOLE_WEAK_SHARES", Some("true"), || {
+            let config = Config::load("../config.sample.toml").unwrap();
+            assert!(config.store.keep_whole_weak_shares, "archive setting");
+        });
     }
 
     /// Characterisation tests for environment-variable overrides.

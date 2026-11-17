@@ -3,7 +3,7 @@
 Status: parts 1 and 2 implemented on branch feat/one-chain-band; part 4
 implemented on branch feat/payout-levels, on top of it (store format 4);
 part 3 on branch feat/weak-shares, on top of both (store format 5); part 5
-is an outline that is not planned, and part 6 is agreed and not built.
+is an outline that is not planned, and part 6 is built (PR #118, a flag day).
 Tracked in
 [issue #79](https://github.com/CyberAshven/BitcoinCash-p2poolv2/issues/79).
 Values marked *(sim)* are first proposals that the simulation in row 2 of the
@@ -17,7 +17,7 @@ chain, the outline of a fifth and the proposal of a sixth:
 3. weak shares;
 4. payout levels, a payout threshold paid by a draw;
 5. a dynamic share period (outline only);
-6. weak shares that follow the asks (agreed, not built).
+6. weak shares that follow the asks (built, PR #118).
 
 Parts 1 to 4 change share-chain rules. None of them changes Bitcoin Cash's
 own rules: the blocks P2Pool finds stay ordinary Bitcoin Cash blocks, and
@@ -112,8 +112,11 @@ Each Bitcoin Cash share header gains three fields:
 
 All three are committed in the share commitment after the share version (tag
 byte `0x24`, then the 4-byte compact `wanted_bits`, the 4-byte `band_cap` and
-the 4-byte compact `asert_bits`), so the proof of work fixes them. `wanted_bits` must be at least as hard as `bits`; it
-is a signal only and never makes a share valid or invalid beyond that. Carrying
+the 4-byte compact `asert_bits`), so the proof of work fixes them. `wanted_bits`
+is a signal only and never makes a share valid or invalid. It may be easier
+than `bits`: a weak share whose `wanted_bits` is easier than the weak target
+it met asks (section 6), and until the asks it had to be at least as hard as
+`bits`. Carrying
 `band_cap` in the header lets a node check it from the parent's header alone,
 during header sync as well as full validation, with no walk back to genesis.
 In the rule above, `C(parent)` is therefore read as the share's own `band_cap`,
@@ -276,7 +279,7 @@ one step from its parent's:
 ```text
 weak_ratio:  R in units of 1/1024, from 1024 (R = 1) to R_MAX * 1024
 
-weak_ratio(genesis) = R_MAX * 1024
+weak_ratio(genesis) = 32 * 1024           (R_MAX * 1024 until part 6)
 weak_ratio(child)   = parent.weak_ratio - parent.weak_ratio / 256
                         if the parent carried more than WEAK_FILL weak shares
 weak_ratio(child)   = parent.weak_ratio + parent.weak_ratio / 256
@@ -297,16 +300,20 @@ already at the ceiling, weak shares are simply never needed.
 | Constant | Value |
 |---|---|
 | `R_MAX` | 256 (4096 until study #85) |
-| `WEAK_CAP` | 64 weak shares per share *(sim)* |
-| `WEAK_FILL` | 32, half the cap *(sim)* |
-| `WEAK_BYTES` | 96 KiB of weak shares per share *(sim)* |
+| `WEAK_CAP` | 640 weak shares per share, twice `WEAK_FILL_MAX` (64 until part 6), and more than `WEAK_IDLE_CAP` only while the asks allow (section 6) |
+| `WEAK_IDLE_CAP` | 64: the most a share carries unless more than one in 64 of its weak shares ask |
+| `WEAK_FILL` | 32: the weak ratio steps towards it while nobody asks |
+| `WEAK_BYTES` | 960 KiB of weak shares per share (96 KiB until part 6) |
+| `WEAK_FILL_MAX`, `WEAK_ASK_DIVISOR`, `R_ASK_MAX` | 320, 64 and 4096: the asks (section 6) |
 | `WEAK_DEPTH` | 48: a weak share's parent at most 48 shares below the share that carries it, 8 minutes at 10-second shares (6 until study #85) |
 | `INCLUDER_CUT` | 100 basis points (1%; 500 until study #85): at `WEAK_DEPTH` 48, refusing to carry others' weak shares gains a coalition of 90% of the hashrate at most 0.06%, and costs a half-hashrate coalition 0.2 to 0.3% of its income and a lone refusing node 0.2 to 0.9% |
 
 `WEAK_DEPTH` 48 costs a node memory and some reading. Its weak pool holds at
-most 4 × 64 × 48 = 12,288 weak shares, about 18 MB at the 1.5 KiB average
-`WEAK_BYTES` allows, and at most 3,072 (4.5 MiB) waiting for parents it does
-not have; a share's carried-once check reads the weak shares of up to 47
+most 4 × 640 × 48 = 122,880 weak shares, about 180 MB at the 1.5 KiB average
+`WEAK_BYTES` allows, and at most 30,720 (45 MiB) waiting for parents it does
+not have (12,288 and 3,072 with 64 a share, before part 6); it starts with
+room for the 12,288 and grows only while the asks open the count. A share's
+carried-once check reads the weak shares of up to 47
 ancestors. In steady state the next share carries almost every weak share,
 so the pool holds far fewer. A weak share, like a share, needs only a known
 Bitcoin Cash prev, so waiting does not make it stale.
@@ -638,11 +645,12 @@ shares a share do not buy without the stale shares. This part stays an
 outline. Section 6 proposes how the number of weak shares should grow with
 a pool.
 
-## 6. Weak shares that follow the asks (agreed, not built)
+## 6. Weak shares that follow the asks
 
 This section gives a rule and its simulation. The maintainer chose it on
-2026-11-14, with the constants below, over raising `WEAK_FILL` once. It is
-not yet a rule of the chain: nothing in it is built.
+2026-11-14, with the constants below, over raising `WEAK_FILL` once, and on
+2026-11-16 the cap that follows the asks and the genesis ratio of 32 below.
+PR #118 builds it; it is not yet a rule of the chain.
 
 ### Why
 
@@ -707,7 +715,9 @@ never below 1024
 | `WEAK_FILL` | 32, unchanged: the count the ratio steers towards without asks |
 | `WEAK_FILL_MAX` | 320 *(sim)*: asks stop counting once a share carries more |
 | `WEAK_CAP` | 640, twice `WEAK_FILL_MAX` (64 today) |
+| `WEAK_IDLE_CAP` | 64, today's cap: more only while more than one in 64 of the carried weak shares ask |
 | `WEAK_ASK_DIVISOR` | 64 *(sim)*: more than one carried weak share in 64 must ask |
+| genesis ratio | 32 (`R_MAX`, 256, today) |
 | `R_MAX` | 256, unchanged: the largest ratio without asks |
 | `R_ASK_MAX` | 4,096 *(sim)*: the largest ratio asks may reach |
 
@@ -720,11 +730,51 @@ Today's rule is the floor, and 320 a share is what every node must be able
 to carry. A ratio that asks left above `R_MAX` comes back down once nobody
 asks.
 
-One thing differs from today even when nobody asks. A share may carry up to
-640 weak shares, so a share found after a long wait carries all the weak
-shares found on its parent, where today it leaves some to the next shares.
-The step holds the median at 32, and the simulator measures a mean of 46
-weak shares a share without asks against 34.5 today.
+The cap follows the asks too. A share may carry more than 64 weak shares
+only while more than one in 64 of those it carries ask:
+
+```text
+weak_count <= WEAK_CAP
+and (weak_count <= WEAK_IDLE_CAP or weak_asking * WEAK_ASK_DIVISOR > weak_count)
+```
+
+Read from the header alone, so header sync holds it too. A node builds its
+shares to it: it takes the weak shares in its pool oldest parent first, as
+many as fit `WEAK_CAP` and `WEAK_BYTES`, and while they are more than the
+asking ones allow it leaves the newest silent ones for a later share, where
+they expire if no share takes them within `WEAK_DEPTH`. And a new chain
+starts at a weak ratio of 32, not `R_MAX`.
+
+Both came from the first swarm of this rule as first written, with a cap of
+640 whatever the asks and a genesis ratio of 256. From genesis every share
+carried 640 weak shares, the chain slowed under the checking load, slower
+shares carried still more, and the runners ran out of memory, while alpha's
+cap of 64 bounded the same start. The payout simulator's
+`weak-asks-genesis`, `weak-asks-big-miner`, `weak-asks-rules`,
+`weak-asks-rule-mixes` and `weak-asks-rule-attacks` tables run the path
+share by share and five fixes (its rule v4 is this one). With both:
+
+- where nobody asks no share carries more than 64, from genesis or after a
+  big miner joins, and at genesis no weak share expires (the start peaks at
+  36 a share in a pool at a tenth of today's Bitcoin Cash);
+- where more than one weak share in 64 asks every steady state above holds,
+  and the Bitaxe's and the ASIC's pay with it; in a pool at 30% of ten times
+  today's the count takes two hours to open from 32 to 344, the one cost of
+  the low start;
+- where fewer than one in 64 asks, as in the 99% industrial mix at ten times
+  today's hashrate, the count settles at about 50 a share instead of 82 and
+  a Bitaxe in a pool at 30% has 25.2% of its months without a payment
+  instead of 14% (40.5% under today's rule);
+- when the asks stop, a share carries 64 at once: after a big miner leaves
+  a pool at a tenth of ten times today's, 7.1% of the weak shares found in
+  the next six hours expire until the ratio has fallen, and where the asks
+  switch on and off, 1.5%;
+- no attack is worse than under today's rule; diluting the asks bites a
+  little harder than under the cap of 640.
+
+Without asks the step holds the median at 32 and the mean at today's 34.5
+weak shares a share: a share found after a long wait carries at most 64, as
+today.
 
 ### Node default (policy, not a rule)
 
@@ -827,7 +877,7 @@ At the ceiling, against today's count:
 |---|---:|---:|
 | Weak shares a second | 3.5 | 35 |
 | Relay of weak shares, at 0.8 KB each | 2.8 KB/s | 28 KB/s |
-| Stored until the body is pruned (242,486 shares, 28 days) | 6.7 GB | 67 GB |
+| Stored: whole for 121,423 shares (14 days), their summary with the body for 242,534 (28 days) | 4.3 GB | 43 GB |
 | Weak pool, at most (4 x `WEAK_CAP` x `WEAK_DEPTH`) | 12,288 weak shares | 122,880 |
 
 Validation is the real ceiling, not bandwidth. A weak share costs a node
@@ -851,12 +901,12 @@ for one-minute blocks.
 
 Neither is a share-chain rule, and each helps under today's rule too.
 
-1. **Shares list the weak shares they carry by hash on the wire.** Today a
-   share's body carries them whole, and a node that already has them from
-   gossip downloads them again inside the share. On 1,000 nodes at
-   10-second shares and one-minute blocks (`cargo netsim run --nodes 1000
-   --duration 10800 --weak-shares N --weak-share-carriage gossip-only`, or
-   `whole`):
+1. **Shares list the weak shares they carry by hash on the wire** (built,
+   PR #121). Before it a share's body carried them whole, and a node that
+   already had them from gossip downloaded them again inside the share. On
+   1,000 nodes at 10-second shares and one-minute blocks (`cargo netsim run
+   --nodes 1000 --duration 10800 --weak-shares N --weak-share-carriage
+   gossip-only`, or `whole`):
 
    | Weak shares a share | Beside the shares: stale | Upload a node, mean | Whole in the share: share bytes | Stale | Upload a node, mean |
    |---:|---:|---:|---:|---:|---:|
@@ -885,6 +935,11 @@ chose the asks on 2026-11-14, with `WEAK_FILL_MAX` 320, `WEAK_ASK_DIVISOR`
 Section 5, the dynamic share period, is not planned: a shorter period buys
 nothing that more weak shares a share do not.
 
+On 2026-11-16, after the first swarm of the rule ran out of memory from
+genesis, the cap that follows the asks and the genesis ratio of 32 joined
+it: rule v4 of the payout simulator's study of the weak ratio's path
+(section 6's rule above).
+
 It ships on a flag day: a new weak share segment in the protocol tag and
 store format 10, because the header gains `weak_asking`.
 
@@ -897,7 +952,7 @@ store format 10, because the header gains `weak_asking`.
 | 3 Weak shares | `weak-64-500-6`, then `weak2-64-500-6`, then `weak2-64-100-48-256`, then `weak3-64-100-48-256` | 5, then 6, then 7, then 9 | same flag day; old nodes cannot read the new header or the weak share message; the weak root's leaves then became whole encodings, a second flag day, and study #85's cut, depth and `R_MAX` a third |
 | 4 Payout levels | `levels-546x2`, then `levels-546x2-k1` | 4, then 8 | same flag day; old nodes cannot read the longer header |
 | 5 Share period | none; share version 2 | 3 | share-version vote; not planned (section 5) |
-| 6 Weak shares that follow the asks (agreed, not built) | a new weak share segment | 10 | flag day: the header gains `weak_asking` |
+| 6 Weak shares that follow the asks | `weak4-640-100-48-256-320-64-4096-64-32`, then `-summary` appended | 10, then 11 | flag day: the header gains `weak_asking` and a new genesis; the weak root also commits the summary, so whole weak shares are pruned one payout depth below the tip |
 
 A part that changes what a stored share holds raises the store format when
 it merges, so the numbers follow the merge order: part 4 raised it to 4
@@ -1045,6 +1100,26 @@ Still open:
   moves `C` to 48 to 61 with 2% of the pool and to its maximum with 10%, and
   changes nothing home miners are paid: the cap only bounds how heavy a job
   a node may give.
+
+### Study #85: weak work in fork choice
+
+The idea: count each carried weak share's work in fork choice, as uncle work
+counts, so a node that drops other miners' weak shares loses races and the
+includer cut can shrink. The payout simulator's "Study #85" tables tested it
+against nodes refusing to carry others' weak shares.
+
+| Finding | Result |
+|---|---|
+| Weak work in races alone | Races are about 2% of shares: honest weak shares lost move from 4.92% to 4.65% with half the hashrate refusing, and a 90% coalition still gains 2.6 to 4.3% at every cut |
+| What stops a 90% coalition | `WEAK_DEPTH` 48: its gain falls from +2.7 to +4.2% at depth 6 to +0.03 to +0.04%, honest losses from 56% to 1.2%, and the Bitaxe keeps 0.99 of its fair pay |
+| Includer cut | 1% at depth 48: a 90% coalition gains at most 0.04%, a lone refuser loses 0.2 to 0.9% |
+
+Decided: `WEAK_DEPTH` 48, a 1% cut and `R_MAX` 256 became the rules on
+2026-11-12 (`weak2-64-100-48-256`), and weak work stays out of fork choice:
+through races alone it moves a coalition's gain by 0.12 points at most, not
+worth its header-sync work. The study's scaling ideas were built as #121
+(weak shares by hash), #128 (relay after the header check), #131 (shares
+relayed without payouts) and #122 (16 outgoing peers).
 
 ## References
 
