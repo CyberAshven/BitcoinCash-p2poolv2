@@ -47,6 +47,11 @@ const X_TICK_COUNT: u32 = 4;
 /// Horizontal room each edge label claims, in viewBox units; a tick closer
 /// to an edge than this is skipped so labels never collide.
 const TICK_LABEL_WIDTH: f64 = 90.0;
+/// Minimum log10 span before the tight-domain rule switches from linear
+/// ticks (a narrow data band within a decade) to 1/2/5 x 10^k gridlines
+/// (the band spans at least half a decade, like the Sharechain tab's height
+/// and difficulty lines that share one log axis).
+const TIGHT_MIN_SPAN: f64 = 0.5;
 
 /// Round an x-axis span (seconds) to a clean time step, 10 min .. 1 week,
 /// aiming for at most [`X_TICK_COUNT`] intermediate ticks.
@@ -66,6 +71,12 @@ fn area_color(class: &str) -> &'static str {
     match class {
         "local" => "#22d3ee",
         "network" => "#8b5cf6",
+        "pool" => "#0ac18e",
+        "height" => "#ffffff",
+        "dmin" => "#06b6d4",
+        "dmax" => "#a78bfa",
+        "uncles" => "#f43f5e",
+        "weak" => "#f59e0b",
         _ => "#0ac18e",
     }
 }
@@ -140,6 +151,107 @@ fn log_domain(values: impl Iterator<Item = f64>) -> (i32, i32) {
     }
 }
 
+/// The nearest 1/2/5 x 10^k at or above the value (when `up` is true) or
+/// at or below it (when `up` is false), so a data-tight domain's edges
+/// are round numbers.
+fn round125(value: f64, up: bool) -> f64 {
+    let exp = value.log10().floor();
+    let mut best = if up { f64::INFINITY } else { f64::NEG_INFINITY };
+    for exponent in [exp, exp + 1.0] {
+        for step in [1.0_f64, 2.0, 5.0] {
+            let candidate = step * 10.0_f64.powf(exponent);
+            let fits = if up {
+                candidate >= value * (1.0 - 1e-12)
+            } else {
+                candidate <= value * (1.0 + 1e-12)
+            };
+            if fits {
+                if up {
+                    best = best.min(candidate);
+                } else {
+                    best = best.max(candidate);
+                }
+            }
+        }
+    }
+    best
+}
+
+/// Round tick step and bounds: a 1/2/5 x 10^k step near the range over
+/// `target` intervals, the data floored/ceiled onto it, padded one step so
+/// the line never sits on the plot's edge. Returns (lo, hi, ticks), all
+/// strictly positive (a log axis cannot start at zero).
+fn nice_linear_ticks(v_lo: f64, v_hi: f64, target: usize) -> (f64, f64, Vec<f64>) {
+    let mut span = v_hi - v_lo;
+    if span <= 0.0 {
+        span = if v_hi > 0.0 { v_hi } else { 1.0 };
+    }
+    let raw = span / target as f64;
+    let exp = raw.log10().floor();
+    let frac = raw / 10.0_f64.powf(exp);
+    let step = (if frac < 1.5 {
+        1.0
+    } else if frac < 3.5 {
+        2.0
+    } else if frac < 7.5 {
+        5.0
+    } else {
+        10.0
+    }) * 10.0_f64.powf(exp);
+    let mut lo = (v_lo / step).floor() * step - step;
+    let hi = (v_hi / step).ceil() * step + step;
+    if lo <= 0.0 {
+        lo = (v_lo / step).floor() * step;
+    }
+    if lo <= 0.0 {
+        lo = step;
+    }
+    let count = ((hi - lo) / step).round() as usize;
+    let ticks: Vec<f64> = (0..=count).map(|i| lo + i as f64 * step).collect();
+    (lo, hi, ticks)
+}
+
+/// Every 1/2/5 x 10^k value inside a log10 band, band edges included.
+fn tight_log_ticks(log_floor: f64, log_top: f64) -> Vec<f64> {
+    let mut ticks = Vec::new();
+    for decade in (log_floor.floor() as i32)..=(log_top.ceil() as i32) {
+        for step in [1.0_f64, 2.0, 5.0] {
+            let value = step * 10.0_f64.powi(decade);
+            let log_val = value.log10();
+            if log_floor - 1e-9 <= log_val && log_val <= log_top + 1e-9 {
+                ticks.push(value);
+            }
+        }
+    }
+    if ticks.is_empty() {
+        ticks.push(10.0_f64.powf(log_floor));
+    }
+    ticks
+}
+
+/// `(log_floor, log_top, gridline values)`: the drawn data's own range
+/// instead of the hashrate chart's whole-decade rule, so a figure spanning
+/// a sliver of a decade does not flatten. A band of at least
+/// `TIGHT_MIN_SPAN` rounds out to the 1/2/5 x 10^k grid at each edge; a
+/// thinner band takes nice linear ticks across the data itself.
+fn tight_domain(values: &[f64]) -> (f64, f64, Vec<f64>) {
+    if values.is_empty() {
+        return (0.0, 1.0, vec![1.0, 10.0]);
+    }
+    let v_lo = values.iter().cloned().reduce(f64::min).unwrap();
+    let v_hi = values.iter().cloned().reduce(f64::max).unwrap();
+    let lo_log = v_lo.log10();
+    let hi_log = v_hi.log10();
+    if hi_log - lo_log >= TIGHT_MIN_SPAN {
+        let dom_lo = round125(v_lo, false).log10();
+        let dom_hi = round125(v_hi, true).log10();
+        (dom_lo, dom_hi, tight_log_ticks(dom_lo, dom_hi))
+    } else {
+        let (lo, hi, ticks) = nice_linear_ticks(v_lo, v_hi, 4);
+        (lo.log10(), hi.log10(), ticks)
+    }
+}
+
 /// A line chart of `series` over their common time range on a log10 value
 /// axis over the drawn points' decades.
 ///
@@ -163,6 +275,47 @@ pub(crate) fn line_chart(
     format_tick: fn(u64) -> String,
     format_edge: fn(u64) -> String,
 ) -> Markup {
+    line_chart_with(
+        title,
+        series,
+        blocks,
+        format_value,
+        format_time,
+        format_tick,
+        format_edge,
+        None,
+        &[],
+        &[],
+        "decades",
+    )
+}
+
+/// Like [`line_chart`] but with callbacks to tune domain, gridlines, and
+/// integer formatting for non-hashrate series.
+///
+/// `floor` pins the bottom of the value axis to a fixed value: its log10
+/// is used as the floor decade, and points below it clamp to the floor.
+/// `None` selects the data-driven domain. `integer_classes` lists the CSS
+/// classes whose values are whole integers; their dot tooltips and hit-zone
+/// rows format without a decimal point. `tags` names the series (class,
+/// label) whose nearest points fill each hit zone's tip and tracer rows;
+/// when empty, the hashrate order (pool/local/network) drives them.
+/// `domain` is `"tight"` for a data-tight log10 band with 1/2/5 x 10^k
+/// gridlines instead of the default whole-decade rule.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn line_chart_with(
+    title: &str,
+    series: &[Series],
+    blocks: &[ChartBlock],
+    format_value: fn(f64) -> String,
+    format_time: fn(u64) -> String,
+    format_tick: fn(u64) -> String,
+    format_edge: fn(u64) -> String,
+    floor: Option<f64>,
+    integer_classes: &[&str],
+    tags: &[(&'static str, &'static str)],
+    domain: &str,
+) -> Markup {
     let drawn: Vec<(&Series, Vec<(u64, f64)>)> = series
         .iter()
         .map(|line| (line, downsample(&line.points, MAX_POINTS)))
@@ -178,23 +331,77 @@ pub(crate) fn line_chart(
         };
     };
     let span = (end.saturating_sub(start)).max(1) as f64;
-    // Whole decades over the drawn points, so the gridlines land on 1 H/s,
-    // 10 H/s, ... and `format_value` names each one. Non-positive samples
-    // (the pool series sitting at zero) clamp to the floor decade.
-    let (log_floor, log_top) = log_domain(all().map(|(_, value)| *value));
+    // The value axis's log10 domain and its gridline values.  Two modes:
+    // "tight" rounds out to the drawn data's own range with 1/2/5 x 10^k
+    // gridlines (the Sharechain tab); the default "decades" uses whole
+    // decades (the hashrate chart).  A fixed floor overrides the lower
+    // bound: the Sharechain tab pins its uncle/weak count lines at 1 so
+    // zero-count minutes draw at the floor line instead of clamping.
+    let data_floor = floor.unwrap_or(f64::NEG_INFINITY);
+    let mut positives: Vec<f64> = all().filter(|(_, v)| *v > 0.0).map(|(_, v)| *v).collect();
+    if let Some(fixed) = floor
+        && fixed > 0.0
+    {
+        positives.push(fixed);
+    }
+    let (log_floor, log_top, grid_values) = if domain == "tight" {
+        let (mut lo, mut hi, mut ticks) = tight_domain(&positives);
+        if hi <= lo {
+            hi = lo + 1.0;
+        }
+        if let Some(fixed) = floor
+            && fixed > 0.0
+        {
+            lo = lo.max(fixed.log10());
+            if hi <= lo {
+                hi = lo + 1.0;
+            }
+            ticks = tight_log_ticks(lo, hi);
+        }
+        if hi - lo > MAX_DECADES as f64 {
+            lo = hi - MAX_DECADES as f64;
+            ticks = tight_log_ticks(lo, hi);
+        }
+        (lo, hi, ticks)
+    } else {
+        let (lo_int, hi_int) = if floor.is_some() {
+            let mut domain_top = f64::NEG_INFINITY;
+            for (_, value) in all() {
+                if *value > 0.0 {
+                    domain_top = domain_top.max(value.log10().ceil());
+                }
+            }
+            if !domain_top.is_finite() {
+                domain_top = data_floor.log10().floor() + 1.0;
+            }
+            let top = domain_top as i32;
+            let floor_log = data_floor.log10().floor() as i32;
+            if top - floor_log > MAX_DECADES {
+                (top - MAX_DECADES, top)
+            } else {
+                (floor_log, top)
+            }
+        } else {
+            log_domain(all().map(|(_, value)| *value))
+        };
+        let grid: Vec<f64> = (lo_int..=hi_int).map(|d| 10.0_f64.powi(d)).collect();
+        (lo_int as f64, hi_int as f64, grid)
+    };
     let plot_width = WIDTH - PAD_LEFT - PAD_RIGHT;
     let plot_height = HEIGHT - PAD_TOP - PAD_BOTTOM;
     let x = |time: u64| PAD_LEFT + (time.saturating_sub(start)) as f64 / span * plot_width;
     let y = |value: f64| {
-        let decade = if value > 0.0 {
-            value
-                .log10()
-                .clamp(f64::from(log_floor), f64::from(log_top))
+        let clamped = if floor.is_some() {
+            value.max(data_floor)
         } else {
-            f64::from(log_floor)
+            value
         };
-        PAD_TOP + plot_height
-            - (decade - f64::from(log_floor)) / f64::from(log_top - log_floor) * plot_height
+        let decade = if clamped > 0.0 {
+            clamped.log10().clamp(log_floor, log_top)
+        } else {
+            log_floor
+        };
+        PAD_TOP + plot_height - (decade - log_floor) / (log_top - log_floor) * plot_height
     };
     let baseline = PAD_TOP + plot_height;
 
@@ -247,9 +454,14 @@ pub(crate) fn line_chart(
             let dots = points
                 .iter()
                 .map(|(time, value)| {
+                    let formatted = if integer_classes.contains(&line.class) {
+                        format!("{}", value.round() as i64)
+                    } else {
+                        format_value(*value)
+                    };
                     html! {
                         circle class=(format!("dot {}", line.class)) cx=(format!("{:.1}", x(*time))) cy=(format!("{:.1}", y(*value))) r="0.5" {
-                            title { (line.label) ": " (format_value(*value)) " at " (format_time(*time)) }
+                            title { (line.label) ": " (formatted) " at " (format_time(*time)) }
                         }
                     }
                 })
@@ -263,26 +475,11 @@ pub(crate) fn line_chart(
         })
         .collect();
 
-    let pool_points: &[(u64, f64)] = drawn
-        .iter()
-        .find(|(line, _)| line.class == "pool")
-        .map(|(_, points)| points.as_slice())
-        .unwrap_or(&[]);
-    let local_points: &[(u64, f64)] = drawn
-        .iter()
-        .find(|(line, _)| line.class == "local")
-        .map(|(_, points)| points.as_slice())
-        .unwrap_or(&[]);
-    let network_points: &[(u64, f64)] = drawn
-        .iter()
-        .find(|(line, _)| line.class == "network")
-        .map(|(_, points)| points.as_slice())
-        .unwrap_or(&[]);
-    // Blocks in the plotted window, each snapped to the pool line at its
-    // time (node, then network, as fallbacks) for its diamond's height,
-    // with its marker's centre already placed. Only blocks older than the
-    // plotted run itself fall outside and are skipped rather than drawn
-    // left of the axis.
+    // Blocks in the plotted window, each snapped to the first drawn
+    // series's line for its diamond's height, with its marker centre
+    // already placed. Only blocks older than the plotted run itself
+    // fall outside and are skipped rather than drawn left of the axis.
+    let first_drawn_points = drawn.first().map(|(_, points)| points.as_slice());
     let window_blocks: Vec<(ChartBlock, f64, f64)> = blocks
         .iter()
         .filter_map(|block| {
@@ -290,24 +487,21 @@ pub(crate) fn line_chart(
             if time < start || time > end {
                 return None;
             }
-            let points = [pool_points, local_points, network_points]
-                .into_iter()
-                .find(|series| !series.is_empty())?;
+            let points = first_drawn_points?;
             let (_, sample_value) = nearest_point(points, time as f64)?;
             Some((*block, x(time), y(sample_value)))
         })
         .collect();
     let zones = hit_zones(
-        pool_points,
-        local_points,
-        network_points,
+        &drawn,
+        tags,
         &window_blocks,
         start,
-        end,
         span,
         plot_width,
         format_value,
         format_time,
+        integer_classes,
     );
     // The found-block diamonds, in window order, carrying the zone numbers
     // whose strips reach them (pages.css grows a marker on any of its
@@ -343,15 +537,11 @@ pub(crate) fn line_chart(
     let tracers: Vec<Markup> = zones
         .iter()
         .flat_map(|zone| {
-            let mut circles = Vec::with_capacity(3);
-            if let Some((time, value)) = zone.pool_nearest {
-                circles.push(tracer_circle("pool", zone.zone, x(time), y(value)));
-            }
-            if let Some((time, value)) = zone.local_nearest {
-                circles.push(tracer_circle("local", zone.zone, x(time), y(value)));
-            }
-            if let Some((time, value)) = zone.network_nearest {
-                circles.push(tracer_circle("network", zone.zone, x(time), y(value)));
+            let mut circles = Vec::with_capacity(zone.nearests.len());
+            for (class, nearest) in &zone.nearests {
+                if let Some((time, value)) = nearest {
+                    circles.push(tracer_circle(class, zone.zone, x(*time), y(*value)));
+                }
             }
             circles
         })
@@ -364,12 +554,11 @@ pub(crate) fn line_chart(
                     (series.grad.clone())
                     (series.area.clone())
                 }
-                @for decade in log_floor..=log_top {
-                    @let value = 10.0_f64.powi(decade);
-                    @let line_y = format!("{:.1}", y(value));
+                @for value in &grid_values {
+                    @let line_y = format!("{:.1}", y(*value));
                     line.grid x1=(PAD_LEFT) x2=(WIDTH - PAD_RIGHT) y1=(line_y) y2=(line_y) {}
                     text.axis x=(PAD_LEFT - 6.0) y=(line_y) text-anchor="end" dominant-baseline="middle" {
-                        (format_value(value))
+                        (format_value(*value))
                     }
                 }
                 text.axis x=(PAD_LEFT) y=(HEIGHT - 6.0) text-anchor="start" { (format_edge(start)) }
@@ -418,19 +607,19 @@ fn nearest_point(points: &[(u64, f64)], target: f64) -> Option<(u64, f64)> {
 }
 
 /// One `.chart-hit` zone: a strip of the plot whose `.chart-tip` names the
-/// nearest sample of each series. `left` is a percentage of the figure width
-/// (emitted without inline styles; `pages.css` pins each nth-child).
-/// `zone` is the strip's `nth-child` among the figure's children (the svg is
-/// child 1, so the first strip is 2); its tracer circles carry that number
-/// as `data-zone`, and `pages.css` reveals them off the same index.
+/// nearest sample of each tagged series. `left` is a percentage of the
+/// figure width (emitted without inline styles; `pages.css` pins each
+/// nth-child). `zone` is the strip's `nth-child` among the figure's children
+/// (the svg is child 1, so the first strip is 2); its tracer circles carry
+/// that number as `data-zone`, and `pages.css` reveals them off the same
+/// index.
 struct HitZone {
     left: f64,
     at_class: &'static str,
     tip: Markup,
     zone: usize,
-    pool_nearest: Option<(u64, f64)>,
-    local_nearest: Option<(u64, f64)>,
-    network_nearest: Option<(u64, f64)>,
+    /// Tags in tip-display order, each with its nearest sample at this zone.
+    nearests: Vec<(&'static str, Option<(u64, f64)>)>,
     /// In-window blocks whose marker this zone's strip reaches: their
     /// heights ride into the tip as `Block height` rows, and the same reach
     /// tags the markers with this zone number for the hover grow.
@@ -438,61 +627,76 @@ struct HitZone {
 }
 
 /// The hit zones tiling the plot, one per `STEP_PX` step of `fx`.
-#[allow(clippy::too_many_arguments)]
+///
+/// `drawn` gives each series' downsampled points keyed by class.
+/// `tags` lists (class, label) in tip order; when empty, the default
+/// hashrate order pool/local/network drives the tip rows and tracers.
+#[allow(clippy::too_many_arguments)] // plot geometry plus formatters: a params struct would only move the list
 fn hit_zones(
-    pool_points: &[(u64, f64)],
-    local_points: &[(u64, f64)],
-    network_points: &[(u64, f64)],
+    drawn: &[(&Series, Vec<(u64, f64)>)],
+    tags: &[(&'static str, &'static str)],
     window_blocks: &[(ChartBlock, f64, f64)],
     start: u64,
-    _end: u64,
     span: f64,
     plot_width: f64,
     format_value: fn(f64) -> String,
     format_time: fn(u64) -> String,
+    integer_classes: &[&str],
 ) -> Vec<HitZone> {
+    // Index drawn series by class name for nearest-point lookups.
+    let by_class: std::collections::HashMap<&str, &[(u64, f64)]> = drawn
+        .iter()
+        .map(|(line, points)| (line.class, points.as_slice()))
+        .collect();
+    static DEFAULT_TAGS: [(&str, &str); 3] =
+        [("pool", "Pool"), ("local", "Node"), ("network", "Network")];
+    let effective_tags: &[(&str, &str)] = if tags.is_empty() { &DEFAULT_TAGS } else { tags };
     let count = (plot_width / STEP_PX).floor() as usize + 1;
     (0..count)
         .map(|index| {
             let fx = (PAD_LEFT + index as f64 * STEP_PX).min(WIDTH - PAD_RIGHT);
             let time_at = start as f64 + ((fx - PAD_LEFT) / plot_width) * span;
-            let pool_nearest = nearest_point(pool_points, time_at);
-            let local_nearest = nearest_point(local_points, time_at);
-            let network_nearest = nearest_point(network_points, time_at);
+            // Nearest sample per tag at this zone's x position.
+            let nearests: Vec<(&str, Option<(u64, f64)>)> = effective_tags
+                .iter()
+                .map(|(class, _label)| {
+                    let nearest = by_class
+                        .get(class)
+                        .and_then(|points| nearest_point(points, time_at));
+                    (*class, nearest)
+                })
+                .collect();
             let at_class = if fx > WIDTH / 2.0 {
                 "at-left"
             } else {
                 "at-right"
             };
             let mut tip = String::from("<b>");
-            // The time header follows whichever series is drawn; pool first,
-            // so it still reads right with the pool line toggled off.
-            let header_time = pool_nearest
-                .or(local_nearest)
-                .or(network_nearest)
-                .map_or(start, |(time, _)| time);
+            // The time header follows the first tag with a nearest sample.
+            let header_time = nearests
+                .iter()
+                .find_map(|(_, nearest)| nearest.map(|(time, _)| time))
+                .unwrap_or(start);
             tip.push_str(&format_time(header_time));
             tip.push_str("</b><br>");
-            // Pool, Node then Network; a hidden series leaves no row, and a
-            // row other than the last ends with the line break.
-            let mut rows = Vec::with_capacity(3);
-            if let Some((_, value)) = pool_nearest {
-                rows.push(format!(
-                    "<span class=\"key pool\">Pool</span> <b>{}</b>",
-                    format_value(value)
-                ));
-            }
-            if let Some((_, value)) = local_nearest {
-                rows.push(format!(
-                    "<span class=\"key local\">Node</span> <b>{}</b>",
-                    format_value(value)
-                ));
-            }
-            if let Some((_, value)) = network_nearest {
-                rows.push(format!(
-                    "<span class=\"key network\">Network</span> <b>{}</b>",
-                    format_value(value)
-                ));
+            // One row per tag whose series is drawn (has a nearest sample).
+            let mut rows = Vec::with_capacity(effective_tags.len());
+            for (class, nearest) in &nearests {
+                if let Some((_, nearest_val)) = nearest {
+                    let label = effective_tags
+                        .iter()
+                        .find(|(c, _)| *c == *class)
+                        .map(|(_, l)| l)
+                        .unwrap_or(class);
+                    let formatted = if integer_classes.contains(class) {
+                        format!("{}", nearest_val.round() as i64)
+                    } else {
+                        format_value(*nearest_val)
+                    };
+                    rows.push(format!(
+                        "<span class=\"key {class}\">{label}</span> <b>{formatted}</b>"
+                    ));
+                }
             }
             // Blocks whose marker this strip reaches: half the strip plus
             // the marker's half-diagonal. Their heights ride into the tip
@@ -521,9 +725,7 @@ fn hit_zones(
                 at_class,
                 tip: PreEscaped(tip),
                 zone: index + 2,
-                pool_nearest,
-                local_nearest,
-                network_nearest,
+                nearests,
                 blocks,
             }
         })
