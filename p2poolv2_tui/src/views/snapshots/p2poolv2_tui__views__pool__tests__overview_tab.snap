@@ -1,9 +1,10 @@
 ---
 source: p2poolv2_tui/src/views/pool.rs
+assertion_line: 623
 expression: text
 ---
 + Info ----------------------------------------------------------------------------------+
-| Overview | Shares | Miners | Blocks | Peers                                            |
+| Overview | Shares | Miners | Blocks | Peers | System                                   |
 +----------------------------------------------------------------------------------------+
 + Overview ------------------------------------------------------------------------------+
 |Network                  : Bitcoin Cash chipnet                                         |

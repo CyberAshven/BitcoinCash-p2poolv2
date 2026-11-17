@@ -22,6 +22,7 @@ pub mod format;
 pub mod model;
 pub mod network;
 pub mod remote;
+pub mod theme;
 pub mod views;
 
 #[cfg(feature = "client")]
@@ -36,6 +37,8 @@ pub mod input;
 pub mod node_config;
 #[cfg(feature = "client")]
 pub mod settings;
+#[cfg(feature = "client")]
+pub mod systemd;
 
 #[cfg(test)]
 pub(crate) mod test_utils;

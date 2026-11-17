@@ -28,9 +28,10 @@ use crate::model::{
 use crate::node_config::{self, NodeConnection};
 use crate::remote::Remote;
 use crate::settings::{self, Settings};
+use crate::systemd::{P2PoolV2Service, ServiceAction, instance_from_config_path};
 use crate::views::config::{ConfigRow, ConfigScreen};
 use crate::views::home::HomeScreen;
-use crate::views::pool::PoolScreen;
+use crate::views::pool::{PoolScreen, ServicePanel};
 use crate::views::settings::SettingsScreen;
 use crate::views::{
     Hint, SIDEBAR_ITEMS, Screen, bchn, config, explorer, home, pool, render_shell,
@@ -82,9 +83,11 @@ pub enum Source {
     Miner,
     FoundBlocks,
     Peers,
+    /// Whether the node's systemd user service runs.
+    Service,
 }
 
-const SOURCE_COUNT: usize = 9;
+const SOURCE_COUNT: usize = 10;
 
 /// A finished fetch.
 #[derive(Debug)]
@@ -98,6 +101,14 @@ pub enum Payload {
     Miner(Result<Miner, String>),
     FoundBlocks(Result<Vec<FoundBlock>, String>),
     Peers(Result<Vec<Peer>, String>),
+    /// Whether the service runs.
+    Service(Result<bool, String>),
+    /// A start, stop or restart, and whether the service runs after it.
+    ServiceAction {
+        action: ServiceAction,
+        result: Result<(), String>,
+        running: Result<bool, String>,
+    },
 }
 
 impl Payload {
@@ -112,6 +123,7 @@ impl Payload {
             Payload::Miner(_) => Source::Miner,
             Payload::FoundBlocks(_) => Source::FoundBlocks,
             Payload::Peers(_) => Source::Peers,
+            Payload::Service(_) | Payload::ServiceAction { .. } => Source::Service,
         }
     }
 }
@@ -190,6 +202,12 @@ pub struct App {
     /// Oldest first, at most [`MAX_LIVE_PEER_EVENTS`].
     pub live_peer_events: VecDeque<PeerEvent>,
     pub live_error: Option<String>,
+    /// Whether the node's systemd user service runs, on the System tab.
+    pub service_status: Remote<bool>,
+    /// Why the last start, stop or restart failed.
+    pub service_error: Option<String>,
+    /// Runs `systemctl --user`.
+    pub service: P2PoolV2Service,
     live_task: Option<JoinHandle<()>>,
     live_receiver: Option<mpsc::Receiver<LiveMessage>>,
     live_retry_at: Option<Instant>,
@@ -245,6 +263,9 @@ impl App {
             live_shares: VecDeque::with_capacity(MAX_LIVE_SHARES),
             live_peer_events: VecDeque::with_capacity(MAX_LIVE_PEER_EVENTS),
             live_error: None,
+            service_status: Remote::Unconfigured,
+            service_error: None,
+            service: P2PoolV2Service::default(),
             live_task: None,
             live_receiver: None,
             live_retry_at: None,
@@ -354,6 +375,8 @@ impl App {
         self.miner = Remote::Unconfigured;
         self.found_blocks = Remote::Unconfigured;
         self.peers = Remote::Unconfigured;
+        self.service_status = Remote::Unconfigured;
+        self.service_error = None;
         self.miners_focused = false;
         self.miners_selected = 0;
         self.miner_address = None;
@@ -390,7 +413,8 @@ impl App {
                 }
             }
             (Screen::PoolStatus, 3) => sources.push(Source::FoundBlocks),
-            (Screen::PoolStatus, _) => sources.push(Source::Peers),
+            (Screen::PoolStatus, 4) => sources.push(Source::Peers),
+            (Screen::PoolStatus, _) => sources.push(Source::Service),
             (Screen::PoolConfig | Screen::Settings | Screen::FileExplorer, _) => {}
         }
         sources
@@ -454,7 +478,67 @@ impl App {
             Source::Peers => {
                 api.map(|api| async move { Payload::Peers(api.peers().await) }.boxed())
             }
+            Source::Service => {
+                let service = self.service.clone();
+                self.service_instance().map(|instance| {
+                    async move {
+                        Payload::Service(
+                            blocking(move || service.is_running(&instance))
+                                .await
+                                .and_then(|running| running),
+                        )
+                    }
+                    .boxed()
+                })
+            }
         }
+    }
+
+    /// The node's systemd user service instance: the `<instance>` of a node
+    /// config at `~/.config/p2poolv2/config-<instance>.toml`, `None` for
+    /// any other config.
+    pub fn service_instance(&self) -> Option<String> {
+        self.node_config_path
+            .as_deref()
+            .and_then(instance_from_config_path)
+    }
+
+    /// Starts, stops or restarts the node's service, then asks whether it
+    /// runs, off the screen's thread: a stop waits for the node to close
+    /// its store. Does nothing without a service instance.
+    pub fn run_service_action(&mut self, action: ServiceAction, now: Instant) {
+        let Some(instance) = self.service_instance() else {
+            return;
+        };
+        let service = self.service.clone();
+        self.fetches[Source::Service as usize] = FetchState {
+            in_flight: true,
+            last_started: Some(now),
+        };
+        let sender = self.sender.clone();
+        let generation = self.generation;
+        self.runtime.spawn(async move {
+            let done = blocking(move || {
+                let result = service.run(action, &instance);
+                (result, service.is_running(&instance))
+            })
+            .await;
+            let (result, running) = match done {
+                Ok(done) => done,
+                Err(error) => (Err(error.clone()), Err(error)),
+            };
+            // A failed send means the app is gone.
+            let _ = sender
+                .send(Update {
+                    generation,
+                    payload: Payload::ServiceAction {
+                        action,
+                        result,
+                        running,
+                    },
+                })
+                .await;
+        });
     }
 
     fn spawn_fetch(&mut self, source: Source, now: Instant) {
@@ -499,6 +583,7 @@ impl App {
             Source::Miner => loading(&mut self.miner),
             Source::FoundBlocks => loading(&mut self.found_blocks),
             Source::Peers => loading(&mut self.peers),
+            Source::Service => loading(&mut self.service_status),
         }
     }
 
@@ -563,6 +648,17 @@ impl App {
             Payload::Miner(result) => self.miner = Remote::from_result(result),
             Payload::FoundBlocks(result) => self.found_blocks = Remote::from_result(result),
             Payload::Peers(result) => self.peers = Remote::from_result(result),
+            Payload::Service(result) => self.service_status = Remote::from_result(result),
+            Payload::ServiceAction {
+                action,
+                result,
+                running,
+            } => {
+                self.service_error = result
+                    .err()
+                    .map(|error| format!("{} failed: {error}", action.label()));
+                self.service_status = Remote::from_result(running);
+            }
         }
     }
 
@@ -743,6 +839,15 @@ impl App {
         self.save_settings();
     }
 
+    /// The System tab is shown for a node config with a service instance,
+    /// so s, x and r start, stop and restart it.
+    pub fn service_controls(&self) -> bool {
+        self.screen == Screen::PoolStatus
+            && self.pool_tab == pool::SYSTEM_TAB
+            && !self.miners_focused
+            && self.service_instance().is_some()
+    }
+
     /// The sidebar has the keyboard.
     pub fn sidebar_focused(&self) -> bool {
         match self.screen {
@@ -808,7 +913,16 @@ impl App {
                 if self.screen == Screen::PoolStatus && self.pool_tab == 2 {
                     hints.push(Hint::new("Enter", "Miners"));
                 }
-                hints.extend([Hint::new("r", "Refresh"), Hint::new("q", "Quit")]);
+                if self.service_controls() {
+                    hints.extend([
+                        Hint::new("s", "Start"),
+                        Hint::new("x", "Stop"),
+                        Hint::new("r", "Restart"),
+                    ]);
+                } else {
+                    hints.push(Hint::new("r", "Refresh"));
+                }
+                hints.push(Hint::new("q", "Quit"));
             }
             Screen::Home => hints.extend([
                 Hint::new("Up/Down", "Sidebar"),
@@ -847,6 +961,7 @@ impl App {
             .connection
             .as_ref()
             .map(|connection| connection.network);
+        let service_instance = self.service_instance();
         match self.screen {
             Screen::Home => home::render(
                 frame,
@@ -892,6 +1007,11 @@ impl App {
                     peers: &self.peers,
                     live_peer_events: &self.live_peer_events,
                     live_error: self.live_error.as_deref(),
+                    service: ServicePanel {
+                        instance: service_instance.as_deref(),
+                        status: &self.service_status,
+                        error: self.service_error.as_deref(),
+                    },
                 },
             ),
             Screen::PoolConfig => config::render(
@@ -935,6 +1055,16 @@ impl App {
             Screen::FileExplorer => explorer::render(frame, area, &self.explorer),
         }
     }
+}
+
+/// Runs `work` on tokio's blocking threads, for `systemctl`; a panic in it
+/// comes back as an error.
+async fn blocking<T: Send + 'static>(
+    work: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, String> {
+    tokio::task::spawn_blocking(work)
+        .await
+        .map_err(|error| error.to_string())
 }
 
 /// Appends `item`, dropping the oldest once there are more than `limit`.

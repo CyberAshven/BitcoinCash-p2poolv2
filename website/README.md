@@ -115,7 +115,9 @@ do not soften that without the owner's say.
 
 `index.html` is adapted from the P2Poolv2 website,
 https://github.com/p2poolv2/website at commit `1199458`, Copyright (c) 2026
-P2Poolv2, under the MIT License in `LICENSE-MIT`, which stays with it. The
+P2Poolv2, under the MIT License in `LICENSE-MIT`, which stays with it.
+Upstream's later commits through `3f11b9e1` (2026-11-14) only move its
+live-pool links from testnet4 to testnet5, which this page does not carry. The
 Bitcoin Cash changes are distributed with this fork under AGPL-3.0 (decision
 13 in `docs/bch-plan.md`).
 

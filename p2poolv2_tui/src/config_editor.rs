@@ -112,7 +112,7 @@ const TEMPLATE_SOURCES: &[&str] = &["rpc", "rpc_light", "sv2"];
 const LOG_LEVELS: &[&str] = &["error", "warn", "info", "debug", "trace"];
 
 /// The settings listed, in order.
-pub const FIELDS: [FieldSpec; 43] = [
+pub const FIELDS: [FieldSpec; 44] = [
     // The network switch and the chain come first: they decide the rest.
     optional(
         "stratum",
@@ -228,6 +228,13 @@ pub const FIELDS: [FieldSpec; 43] = [
         "stratum",
         "template_provider_authority_public_key",
         "The Template Provider's authority public key (needed unless it is on loopback)",
+        ValueKind::Text,
+        None,
+    ),
+    optional(
+        "stratum",
+        "template_provider_proxy",
+        "HOST:PORT of a SOCKS5 proxy (Tor or I2P) to reach the Template Provider through",
         ValueKind::Text,
         None,
     ),
