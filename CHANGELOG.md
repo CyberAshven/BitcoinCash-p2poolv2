@@ -32,6 +32,14 @@ onion service must change: every miner then connects from this computer's
 own address, which the default `sv2_coinbase_only_from` lets declare
 Coinbase-Only jobs.
 
+The Umbrel apps' dashboards move from ports 46890 and 46891 to 36890 and
+36891. umbrelOS 2.0 keeps host ports 40000 to 49999 for Umbrel Machines'
+port forwards, and upstream's Umbrel app left 46884 for 36884 for the same
+reason; a test now keeps every app port out of that range. The nightly fuzz
+run also starts from upstream's shared corpus for the same decoder target
+(`p2poolv2/fuzz-corpus`). Upstream's website, docs and difficulty analysis
+repositories have nothing new to port.
+
 The network and payout simulators model one-minute Bitcoin Cash blocks
 (CHIP-2025-03): a block every minute paying a tenth of a ten-minute block,
 and a tenth of the ABLA floors (3.2 MB on mainnet, 200 kB on chipnet, 25.6
