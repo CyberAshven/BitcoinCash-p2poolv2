@@ -2015,6 +2015,9 @@ last-resort rule and store format 9 are as they were.
   metrics `found_block_submissions_total{node,outcome}` and
   `found_block_submit_retries_total{node}`. A JSON-RPC error sent with HTTP
   500 is now read as the node's RPC error, not as an HTTP failure.
+- An SV1 miner's first job on a new previous block is always sent with
+  `clean_jobs`. A second template on that block could replace the clean one
+  before the connection read it, so the miner kept hashing the old block.
 
 ### Security
 
