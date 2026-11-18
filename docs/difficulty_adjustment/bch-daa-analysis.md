@@ -84,9 +84,9 @@ None of these is implemented; each would be a share-chain rule change.
    minutes) but slowed recovery when hashrate really left (3.8 instead of
    2.7 hours). A shorter half-life gets most of the first without the
    second.
-5. **Revisit with the share interval.** The plan leaves the share interval
-   open until CHIP-2025-03 is decided ([bch-plan.md](../bch-plan.md), open
-   questions). Farms switch on wall-clock schedules, so for switching the
+5. **Revisit with the share interval.** The plan keeps 10-second shares
+   under CHIP-2025-03's one-minute blocks ([bch-plan.md](../bch-plan.md),
+   decision 11). Farms switch on wall-clock schedules, so for switching the
    half-life matters in seconds; for noise it matters in share intervals
    (`half-life / interval`).
 
