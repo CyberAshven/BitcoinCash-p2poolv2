@@ -1227,3 +1227,85 @@ fn a_weak_share_an_ancestor_carries_is_refused_under_another_encoding() {
         "{error}"
     );
 }
+
+//* Parallel check tests. A share's weak shares are checked on several
+//* threads, and the verdict must be the one checking them one by one gives:
+//* the first failing weak share's, in carried order.
+
+/// 32 carried weak shares: the 2nd is on a parent not stored yet, found
+/// after its other header rules, and the 3rd is more than two minutes after
+/// its carrier, found at once. One by one, the check stops at the 2nd,
+/// `Recoverable`, and never reaches the 3rd's `Consensus`; on several
+/// threads the 3rd fails first, and the verdict is still the 2nd's.
+#[test]
+fn carried_weak_headers_give_the_first_failure_in_carried_order() {
+    let parent = TestShareBlockBuilder::new()
+        .share_owner(ShareOwner::CashP2pkh([0x11; 20]))
+        .bits(CompactTarget::from_consensus(EASY))
+        .build()
+        .header;
+    let parent_hash = parent.block_hash();
+    let missing_parent = BlockHash::from_byte_array([0x99; 32]);
+    let distribution = HashMap::from([(
+        PayoutAddress::from(Address::p2pkh(
+            PubkeyHash::from_byte_array([0x55; 20]),
+            Network::Regtest,
+        )),
+        1u128,
+    )]);
+    let weak_share_on = |parent_hash, time, nonce| {
+        build_test_weak_share(TestWeakShare {
+            parent_hash,
+            bits: CompactTarget::from_consensus(HARD),
+            minimum: CompactTarget::from_consensus(HARD),
+            weak_ratio: next_weak_ratio(WEAK_RATIO_MAX, 0, 0),
+            distribution: &distribution,
+            time,
+            nonce,
+        })
+    };
+    let mut weak_shares: Vec<WeakShare> = (0..32)
+        .map(|nonce| weak_share_on(parent_hash, WEAK_TIME, nonce))
+        .collect();
+    weak_shares[1] = weak_share_on(missing_parent, WEAK_TIME, 1);
+    weak_shares[2] = weak_share_on(parent_hash, WEAK_TIME + 121, 2);
+    let carrier = TestShareBlockBuilder::new()
+        .share_owner(ShareOwner::CashP2pkh([0x22; 20]))
+        .time(WEAK_TIME)
+        .weak_shares(weak_shares)
+        .build();
+    let mut pool_difficulty = MockPoolDifficulty::default();
+    pool_difficulty
+        .expect_calculate_target_clamped()
+        .returning(|_| CompactTarget::from_consensus(HARD));
+    let mut store = MockChainStoreHandle::default();
+    let asert_parent = AsertParent::from_header(&parent, 0, 0);
+    store.expect_get_asert_parent().returning(move |hash| {
+        if *hash == missing_parent {
+            Err(StoreError::NotFound(format!("share {hash}")))
+        } else {
+            Ok(asert_parent)
+        }
+    });
+    store
+        .expect_get_share_header()
+        .returning(move |_| Ok(parent.clone()));
+    store.expect_get_block_metadata().returning(|_| {
+        Ok(BlockMetadata {
+            expected_height: Some(0),
+            chain_work: Work::from_le_bytes([0u8; 32]),
+            status: Status::BlockValid,
+            chain: ChainMembership::Confirmed,
+        })
+    });
+    let validator = DefaultShareValidator::new(pool_difficulty)
+        .for_chain(Chain::BitcoinCash)
+        .with_target_ceiling(CompactTarget::from_consensus(EASY));
+
+    let error = validator
+        .validate_carried_weak_headers(&carrier, &store)
+        .unwrap_err();
+
+    assert_eq!(error.kind, FailureKind::Recoverable, "{error}");
+    assert!(error.message.contains("parent"), "{error}");
+}

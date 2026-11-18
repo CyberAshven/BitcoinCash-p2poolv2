@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+The header rules of the weak shares a share carries are checked on several
+cores, one fewer than the node's CPUs; the verdict is unchanged (#127).
+
 A restarted node remembers its peers. The outgoing peer target's book of
 known peers is saved to `p2p_peers.json` beside the store every ten
 minutes and when the node stops, and read on the next start; the peers it
