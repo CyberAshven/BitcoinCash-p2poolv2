@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Upstream P2Poolv2 is merged through 75c4d7ea: header sync serves every share at
+a height and pages inside one (protocol 1.1.0, segment `headers-resume`), in
+place of #74's order; testnet5's seeds and docs are left out.
+
 The header rules of the weak shares a share carries are checked on several
 cores, one fewer than the node's CPUs; the verdict is unchanged (#127).
 
