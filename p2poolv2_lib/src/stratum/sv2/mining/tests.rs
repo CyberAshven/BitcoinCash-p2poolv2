@@ -3,6 +3,7 @@ use crate::accounting::OutputPair;
 use crate::accounting::stats::metrics;
 use crate::shares::auxpow::{AuxProof, Disclosure};
 use crate::shares::bch_asert::BchAsert;
+use crate::shares::bch_headers::MinDifficultyMark;
 use crate::shares::coinbase_proof::CoinbaseProof;
 use crate::shares::merge_mining::MergeMiningCommitment;
 use crate::stratum::block_submit::FoundBlockSubmitter;
@@ -106,6 +107,164 @@ async fn sv2_standard_keeps_a_found_tree_before_share_pipeline_failure() {
     assert_eq!(stored.payees, job.payout_tree.unwrap().payees());
     assert_eq!(stored.bitcoin_blockhash, found.header.block_hash());
     assert_eq!(server.received_requests().await.unwrap().len(), 1);
+}
+
+/// A standard-channel share that meets the network target, dated at its
+/// job's `curtime`, on a job whose template is bounded by `mark`. Returns
+/// the reply's error code, `None` for a success, and how many requests the
+/// node got: one `submitblock` for a block that went out, none otherwise.
+#[cfg(not(feature = "sim"))]
+async fn sv2_block_on_a_marked_job(
+    mark: impl FnOnce(u32) -> MinDifficultyMark,
+) -> (Option<String>, usize) {
+    let (server, _) = setup_mock_bitcoin_rpc().await;
+    mock_submit_block_with_any_body(&server).await;
+    let (ctx, _emissions, _directories) = test_bch_stratum_context(&server.uri()).await;
+    let tracker = Arc::clone(&ctx.tracker_handle);
+    let mut channels = MiningChannels::new(ctx, DEFAULT_VERSION_MASK);
+    let mut template: BlockTemplate = serde_json::from_str(include_str!(
+        "../../../../../bitcoindrpc/test_data/bchn-regtest-template.json"
+    ))
+    .unwrap();
+    template.min_difficulty_mark = Some(mark(template.curtime));
+    let identity = bch_identity();
+    let mut open = binary_sv2::to_bytes(OpenStandardMiningChannel {
+        request_id: 1,
+        user_identity: identity.as_str().try_into().unwrap(),
+        nominal_hash_rate: 1.0,
+        max_target: U256::new(&[0xff; 32]).unwrap(),
+    })
+    .unwrap();
+    let opened = channels
+        .handle(
+            MESSAGE_TYPE_OPEN_STANDARD_MINING_CHANNEL,
+            &mut open,
+            Some(test_bch_prepared_for_template(template)),
+        )
+        .await
+        .unwrap();
+    let mut success_payload = payload(&opened[0]);
+    let success = OpenStandardMiningChannelSuccess::from_bytes(&mut success_payload).unwrap();
+    let mut job_payload = payload(&opened[1]);
+    let wire_job = NewMiningJob::from_bytes(&mut job_payload).unwrap();
+    let channel = &channels.channels[&success.channel_id];
+    let tracked_id = channel.jobs[&wire_job.job_id].tracker_job_id;
+    let job = tracker.get_job(tracked_id).unwrap();
+    let solved = solve_job_submit(
+        tracked_id,
+        &job,
+        &channel.session.enonce1_hex,
+        &hex::encode(channel.standard_enonce2),
+    );
+    let found = validate_bitcoin_difficulty(
+        &job,
+        &solved,
+        &channel.session.enonce1_hex,
+        DEFAULT_VERSION_MASK,
+    )
+    .unwrap();
+    let mut submit = binary_sv2::to_bytes(SubmitSharesStandard {
+        channel_id: success.channel_id,
+        sequence_number: 1,
+        job_id: wire_job.job_id,
+        nonce: found.header.nonce,
+        ntime: found.header.time,
+        version: wire_job.version,
+    })
+    .unwrap();
+    let reply = channels
+        .handle(MESSAGE_TYPE_SUBMIT_SHARES_STANDARD, &mut submit, None)
+        .await
+        .unwrap();
+    let requests = server.received_requests().await.unwrap().len();
+    let error_code = (frame_type(&reply[0]) == MESSAGE_TYPE_SUBMIT_SHARES_ERROR).then(|| {
+        let mut error_payload = payload(&reply[0]);
+        SubmitSharesError::from_bytes(&mut error_payload)
+            .unwrap()
+            .error_code
+            .as_utf8_or_hex()
+    });
+    (error_code, requests)
+}
+
+/// At the minimum-difficulty mark ASERT's bits are valid: the SV2 share's
+/// time is taken and the block submitted.
+#[cfg(not(feature = "sim"))]
+#[tokio::test]
+async fn an_sv2_block_at_the_mark_with_asert_bits_is_submitted() {
+    let (error_code, requests) = sv2_block_on_a_marked_job(MinDifficultyMark::Until).await;
+    assert_ne!(error_code.as_deref(), Some("invalid-ntime"));
+    assert_eq!(requests, 1);
+}
+
+/// A declared job dated a second past its template's minimum-difficulty
+/// mark, with ASERT's bits, is refused; one dated at the mark is installed.
+#[tokio::test]
+async fn a_declared_job_past_the_minimum_difficulty_mark_is_refused() {
+    let (ctx, _emissions, _directories) = test_bch_stratum_context("http://127.0.0.1:1").await;
+    let mut channels = MiningChannels::new(ctx, DEFAULT_VERSION_MASK);
+    let mut open = open_extended_request(&bch_identity());
+    channels
+        .handle(MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL, &mut open, None)
+        .await
+        .unwrap();
+    let mut past_mark = test_bch_prepared().template().as_ref().clone();
+    past_mark.min_difficulty_mark = Some(MinDifficultyMark::Until(past_mark.curtime - 1));
+    let prepared = test_bch_prepared_for_template(past_mark);
+    let token = prepared
+        .mining_job_token([1; 32], prepared.template().curtime)
+        .unwrap();
+    let (mut request_bytes, declared) = test_bch_custom_job(
+        Arc::clone(&prepared),
+        token,
+        vec![],
+        false,
+        prepared.template().coinbasevalue,
+    );
+    let request = SetCustomMiningJob::from_bytes(&mut request_bytes).unwrap();
+    let frames = channels
+        .install_custom_job(&request, declared, Some(Arc::clone(&prepared)))
+        .await
+        .unwrap();
+    let mut response_payload = payload(&frames[0]);
+    let error = SetCustomMiningJobError::from_bytes(&mut response_payload).unwrap();
+    assert_eq!(error.error_code.as_utf8_or_hex(), "invalid-custom-job");
+    assert!(channels.channels[&1].jobs.is_empty());
+
+    let mut at_mark = test_bch_prepared().template().as_ref().clone();
+    at_mark.min_difficulty_mark = Some(MinDifficultyMark::Until(at_mark.curtime));
+    let prepared = test_bch_prepared_for_template(at_mark);
+    let token = prepared
+        .mining_job_token([2; 32], prepared.template().curtime)
+        .unwrap();
+    let (mut request_bytes, declared) = test_bch_custom_job(
+        Arc::clone(&prepared),
+        token,
+        vec![],
+        false,
+        prepared.template().coinbasevalue,
+    );
+    let request = SetCustomMiningJob::from_bytes(&mut request_bytes).unwrap();
+    let frames = channels
+        .install_custom_job(&request, declared, Some(prepared))
+        .await
+        .unwrap();
+    assert_eq!(
+        frame_type(&frames[0]),
+        MESSAGE_TYPE_SET_CUSTOM_MINING_JOB_SUCCESS
+    );
+    assert_eq!(channels.channels[&1].jobs.len(), 1);
+}
+
+/// A second past the mark ASERT's bits are `bad-diffbits`: the SV2 share is
+/// refused as `invalid-ntime` and no block goes to the node.
+#[cfg(not(feature = "sim"))]
+#[tokio::test]
+async fn an_sv2_block_a_second_past_the_mark_with_asert_bits_is_refused_and_not_submitted() {
+    let (error_code, requests) =
+        sv2_block_on_a_marked_job(|curtime| MinDifficultyMark::Until(curtime - 1)).await;
+    assert_eq!(error_code.as_deref(), Some("invalid-ntime"));
+    assert_eq!(requests, 0);
 }
 
 #[cfg(not(feature = "sim"))]
