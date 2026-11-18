@@ -4,64 +4,55 @@ Where each page of upstream P2Poolv2's documentation site lives in this book,
 or why it was not ported.
 
 The source is [p2poolv2/docs](https://github.com/p2poolv2/docs) at commit
-`623e4c1` (2026-10-22), a Jekyll site of AsciiDoc pages describing P2Poolv2
-for Bitcoin at upstream commit `dc5bb65` (2026-10-08). It is Copyright
-2024-2026 P2Poolv2 Developers, distributed under the MIT or Apache-2.0
-license. Every ported page names its source and keeps that notice; this fork
-is distributed under AGPL-3.0 (plan decision 13). The pages are rewritten in
-Markdown for mdBook, with PlantUML and Graphviz diagrams redrawn as text, and
-adapted to Bitcoin Cash: where upstream rests on a Bitcoin constraint, the page
-states the Bitcoin Cash situation and its source instead.
-
-This is a different source from upstream's code repository
-([p2poolv2/p2poolv2](https://github.com/p2poolv2/p2poolv2)), whose `docs/`
-folder this book already carried (the [Architecture](architecture/README.md)
-pages, difficulty, simulation and atomic swap pages).
+`623e4c1` (2026-10-22), AsciiDoc pages describing P2Poolv2 for Bitcoin at
+upstream commit `dc5bb65` (2026-10-08), Copyright 2024-2026 P2Poolv2
+Developers, MIT or Apache-2.0. Every ported page names its source and keeps
+that notice (this fork is AGPL-3.0, plan decision 13), has its diagrams
+redrawn as text, and states the Bitcoin Cash situation wherever upstream
+rests on a Bitcoin constraint. The `docs/` folder of
+[upstream's code repository](https://github.com/p2poolv2/p2poolv2) is a
+different source, already in this book.
 
 ## Pages
 
-| Upstream page | This book | Notes |
+| Upstream page | This book | Bitcoin Cash notes |
 |---|---|---|
-| `index.adoc` | [Introduction](introduction.md) | The fork's own introduction; its "How it works" list links the ported pages. |
-| `getting_started.adoc` | [Running P2Poolv2 on Bitcoin Cash](bch-quickstart.md) | Upstream points to its README and its public testnet4 node. This fork lists no public node. |
-| `why_p2poolv2.adoc` | [Why P2Poolv2](why-p2poolv2.md) | Adds what differs on Bitcoin Cash: block space, fees, SegWit, Lightning, covenants, coinbase size. |
-| `requirements.adoc` | [Requirements](requirements.md), "Design requirements" | Each requirement with this fork's status. |
-| `p2p_network_of_miners.adoc` | [P2P network of miners](p2p-network.md) | Main and mini share chains, protocol strings with rule tags, no DNS seeds on Bitcoin Cash. |
-| `node_components.adoc` | [Node components](node-components.md) | BCHN or a Stratum V2 Template Provider in place of bitcoind. |
-| `stratum.adoc` | [Stratum server and vardiff](stratum.md) | Its miner options table is on [Miner options](miner-options.md), with Bitcoin Cash addresses. |
-| `pool_difficulty_adjustment.adoc` | [Stratum server and vardiff](stratum.md), "The pool difficulty" | ASERT is also Bitcoin Cash's own block algorithm; details on [Share difficulty: ASERT](difficulty_adjustment/asert.md). |
+| `index.adoc` | [Introduction](introduction.md) | The fork's own. |
+| `getting_started.adoc` | [Running P2Poolv2 on Bitcoin Cash](bch-quickstart.md) | No public node (upstream points to its testnet4 node). |
+| `why_p2poolv2.adoc` | [Why P2Poolv2](why-p2poolv2.md) | Block space, fees, SegWit, Lightning, covenants, coinbase size. |
+| `requirements.adoc` | [Requirements](requirements.md), "Design requirements" | This fork's status on each. |
+| `p2p_network_of_miners.adoc` | [P2P network of miners](p2p-network.md) | One share chain per network, rule tags, no DNS seeds. |
+| `node_components.adoc` | [Node components](node-components.md) | BCHN or a Template Provider for bitcoind. |
+| `stratum.adoc` | [Stratum server and vardiff](stratum.md) | Miner options on [Miner options](miner-options.md). |
+| `pool_difficulty_adjustment.adoc` | [Stratum server and vardiff](stratum.md), "The pool difficulty" | ASERT ([Share difficulty: ASERT](difficulty_adjustment/asert.md)). |
 | `architecture/sharechain.adoc` | [Share chain](sharechain/README.md) | No witness commitment; payout rights. |
-| `architecture/share_commitment.adoc` | [Share commitments](sharechain/share-commitments.md) | Share transaction root over txids; longer coinbase merkle branch under ABLA. |
-| `architecture/validation.adoc` | [Share validation](sharechain/validation.md) | Bitcoin Cash script interpreter, `uncle-once`, what BCHN checks. |
-| `architecture/bitcoin_chain_validation.adoc` | [Mining on the current chain](sharechain/current-chain.md) | Not built on Bitcoin Cash yet; needs an aserti3-2d header check. The full design is [Mine on the current Bitcoin chain](architecture/mine-on-bitcoin-chain.md). |
-| `architecture/pplns_accounting.adoc` | [PPLNS accounting](sharechain/pplns-accounting.md) | Window of three Bitcoin Cash blocks of work behind a 100-share maturity, in place of 120,960 shares behind 6,048. |
-| `architecture/transactions.adoc` | [Share transactions](sharechain/transactions.md) | CashAddr share owners, fees burned as node policy instead of paid to the miner. |
-| `architecture/spending_utxos.adoc` | [Spending share outputs](sharechain/spending-outputs.md) | Earnings follow the payout right, not the root height. |
-| `architecture/pool_scalability_limits.adoc` | [Pool size limits](sharechain/pool-size.md) | Upstream's page is a title only. Written for Bitcoin Cash: the limits that apply, and the hybrid payout. |
-| `architecture/share_flow.adoc` | not ported | A sample page upstream excludes from its site; its diagrams are illustrative. The real flow is [Share processing pipeline](architecture/share-processing-pipeline.md). |
+| `architecture/share_commitment.adoc` | [Share commitments](sharechain/share-commitments.md) | Share transaction root over txids; longer coinbase merkle branch. |
+| `architecture/validation.adoc` | [Share validation](sharechain/validation.md) | Bitcoin Cash scripts, `uncle-once`, what BCHN checks. |
+| `architecture/bitcoin_chain_validation.adoc` | [Mining on the current chain](sharechain/current-chain.md) | Built with an aserti3-2d header check; upstream's design is [Mine on the current Bitcoin chain](architecture/mine-on-bitcoin-chain.md). |
+| `architecture/pplns_accounting.adoc` | [PPLNS accounting](sharechain/pplns-accounting.md) | Three blocks of work (at most 120,960 shares) behind a 100-share maturity, for 120,960 shares behind 6,048. |
+| `architecture/transactions.adoc` | [Share transactions](sharechain/transactions.md) | CashAddr owners; fees burned as node policy. |
+| `architecture/spending_utxos.adoc` | [Spending share outputs](sharechain/spending-outputs.md) | Earnings follow the payout right. |
+| `architecture/pool_scalability_limits.adoc` | [Pool size limits](sharechain/pool-size.md) | A title only upstream. |
+| `architecture/share_flow.adoc` | not ported | A sample page off upstream's site; see [Share processing pipeline](architecture/share-processing-pipeline.md). |
 | `payouts/index.adoc` | [Payouts](payouts/README.md) | |
-| `payouts/coinbase.adoc` | [Coinbase payouts](payouts/coinbase.md) | Bitcoin Cash outputs, donation and fee; the hybrid payout and its payout tree. |
-| `payouts/marketplace.adoc` | [Selling shares](payouts/selling-shares.md) | Covenants exist on Bitcoin Cash; the window is three blocks of work, not two weeks. |
-| `payouts/onchain.adoc` | [Selling shares](payouts/selling-shares.md), "On-chain swaps" | Upstream's page is a heading only. Built here: [Trading shares for BCH](atomic-swap/bch-share-trading.md). |
-| `payouts/l2_swaps.adoc` | [Selling shares](payouts/selling-shares.md), "Off-chain swaps" | Upstream's Ark and Lightning swaps are "coming soon". Not planned on Bitcoin Cash (plan decision 13). |
-| `payouts/marketplace_ux.adoc` | [Selling shares](payouts/selling-shares.md), "Marketplace application" | Upstream's page is headings only; no application here either. |
-| `payouts/pricing_shares_as_options.adoc` | [Selling shares](payouts/selling-shares.md), "Pricing a share" | Upstream's page is a heading only. Marked as an open question, with an estimate for Bitcoin Cash. |
-| `handling_known_attacks.adoc` | [Known attacks and threat model](known-attacks.md) | Upstream's page shows "coming soon" and keeps its list in comments; this fork adapted that list earlier. |
-| `compare_datum_sv2.adoc` | [Comparison with SV2 and DATUM](compare-datum-sv2.md) | Adds how this fork uses Stratum V2 Job Declaration without an operator. |
-| `dashboards.adoc` | not ported | A title with no text upstream. This fork's dashboards: the node's built-in dashboard, [Grafana dashboards](deployment.md#grafana-dashboards) and [Metrics](architecture/metrics.md). |
-| `stories/index.adoc`, `stories/single_miner.adoc` | not ported | Placeholders upstream ("For now this page is a placeholder"). |
+| `payouts/coinbase.adoc` | [Coinbase payouts](payouts/coinbase.md) | Donation, fee, payout tree. |
+| `payouts/marketplace.adoc` | [Selling shares](payouts/selling-shares.md) | Covenants; a window of three blocks of work, not two weeks. |
+| `payouts/onchain.adoc` | [Selling shares](payouts/selling-shares.md), "On-chain swaps" | A heading upstream; built here as [Trading shares for BCH](atomic-swap/bch-share-trading.md). |
+| `payouts/l2_swaps.adoc` | [Selling shares](payouts/selling-shares.md), "Off-chain swaps" | Ark and Lightning "coming soon" upstream; not planned here (plan decision 13). |
+| `payouts/marketplace_ux.adoc` | [Selling shares](payouts/selling-shares.md), "Marketplace application" | Headings only upstream; no application here. |
+| `payouts/pricing_shares_as_options.adoc` | [Selling shares](payouts/selling-shares.md), "Pricing a share" | A heading upstream; an open question here, with an estimate. |
+| `handling_known_attacks.adoc` | [Known attacks and threat model](known-attacks.md) | "Coming soon" upstream; adapted from the list in its comments. |
+| `compare_datum_sv2.adoc` | [Comparison with SV2 and DATUM](compare-datum-sv2.md) | Job Declaration without an operator. |
+| `dashboards.adoc` | not ported | A title only upstream. Here: the built-in dashboard, [Grafana dashboards](deployment.md#grafana-dashboards), [Metrics](architecture/metrics.md). |
+| `stories/index.adoc`, `stories/single_miner.adoc` | not ported | Placeholders upstream. |
 
-## Not pages
-
-| Upstream file | Why not ported |
-|---|---|
-| `presentations/` (talk slides and notes, a Grafana screenshot) | A Bitcoin conference talk, excluded from upstream's own site. |
-| `README.adoc`, `_config.yml`, `Gemfile`, `Rakefile`, `.github/workflows/pages.yml`, `CNAME` | Build and publishing of the Jekyll site. This book builds with mdBook (`docs/book.toml`, the `Docs` CI job). |
-| `_sass/`, `_includes/`, `_plantuml/`, `assets/` (fonts, logo, favicon) | Upstream's site theme and brand, with Bitcoin colours; mdBook's theme is used here. |
-| `_snippets/stratum-config.toml` | A `[stratum]` snippet no page includes yet, with a Bitcoin testnet4 share address; this fork's settings are in `config.sample.toml` and [Miner options](miner-options.md). |
-| `AGENTS.md`, `CLAUDE.md`, `DOC_CODE_REVIEW.md` | Contributor and review notes for upstream's docs repository; this repository has its own `AGENTS.md`. |
-
-## Keeping up with upstream
+Not pages, not ported: `presentations/` (a Bitcoin conference talk); the
+Jekyll build (`README.adoc`, `_config.yml`, `Gemfile`, `Rakefile`,
+`.github/workflows/pages.yml`, `CNAME`; this book builds with mdBook,
+`docs/book.toml`, in the `Docs` CI job); the theme (`_sass/`, `_includes/`,
+`_plantuml/`, `assets/`); `_snippets/stratum-config.toml` (a `[stratum]`
+snippet no page includes, with a Bitcoin testnet4 address); and notes for
+upstream's docs repository (`AGENTS.md`, `CLAUDE.md`, `DOC_CODE_REVIEW.md`).
 
 To bring a page up to date, diff `p2poolv2/docs` from `623e4c1` to its new
 head, port the changes into the page named above, and move the commit named
@@ -69,28 +60,25 @@ in that page's header and at the top of this page.
 
 ## Code from upstream
 
-Until 2026-10-30 upstream code changes were copied by hand, one commit per
-change with credit. Since then upstream's code comes in by `git merge` of
-`upstream/main`, the first at upstream `c0c70cdb`, so a later merge conflicts
-only where both sides changed the same lines. That first merge kept this
-fork's versions of the changes already copied (the four uncle commits, the
-decoder fuzz harness, the libzmq fix), took upstream's Electrum server crate
-(off unless `[electrum] enabled`), its ansible source install, node preflight
-check and per-host vaults, its nix devShell and its CI runner updates, and
-left upstream's `grafana_p2poolv2` ansible role unused beside this fork's
-`monitoring_p2poolv2`.
+Upstream's code comes in by `git merge` of `upstream/main` (first merged at
+upstream `c0c70cdb`). Changes copied by hand before that (the four uncle
+commits, the decoder fuzz harness, the libzmq fix) keep this fork's version.
+Upstream's Electrum server crate (off unless `[electrum] enabled`), ansible
+source install, node preflight check, per-host vaults, nix devShell and CI
+runner updates came in; its `grafana_p2poolv2` ansible role stays unused
+beside this fork's `monitoring_p2poolv2`.
 
-The next merge, of upstream `c2287b28` (its v0.17.0, 2026-11-12), brought
-these pages of upstream's `docs/` folder up to that commit:
+The merge of upstream `c2287b28` (v0.17.0) brought these `docs/` pages up to
+that commit:
 
 | Upstream page | This book | Notes |
 |---|---|---|
-| `docs/architecture/async-flow.md` | [Async flow and concurrency](architecture/async-flow.md) | The monitoring broadcast row and the Electrum tip watcher, beside this fork's share transaction relay row. |
-| `docs/architecture/pruning.md` | [Pruning](architecture/pruning.md) | Script history and its compaction filter. On Bitcoin Cash the window is `BCH_PAYOUT_DEPTH`. |
+| `docs/architecture/async-flow.md` | [Async flow and concurrency](architecture/async-flow.md) | Monitoring broadcast and Electrum tip watcher rows, beside the share transaction relay row. |
+| `docs/architecture/pruning.md` | [Pruning](architecture/pruning.md) | Script history and its compaction filter; on Bitcoin Cash the window is `BCH_PAYOUT_DEPTH`. |
 | `docs/architecture/store-schema.md` | [Store schema](architecture/store-schema.md) | The `ScriptHistory` column family. |
-| `docs/testnet5.md` | not ported | Testnet5 is a Bitcoin test network this fork does not run: upstream's `Chain` config type that carries it collides with this fork's `chain` setting. |
+| `docs/testnet5.md` | not ported | A Bitcoin test network; upstream's `Chain` config type for it collides with this fork's `chain` setting. |
 
 The Electrum crate's `README.adoc` came with the code. Shell scripts upstream
-changed under `load-tests/sim/` stay deleted here; their changes (the promoted
-block log line, the BIP 320 version mask) are in `cargo sim`
-(`docs/tooling.md`).
+changed under `load-tests/sim/` stay deleted here; their changes (the
+promoted block log line, the BIP 320 version mask) are in `cargo sim`
+([Tooling](tooling.md)).

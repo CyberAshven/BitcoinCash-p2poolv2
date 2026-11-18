@@ -1,15 +1,14 @@
 # Running P2Poolv2 on Bitcoin Cash
 
 A short operator guide. Design details are in [bch-design.md](bch-design.md)
-and status in [bch-plan.md](bch-plan.md). Bitcoin Cash support has passed
-a two-node check on chipnet (2026-10-15) but is not yet a proven production
-pool. Try it on regtest or chipnet first.
+and status in [bch-plan.md](bch-plan.md). Bitcoin Cash support is not yet a
+proven production pool: try it on regtest or chipnet first. Hardware, disk and
+ports are in [requirements.md](requirements.md).
 
 ## 1. Run Bitcoin Cash Node
 
-P2Poolv2 asks BCHN for templates over JSON-RPC and listens for new blocks
-over ZMQ (and, with `node_p2p_address`, on BCHN's P2P port). In
-`bitcoin.conf`:
+P2Poolv2 asks BCHN for templates over JSON-RPC and hears new blocks over ZMQ
+(and, with `node_p2p_address`, on BCHN's P2P port). In `bitcoin.conf`:
 
 ```ini
 server=1
@@ -18,38 +17,31 @@ rpcpassword=<your password>
 zmqpubhashblock=tcp://127.0.0.1:28332
 ```
 
-BCHN answers `getblocktemplate` with "Bitcoin is not connected!" until it has
-at least one peer, on regtest as well. On regtest, set
-`allowunconnectedmining=1`, BCHN's option for a node with no peers, or run a
-second BCHN node and connect the two. The Docker dev stack does the former
-(`docker/README.adoc`). A new regtest chain holds only the genesis block,
-dated 2011, so BCHN reports `initialblockdownload` until it has a newer
-block, and P2Poolv2 waits for it (`Bitcoin node still syncing, checking
-again in 300s`). Mine one block before starting the node:
-`bitcoin-cli -regtest generatetoaddress 1 <bchreg: address>`. Hardware, disk
-and ports are in [requirements.md](requirements.md).
-
-BCHN fills templates only to `-percentblockmaxsize` of the block size limit
-(50% on mainnet by default). Leave it below 100%: the pool adds a coinbase
-with one output per miner in the PPLNS window, and a full template plus that
-coinbase could exceed the limit.
+- BCHN answers `getblocktemplate` with "Bitcoin is not connected!" until it
+  has a peer, on regtest too. On regtest set `allowunconnectedmining=1` (the
+  Docker dev stack does, `docker/README.adoc`) or connect a second BCHN.
+- A new regtest chain holds only the 2011 genesis block, so BCHN reports
+  `initialblockdownload` and P2Poolv2 waits (`Bitcoin node still syncing,
+  checking again in 300s`). Mine one block first:
+  `bitcoin-cli -regtest generatetoaddress 1 <bchreg: address>`.
+- BCHN fills templates only to `-percentblockmaxsize` of the block size limit
+  (50% on mainnet by default). Leave it below 100%: the pool adds a coinbase
+  with one output per miner in the PPLNS window.
 
 ### Or run BCHD
 
-P2Poolv2 takes templates from BCHD as well (checked with BCHD 0.22.4 on
-regtest and chipnet). BCHD has no ZMQ, so it hears new blocks on BCHD's P2P
-port: set `node_p2p_address` in `[stratum]`. BCHD serves RPC over TLS with a
-self-signed certificate it makes itself, `rpc.cert`. P2Poolv2's TLS refuses
-that certificate even when trusted, because it is a CA certificate used as
-the server's own (`CaUsedAsEndEntity`). So run BCHD on the same computer
-with TLS off; BCHD allows that only on localhost. In `bchd.conf`:
+BCHD works too (checked with BCHD 0.22.4 on regtest and chipnet). It has no
+ZMQ, so set `node_p2p_address` to hear blocks on its P2P port. P2Poolv2's TLS
+refuses BCHD's self-made `rpc.cert`, a CA certificate used as the server's own
+(`CaUsedAsEndEntity`), so run BCHD on the same computer with TLS off, which
+BCHD allows only on localhost. In `bchd.conf`:
 
 ```ini
 rpcuser=p2pool
 rpcpass=<your password>
 rpclisten=127.0.0.1:8334
 notls=1
-; Leave room for the pool's coinbase (see below).
+; Leave room for the pool's coinbase.
 blockmaxsize=16000000
 ```
 
@@ -63,39 +55,35 @@ node_p2p_address = "127.0.0.1:8333"
 url = "http://127.0.0.1:8334"
 ```
 
-`zmqpubhashblock` stays in the config; with no publisher on its address it
-stays silent. BCHD needs no `miningaddr`: the pool builds its own coinbase.
-BCHD fills a template up to 1,000 bytes below the block size limit unless
-`blockmaxsize` is set, and the pool's coinbase is often larger, so set
-`blockmaxsize` below the limit (16,000,000 is what BCHN's 50% gives at
-32 MB). BCHD does not report `initialblockdownload`: P2Poolv2 waits instead
-until BCHD gives a template, which BCHD refuses while it downloads the
-chain. On regtest BCHD gives templates without peers, and its `generate`
-needs `miningaddr`.
+- Without `blockmaxsize`, BCHD fills a template to 1,000 bytes below the
+  limit, too full for the pool's coinbase; 16,000,000 is BCHN's 50% of 32 MB.
+- BCHD needs no `miningaddr` (on regtest, its `generate` does), gives regtest
+  templates without peers, and does not report `initialblockdownload`:
+  P2Poolv2 waits until it gives a template.
+- `zmqpubhashblock` can stay in the config; it never fires.
 
 ## 2. Get your share address
 
-A share is owned by a P2PKH key from your own wallet. Take a regular
-receiving address (`q...`) for the key that should own your shares, ideally
-not your payout address, and re-encode it:
+A share is owned by a P2PKH key from your own wallet. Take a receiving
+address (`q...`) for that key, ideally not your payout address, and
+re-encode it:
 
 ```sh
 p2poolv2_cli bch-share-address --network mainnet bitcoincash:q...
 # p2pool:q...
 ```
 
-Use `--network chipnet` (`bchtest:` to `tp2pool:`), `--network scalenet`
-(`bchtest:` to `sp2pool:`) or `--network regtest` (`bchreg:` to `rp2pool:`) on
-the test networks. The command takes no private
-key. Keep the wallet that holds this key: it signs if you ever sell shares
-for BCH with `p2poolv2_cli bch-trade`
+On test networks use `--network chipnet` (`bchtest:` to `tp2pool:`),
+`--network scalenet` (`bchtest:` to `sp2pool:`) or `--network regtest`
+(`bchreg:` to `rp2pool:`). The command takes no private key. Keep the wallet:
+it signs if you sell shares for BCH with `p2poolv2_cli bch-trade`
 ([atomic-swap/bch-share-trading.md](atomic-swap/bch-share-trading.md)).
 
 ## 3. Configure the node
 
 Start from `config.sample.toml`, a Bitcoin Cash chipnet node
 (`config-bitcoin.sample.toml` is upstream's Bitcoin sample). For mainnet,
-set under `[stratum]`:
+under `[stratum]`:
 
 ```toml
 chain = "bitcoin-cash"
@@ -104,135 +92,116 @@ miner_address = "p2pool:q..."      # from step 2
 bootstrap_address = "bitcoincash:q..."
 ```
 
-A Bitcoin Cash config needs no `network`: the node uses the network
-`bitcoin_cash_network` implies, and ignores a `network` line, so all nodes on
-one network agree.
+A Bitcoin Cash config needs no `network`: the node uses the one
+`bitcoin_cash_network` implies and ignores a `network` line.
 
 Point `[bitcoinrpc]` at BCHN's RPC port and `zmqpubhashblock` at its ZMQ
 endpoint. Optionally set `node_p2p_address` in `[stratum]` to BCHN's P2P port
-(`127.0.0.1:48333` on chipnet, `127.0.0.1:8333` on mainnet): the node then
-also hears each new block as a P2P peer of BCHN, the way jtoomim's p2pool
-did. It is what gives a node without ZMQ, such as BCHD or Knuth, a new
-template at once instead of at the next 10-second poll. The node must accept
-P2P connections: BCHN does by default, but not with `-listen=0` or with
-`-connect` and no `-listen=1`. On a node without ZMQ, `zmqpubhashblock` can
-stay at its default; it never fires.
+(`127.0.0.1:48333` on chipnet, `127.0.0.1:8333` on mainnet) to also hear each
+block as a P2P peer, as jtoomim's p2pool did; a node without ZMQ (BCHD, Knuth)
+then gets a template at once instead of at the next 10-second poll. BCHN
+accepts P2P connections by default, but not with `-listen=0`, or `-connect`
+without `-listen=1`.
 
-At start the node checks that `[bitcoinrpc]` is BCHN on
-`bitcoin_cash_network`, and refuses to start otherwise with an error that
-says what it found:
+### Node checks at start
 
-- before waiting for BCHN to sync, `getblockchaininfo` must report BCHN's
-  chain name for the network: `main`, `chip`, `scale` or `regtest`. A BCHN node on
-  testnet4 (`test4`) has chipnet's genesis and CashAddr prefix, so only the
-  name tells them apart;
-- once BCHN has synced, its block at a height only Bitcoin Cash has must be
-  BCHN's checkpoint: block 661,648 on mainnet (the first block after the
-  November 2020 upgrade, where eCash split off, and after the 2018 Bitcoin
-  SV split), block 115,252 on chipnet (where chipnet forked from testnet4)
-  and block 10,000 on scalenet (the height scalenet is reorged back to). A Bitcoin, Bitcoin SV or eCash node also says `main`, but has
-  another block there. Regtest blocks are local, so regtest checks the name
-  only.
+The node refuses to start, saying what it found, unless `[bitcoinrpc]` is a
+BCHN on `bitcoin_cash_network`:
 
-Found blocks go to this node, and also to any extra BCHN nodes you list as
-`[[submit_nodes]]` tables (`url`, `username`, `password`), so a block does
-not depend on one node.
+- `getblockchaininfo` must report the network's chain name: `main`, `chip`,
+  `scale` or `regtest`. Testnet4 (`test4`) has chipnet's genesis and CashAddr
+  prefix; only the name tells them apart.
+- Once synced, BCHN's block at its checkpoint height must be the checkpoint:
+  block 661,648 on mainnet (the first after the November 2020 upgrade, past
+  the eCash and 2018 Bitcoin SV splits), 115,252 on chipnet (where it forked
+  from testnet4) and 10,000 on scalenet (where scalenet is reorged back to).
+  Bitcoin, Bitcoin SV and eCash nodes also say `main`. Regtest checks the
+  name only.
 
-Under `[network]`, list the share chain peers to join in `dial_peers`, by
-IP address or host name, for example
-`dial_peers = ["/ip4/203.0.113.1/tcp/6884", "/dns4/pool.example.com/tcp/6884"]`.
-A host name is looked up again on every dial, so a peer behind a changing
-address (dynamic DNS) stays reachable. A Bitcoin Cash node
-never uses DNS seeds: the seeds built into P2Poolv2 are Bitcoin nodes, and
-there are no Bitcoin Cash seeds yet. `dns_seed` is ignored and always off on
-`chain = "bitcoin-cash"`, so without `dial_peers` the node only waits for
-peers to dial it. Once connected, it dials more of the peers its peers tell
-it of until it has `target_outgoing_peers` outgoing peers, 16 by default,
-spread over network groups ([P2P network](p2p-network.md#outgoing-peers)).
+### Block submission and peers
 
-`wait_for_chain_sync` in `[stratum]` decides when the Stratum port opens.
-With `true`, the default when the line is missing, it opens only once the
-share chain tip is under 5 minutes old. A new share chain starts from a
-genesis share that is older than that, so the first node of a chain, and
-any node on regtest, must set it to `false`, or its Stratum port never
-opens. `config.sample.toml` sets `false`. Set `true` once `dial_peers` lists
-a node of a running share chain, so miners connect only after this node
-has caught up.
+Found blocks go to this node and to every extra BCHN listed as
+`[[submit_nodes]]` (`url`, `username`, `password`).
 
-To run a node that others join, keep `listen_address` on all interfaces
-(`/ip4/0.0.0.0/tcp/6884`), let TCP port 6884 in through the firewall (and
-the router, if the node is behind one), and publish its address as
-`/dns4/<host name>/tcp/6884` or `/ip4/<public IP>/tcp/6884`. Joining nodes
-put that address in their `dial_peers`; once connected they also learn
-other peers from it.
+Under `[network]`, list share chain peers in `dial_peers` by IP address or
+host name; a host name is looked up again on every dial, so dynamic DNS works:
+
+```toml
+dial_peers = ["/ip4/203.0.113.1/tcp/6884", "/dns4/pool.example.com/tcp/6884"]
+```
+
+A Bitcoin Cash node never uses DNS seeds (the built-in ones are Bitcoin
+nodes): `dns_seed` is ignored and off on `chain = "bitcoin-cash"`. Without
+`dial_peers` or [Nostr discovery](p2p-network.md#finding-peers-through-nostr)
+the node only waits to be dialed. Once connected it dials peers it learns of
+until it has `target_outgoing_peers` outgoing peers, 16 by default
+([P2P network](p2p-network.md#outgoing-peers)).
+
+`wait_for_chain_sync` in `[stratum]`: with `true`, the default, the Stratum
+port opens once the share chain tip is under 5 minutes old. The first node of
+a new share chain, and any node on regtest, must set `false` (the genesis
+share is older), or the port never opens; `config.sample.toml` sets `false`.
+Set `true` once `dial_peers` lists a node of a running share chain.
+
+For a node others join: keep `listen_address` on all interfaces
+(`/ip4/0.0.0.0/tcp/6884`), open TCP port 6884 in the firewall and router, and
+publish `/dns4/<host name>/tcp/6884` or `/ip4/<public IP>/tcp/6884` for their
+`dial_peers`.
 
 ### Donation and pool fee
 
-By default each block this node finds donates 1% (100 basis points) to the
-P2Poolv2 Bitcoin Cash address
-`bitcoincash:qze95tc2dqrnltvxfa5yhunwx5952f34fvw4g6365k`. Change it with
-`donation` (basis points; 0 turns it off). That is the default for miners
-who choose none: each miner may choose their own donation in their login
-with `donation=<percent>`, 0 to 10 in steps of 0.5, and the node's setting
-never overrides it (see [Miner options](miner-options.md#donation)). A
-public pool operator adds their own cut with `fee_address` and `fee`: 1%
-(100 basis points) when `fee_address` is set without `fee`, taken from what
-the donation leaves. The donation and the fee may each be at most 1,000
-basis points (10%), whatever the other is: other nodes reject shares above
-that. The node logs the donation in effect at startup.
+- `donation` (basis points) applies to miners who choose none: 100 (1%) to
+  `bitcoincash:qze95tc2dqrnltvxfa5yhunwx5952f34fvw4g6365k` by default, 0 for
+  none. A miner's own `donation=<percent>` always wins
+  ([Miner options](miner-options.md#donation)).
+- `fee_address` and `fee` add an operator's cut: 100 basis points (1%) when
+  `fee_address` is set without `fee`, taken from what the donation leaves.
+- Each is at most 1,000 basis points (10%); peers reject shares above that.
+  The node logs the donation in effect at startup.
+
+How the cuts are taken: [Payout distribution](architecture/payout-distribution.md).
 
 ### Stratum V2
 
-Set `sv2_port` to serve Stratum V2 beside Stratum V1. Mining connections open
-standard or extended channels with `user_identity = "<payout address>.<worker>"`;
-their shares belong to `miner_address`. When `miner_address` is unset, each
-miner names its own share address after the username, as the Stratum V1
-password does: `user_identity = "<payout address>.<worker>,p2p=<share address>"`.
-A `p2p=` that differs from a configured `miner_address` is refused with
-`invalid-share-address`. Job Declaration connections are served too.
-
-Without keys, Stratum V2 frames are unencrypted, which the specification
-allows only between local roles; keep the port on localhost or a trusted LAN.
-To require Noise encryption, set an authority key pair made with an external
-tool (for example the Stratum V2 reference implementation's key utility):
+Set `sv2_port` to serve Stratum V2 (standard and extended channels, and Job
+Declaration) beside Stratum V1. The identities are in
+[Miner options](miner-options.md#stratum-v2). Without keys, frames are
+unencrypted, which the specification allows only between local roles: keep
+the port on localhost or a trusted LAN. To require Noise, set an authority key
+pair made with an external tool (such as the Stratum V2 reference
+implementation's key utility); miners pin the public key:
 
 ```toml
 sv2_authority_public_key = "9b..."
 # secret via env: P2POOL_STRATUM__SV2_AUTHORITY_SECRET_KEY=...
+#   (or sv2_authority_secret_key in the file)
 sv2_cert_validity_secs = 3600
 ```
 
-Miners then pin the public key.
-
 ### Light templates
 
-`template_source = "rpc_light"` asks the node in `[bitcoinrpc]` for light
-templates (`getblocktemplatelight`): the node keeps the template's
-transactions and sends only their merkle branch, so the pool never fetches
-or holds them. A block found on one goes back as its header and coinbase with
-`submitblocklight`, and the node adds the transactions. A template the node
-cannot give light (no `getblocktemplatelight`, no `merkle` in it, or no
-`miningblocksizelimit` in `getmininginfo`) comes from `getblocktemplate`,
-with a warning logged once. BCHN gives light templates; BCHD and Knuth do
-not today.
+`template_source = "rpc_light"` asks the `[bitcoinrpc]` node for
+`getblocktemplatelight`: the node keeps the transactions and sends their
+merkle branch, and a found block goes back as header and coinbase with
+`submitblocklight`. BCHN gives light templates; BCHD and Knuth do not today.
 
-The pool cannot count a light template's transactions, so it takes the
-node's mining size limit (`-blockmaxsize` or equivalent) as their size: that
-limit, the pool's coinbase and 89 bytes of header and transaction count must
-fit the block size limit, or the node withdraws work and logs why. BCHN's
-default leaves half of the block on mainnet and regtest but none on chipnet,
-where `-blockmaxsize` must be lowered. `[[submit_nodes]]` cannot be used with
-light templates: only the node that made a template can complete its block.
-
-The transactions move to the node's disk instead: BCHN writes each light
-job's transactions under `<datadir>/gbt/` and deletes them after
-`-gbtstoretime` (3600 s by default). With 5 MB templates and a poll every
-10 s that is about 1.9 GB an hour.
+- A template the node cannot give light (no `getblocktemplatelight`, no
+  `merkle` in it, or no `miningblocksizelimit` in `getmininginfo`) comes from
+  `getblocktemplate`, with a warning logged once.
+- The node's mining size limit (`-blockmaxsize` or equivalent), the pool's
+  coinbase and 89 bytes of header and transaction count must fit the block
+  size limit, or the node withdraws work and logs why. BCHN's default leaves
+  half the block on mainnet and regtest, none on chipnet: lower
+  `-blockmaxsize` there.
+- Not with `[[submit_nodes]]`: only the node that made a template can
+  complete its block.
+- BCHN writes each light job's transactions under `<datadir>/gbt/` and
+  deletes them after `-gbtstoretime` (3600 s by default): with 5 MB templates
+  every 10 s, about 1.9 GB an hour.
 
 ### Templates from a Stratum V2 Template Provider
 
-By default the node asks BCHN for templates over RPC. To take them from a
-Stratum V2 Template Provider instead, such as
+For templates from a Template Provider, such as
 [bchn-sv2-bridge](https://github.com/danhaus93-ops/bchn-sv2-bridge), Pickaxe's
 template server or another node's Template Distribution service:
 
@@ -243,17 +212,14 @@ template_provider_address = "127.0.0.1:8442"
 # template_provider_authority_public_key = "9b..."
 ```
 
-Found blocks go back to the provider with `SubmitSolution`, or to the node
-over RPC when the provider connection cannot take them. Keep `[bitcoinrpc]`:
-the node checks each template's parent there, validates shares against it,
-and falls back to it for blocks.
-
-The node asks each provider for the BCH large templates extension
-(`0x4C54`). A provider that grants it pushes every template's transactions,
-so only the block size limit bounds a template; the log says `granted the
-large templates extension`. Any other provider is asked for each template's
-transactions, and a template is then limited to 65,535 transactions in one
-16 MiB message.
+- Found blocks go back with `SubmitSolution`, or over RPC when the provider
+  cannot take them. Keep `[bitcoinrpc]`: it checks each template's parent,
+  validates shares and takes blocks.
+- The node asks for the BCH large templates extension (`0x4C54`). A provider
+  that grants it (log: `granted the large templates extension`) pushes every
+  template's transactions, so only the block size limit bounds a template.
+  Otherwise the node asks for each template's transactions: at most 65,535
+  in one 16 MiB message.
 
 #### A Template Provider over Tor or I2P
 
@@ -263,30 +229,22 @@ through that network's SOCKS5 proxy on this computer:
 ```toml
 template_source = "sv2"
 template_provider_address = "<56 characters>.onion:3335"
-template_provider_authority_public_key = "9b..."
-template_provider_proxy = "127.0.0.1:9050"   # Tor's SOCKS port
+template_provider_authority_public_key = "9b..."   # always required here
+template_provider_proxy = "127.0.0.1:9050"         # Tor's SOCKS port
 ```
 
-For I2P, give the provider's `.b32.i2p` name with the port of its server
-tunnel, and the router's SOCKS proxy (i2pd: `127.0.0.1:4447`).
+For I2P, give the provider's `.b32.i2p` name and server tunnel port, and the
+router's SOCKS proxy (i2pd: `127.0.0.1:4447`). The name goes to the proxy
+unresolved; the node never connects directly, and retries the proxy. Each
+connection has its own SOCKS username, so Tor gives it its own circuit, and a
+`Reconnect` is followed through the proxy. Time limits: 20 seconds to connect
+through the proxy and 15 per setup answer, 90 and 45 for an I2P name, 10 each
+for a provider reached directly.
 
-- The provider's name goes to the proxy as a name. It is never resolved on
-  this computer, and when the proxy cannot reach the provider the node does
-  not connect directly: it waits and tries the proxy again.
-- Each connection brings its own SOCKS username, so Tor puts it on its own
-  circuit and a reconnect does not ride the circuit that just failed.
-- The authority public key is always required with a proxy.
-- A redirect (`Reconnect`) from the provider is followed through the proxy
-  too.
-- The provider has 20 seconds to accept a connection through the proxy and
-  15 seconds for each setup answer; an I2P name has 90 and 45 seconds. A
-  provider the node connects to directly has 10 seconds for each.
-
-The provider needs no setting for this. Its operator points an onion
-service (`HiddenServicePort 3335 127.0.0.1:3335` in `torrc`) or an i2pd
-server tunnel at its Template Distribution port.
-
-`[bitcoinrpc]` still names a node this computer reaches itself.
+The provider's operator points an onion service
+(`HiddenServicePort 3335 127.0.0.1:3335` in `torrc`) or an i2pd server tunnel
+at its Template Distribution port. `[bitcoinrpc]` still names a node this
+computer reaches directly.
 
 ## 4. Point miners at the node
 
@@ -303,53 +261,38 @@ password: x                                (or p2p=<share address> if miner_addr
 
 Stratum V2: `<node>:<sv2_port>`, user identity `<payout CashAddr>.<worker>`
 (add `,p2p=<share address>` if `miner_address` is unset), and the authority
-public key when Noise is enabled.
+public key when Noise is on. Work selection with Job Declaration, in both
+modes, is in [bch-job-declaration.md](bch-job-declaration.md).
 
-Pool-issued standard and extended jobs are supported. BCH extended channels
-also support work selection with both Job Declaration modes. A BCH-aware
-declarator must follow the direct PPLNS coinbase contract in
-[bch-job-declaration.md](bch-job-declaration.md). Full-Template work requires
-local BCHN proposal validation; a Coinbase-Only declarator validates and
-broadcasts its own private block. Both modes have passed the encrypted
-two-node BCHN regtest, including proof verification and an experimental
-SAFA token withdrawal. Independent declarator/ASIC interoperability, final
-SAFA policy, chipnet issuance and remote CI remain open in
-[bch-plan.md](bch-plan.md).
+Payouts arrive in the coinbase of each block the pool finds and are spendable
+after 100 blocks, as for any Bitcoin Cash coinbase.
 
-Payouts appear in the miners' wallets in the coinbase of each block the pool
-finds and become spendable after 100 blocks, as for any Bitcoin Cash
-coinbase.
-
-If the node cannot get a template from BCHN for 60 seconds, it withdraws
-mining work and closes the miners' connections, so a miner with a backup
-pool fails over to it. The log says `Withdrawing mining work: no template
-for 60 seconds`, after `Error polling block template` lines that give the
-reason. Work comes back with the next template (`The node gives templates
-again`). With `template_source = "sv2"` the same happens 60 seconds after
-the last Template Provider connection that published a template ended,
-after `Template Provider connection to … ended` lines.
+With no template for 60 seconds, the node withdraws work and closes the
+miners' connections, so a miner with a backup pool fails over. The log says
+`Withdrawing mining work: no template for 60 seconds` after `Error polling
+block template` lines with the reason, and `The node gives templates again`
+when work returns. With `template_source = "sv2"` the 60 seconds start when
+the last Template Provider connection that published a template ends
+(`Template Provider connection to … ended`).
 
 ## 5. Check two nodes on chipnet
 
-This check passed on 2026-10-15 (see [bch-design.md](bch-design.md#chipnet-run-2026-10-15)).
-It needs a machine that can reach BCH peers on port 48333.
+The first run is recorded in
+[bch-design.md](bch-design.md#chipnet-run-2026-10-15). It needs a machine
+that reaches BCH peers on port 48333.
 
 1. Run BCHN with `chipnet=1`, `server=1` and `zmqpubhashblock`, and let it
    sync (`bitcoin-cli -chipnet getblockchaininfo`).
-2. Start two P2Poolv2 nodes with `bitcoin_cash_network = "chipnet"`,
-   their own `store` paths and ports, and
-   `dial_peers` on the second pointing at the first's `listen_address`.
-   Both logs should show `Identified Peer ... /p2pool/test/<genesis>/1.0.0`
-   with the same genesis id. On a new share chain the genesis share is old,
-   so the first node never counts its chain as current: set
-   `wait_for_chain_sync = false` there or its Stratum port never opens.
-3. Point a miner at the first node's Stratum port with a `bchtest:` username.
-   A share needs at least about 2e10 hashes (stratum difficulty
-   about 4.7). A miner's difficulty never goes above the share difficulty
-   of its job (4 here), and the sample's `minimum_difficulty` is 1, so
-   vardiff can bring a CPU miner down to where it submits. 24 CPU threads
-   (about 150 MH/s) found a share every minute or two; a small ASIC finds
-   them in seconds.
+2. Start two P2Poolv2 nodes with `bitcoin_cash_network = "chipnet"`, their
+   own `store` paths and ports, and the second's `dial_peers` pointing at the
+   first's `listen_address`; the first needs `wait_for_chain_sync = false`.
+   Both logs show `Identified Peer ...` with the same protocol,
+   `/p2pool/test/<genesis>/<rule tags>/1.0.0`.
+3. Point a miner at the first node with a `bchtest:` username. A share needs
+   about 2e10 hashes (stratum difficulty about 4.7); vardiff can go down to
+   the sample's `minimum_difficulty` of 1 and never above the job's share
+   difficulty (4 here). 24 CPU threads (about 150 MH/s) found a share every
+   minute or two; a small ASIC finds them in seconds.
 4. Pass: `curl http://<api>/chain_info` on both nodes shows the same
    `chain_tip_height` above 0, and neither log has `Chain-context validation
    failed`. A block found on chipnet appears in BCHN with the 1% donation
