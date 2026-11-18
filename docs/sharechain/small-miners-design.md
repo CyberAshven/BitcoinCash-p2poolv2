@@ -889,13 +889,14 @@ shares a second as its 1-second rows. Taking out what the shares themselves
 cost there, with a template a node, checking weak shares keeps a node about
 1% busy with 1,000 miners and 12% with 10,000; with 100,000 it takes 1.3
 times what a node can do, so the node falls behind, unless the pool's nodes
-build one template (16%). The node checks one share or weak share at a time
-today. These costs were measured with ten-minute blocks. A one-minute
-block's coinbase pays at most about 1,790 outputs at the default level, a
-tenth of the 17,885 measured with 100,000 miners, and the window of any
-pool above 0.015% of Bitcoin Cash holds fewer shares than the 120,960
-measured, so they overstate the check until the timing tests are run again
-for one-minute blocks.
+build one template (16%). A node checks the header rules of the weak shares
+a share carries on several cores (item 2 below), and the rest on one.
+These costs were measured with ten-minute blocks. A one-minute block's
+coinbase pays at most about 1,790 outputs at the default level, a tenth of
+the 17,885 measured with 100,000 miners, and the window of any pool above
+0.015% of Bitcoin Cash holds fewer shares than the 120,960 measured, so
+they overstate the check until the timing tests are run again for
+one-minute blocks.
 
 ### What has to come first
 
@@ -921,9 +922,13 @@ Neither is a share-chain rule, and each helps under today's rule too.
    minute adds stale shares either way, and the conclusion stands.
 2. **Weak share checks leave the single validation queue**, so a node with
    several cores checks several at once, or the check gets cheap enough
-   that 35 a second fit one core with 100,000 miners in the window. Until
-   then `WEAK_FILL_MAX` 320 is safe for pools paying tens of thousands of
-   miners, not 100,000.
+   that 35 a second fit one core with 100,000 miners in the window. Built
+   for the header rules of the weak shares a share carries (PR #127), on
+   helper threads one fewer than the node's CPUs (`utils/parallel.rs`);
+   their coinbases stay on one thread, where batches on several measured
+   about 15% slower at 1,200 payees. Until a node is measured keeping up
+   with 100,000 miners in the window, `WEAK_FILL_MAX` 320 is safe for pools
+   paying tens of thousands of miners, not 100,000.
 
 ### What was decided
 
