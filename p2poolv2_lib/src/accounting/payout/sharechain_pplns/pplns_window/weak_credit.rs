@@ -282,6 +282,7 @@ impl PplnsWindow {
                 difficulty: weak_entry.work,
                 weight: scaled - includer,
                 weak_shares: weak_entry.count,
+                weak_count: 0,
                 payout_level: weak_entry.payout_level,
                 place_in_share: 1 + entry.uncle_entries.len() + group_index,
             });
