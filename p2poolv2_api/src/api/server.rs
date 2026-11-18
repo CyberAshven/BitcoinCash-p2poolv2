@@ -194,6 +194,10 @@ pub(crate) fn build_router_with_history(
             app_state.clone(),
             history.clone(),
         ))
+        .merge(endpoints::sharechain::router(
+            app_state.clone(),
+            history.clone(),
+        ))
         .merge(dashboard::router(app_state.clone(), history.clone()));
     let share_chain_routes = match web.web_root.clone() {
         Some(web_root) => {
