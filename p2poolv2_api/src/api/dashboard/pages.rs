@@ -12,10 +12,11 @@
 //! pauses it, and chart tooltips are hit zones with styled tips plus SVG titles.
 //! Every value is escaped by maud.
 
+use super::ShareSeriesItem;
 use super::assets;
-use super::chart::{ChartBlock, Series, line_chart};
+use super::chart::{ChartBlock, Series, line_chart, line_chart_with};
 use super::history::Sample;
-use crate::api::endpoints::miner::MinerResponse;
+use crate::api::endpoints::miner::{MinerResponse, MinerShare};
 use crate::api::endpoints::share::ShareLookupOutput;
 use bitcoin::{BlockHash, CompactTarget, Target};
 use maud::{DOCTYPE, Markup, html};
@@ -23,6 +24,8 @@ use p2poolv2_lib::node::connection_tracker::{ConnectionDirection, PeerInfoRespon
 use p2poolv2_lib::shares::weak::WEAK_RATIO_UNIT;
 use p2poolv2_lib::store::found_block::EffortSnapshot;
 use serde::Serialize;
+use time::OffsetDateTime;
+use time::macros::format_description;
 
 /// Seconds between refreshes of the overview page while auto is on.
 pub(crate) const OVERVIEW_REFRESH_SECONDS: u32 = 30;
@@ -98,12 +101,24 @@ pub(crate) fn network_on(value: Option<&str>) -> bool {
     value == Some("1")
 }
 
-/// The query fragment carrying the four chart series toggles: pool, node
+/// The query fragment carrying the chart series toggles: pool, node
 /// and the found-block diamonds carry their turns off, network carries its
-/// turn on (it is opt-in), so `""` is the default state. The links that
-/// must survive a click (range buttons, the auto-refresh toggle) append it
-/// to keep the state.
-pub(crate) fn series_q(pool_on: bool, node_on: bool, network_on: bool, blocks_on: bool) -> String {
+/// turn on (it is opt-in), so `""` is the default state. The Sharechain
+/// tab's height/dmin/dmax/uncles/weak toggles are emitted only when
+/// `chart_key` is `"sharechain"`, so the hashrate tab's URLs never change.
+#[allow(clippy::too_many_arguments)] // one bool per toggle series: a state struct would only move the list
+pub(crate) fn series_q(
+    pool_on: bool,
+    node_on: bool,
+    network_on: bool,
+    blocks_on: bool,
+    height_on: bool,
+    dmin_on: bool,
+    dmax_on: bool,
+    uncles_on: bool,
+    weak_on: bool,
+    chart_key: &str,
+) -> String {
     let mut query = String::new();
     if !pool_on {
         query.push_str("&pool=0");
@@ -117,7 +132,47 @@ pub(crate) fn series_q(pool_on: bool, node_on: bool, network_on: bool, blocks_on
     if !blocks_on {
         query.push_str("&blocks=0");
     }
+    if chart_key == "sharechain" {
+        if !height_on {
+            query.push_str("&height=0");
+        }
+        if !dmin_on {
+            query.push_str("&dmin=0");
+        }
+        if !dmax_on {
+            query.push_str("&dmax=0");
+        }
+        if !uncles_on {
+            query.push_str("&uncles=0");
+        }
+        if !weak_on {
+            query.push_str("&weak=0");
+        }
+    }
     query
+}
+
+/// The two chart tabs a dashboard card can show.
+const CHART_TABS: [(&str, &str); 2] = [("hashrate", "Hashrate"), ("sharechain", "Sharechain")];
+
+/// `value` if it names a chart tab; `"hashrate"` otherwise.
+pub(crate) fn normalize_chart(value: Option<&str>) -> &'static str {
+    for (key, _label) in CHART_TABS {
+        if value == Some(key) {
+            return key;
+        }
+    }
+    "hashrate"
+}
+
+/// The extra query fragment a Sharechain-state URL needs; the hashrate
+/// tab is the default, so its URLs stay clean.
+pub(crate) fn chart_arg(chart_key: &str) -> &'static str {
+    if chart_key == "sharechain" {
+        "&chart=sharechain"
+    } else {
+        ""
+    }
 }
 
 /// What every page shows about the node it is served by. `/network` serves
@@ -275,6 +330,21 @@ pub(crate) struct Overview {
     /// The pool's found blocks inside the chart's window, for the chart's
     /// diamonds and Block tooltip rows.
     pub(crate) chart_blocks: Vec<ChartBlock>,
+    /// Which chart tab is active: `"hashrate"` or `"sharechain"`.
+    pub(crate) chart_key: &'static str,
+    /// The sharechain lines: whether the height line shows (true by default).
+    pub(crate) height_on: bool,
+    /// Whether the min diff line shows (true by default).
+    pub(crate) dmin_on: bool,
+    /// Whether the max diff line shows (true by default).
+    pub(crate) dmax_on: bool,
+    /// Whether the uncle count line shows (true by default).
+    pub(crate) uncles_on: bool,
+    /// Whether the weak count line shows (true by default).
+    pub(crate) weak_on: bool,
+    /// Shares fetched for the sharechain tab: time, height, difficulty,
+    /// uncle timestamps and weak count, oldest first.
+    pub(crate) share_series: Vec<ShareSeriesItem>,
 }
 
 /// The found blocks page.
@@ -345,9 +415,11 @@ pub(crate) struct MinerView {
     pub(crate) site: Site,
     pub(crate) now: u64,
     pub(crate) report: MinerResponse,
-    /// The miner's hashrate over the recent shares, if it has any there.
+    /// The miner's hashrate over the window behind the miners page's
+    /// Hashrate column, if it has any there.
     pub(crate) hashrate: Option<f64>,
-    /// How many recent shares, and over how many seconds, it was taken from.
+    /// The window `hashrate` was taken from: how many shares, over how many
+    /// seconds.
     pub(crate) recent_window: Option<(usize, u32)>,
     /// Its workers, when it mines on this node.
     pub(crate) workers: Vec<WorkerRow>,
@@ -442,8 +514,14 @@ pub(crate) fn fmt_block_effort(effort: Option<EffortSnapshot>) -> String {
 pub(crate) fn fmt_utc(unix: u64) -> String {
     i64::try_from(unix)
         .ok()
-        .and_then(|seconds| chrono::DateTime::from_timestamp(seconds, 0))
-        .map(|time| time.format("%Y-%m-%d %H:%M UTC").to_string())
+        .and_then(|seconds| OffsetDateTime::from_unix_timestamp(seconds).ok())
+        .and_then(|date_time| {
+            date_time
+                .format(format_description!(
+                    "[year]-[month]-[day] [hour]:[minute] UTC"
+                ))
+                .ok()
+        })
         .unwrap_or_else(|| unix.to_string())
 }
 
@@ -451,8 +529,14 @@ pub(crate) fn fmt_utc(unix: u64) -> String {
 pub(crate) fn fmt_day_time(unix: u64) -> String {
     i64::try_from(unix)
         .ok()
-        .and_then(|seconds| chrono::DateTime::from_timestamp(seconds, 0))
-        .map(|time| time.format("%b %-d %H:%M UTC").to_string())
+        .and_then(|seconds| OffsetDateTime::from_unix_timestamp(seconds).ok())
+        .and_then(|date_time| {
+            date_time
+                .format(format_description!(
+                    "[month repr:short] [day padding:none] [hour]:[minute] UTC"
+                ))
+                .ok()
+        })
         .unwrap_or_else(|| unix.to_string())
 }
 
@@ -460,8 +544,12 @@ pub(crate) fn fmt_day_time(unix: u64) -> String {
 pub(crate) fn fmt_hour_edge(unix: u64) -> String {
     i64::try_from(unix)
         .ok()
-        .and_then(|seconds| chrono::DateTime::from_timestamp(seconds, 0))
-        .map(|time| time.format("%H:%M").to_string())
+        .and_then(|seconds| OffsetDateTime::from_unix_timestamp(seconds).ok())
+        .and_then(|date_time| {
+            date_time
+                .format(format_description!("[hour]:[minute]"))
+                .ok()
+        })
         .unwrap_or_else(|| unix.to_string())
 }
 
@@ -625,13 +713,37 @@ fn stat(key: &str, value: Markup) -> Markup {
     html! { div.stat-item { div.k { (key) } div.v { (value) } } }
 }
 
+/// The carried and credited weak-share totals for the Uncles credited
+/// tile, or nothing when both are 0 so the tile stays what `stat()`
+/// emits. The carried side sums the whole report, not the paged slice.
+fn weak_summary(report: &MinerResponse) -> Option<(usize, usize)> {
+    let carried = report
+        .shares
+        .iter()
+        .map(|share| usize::from(share.weak_count))
+        .sum();
+    let credited = report.weak_share_count;
+    (carried > 0 || credited > 0).then_some((carried, credited))
+}
+
+/// A window row crediting a weak share: an uncle whose nephew is itself,
+/// which is how the weak credit marks the credited row.
+fn is_weak_share(share: &MinerShare) -> bool {
+    share.nephew.as_deref() == Some(share.blockhash.as_str())
+}
+
 /// The hashrate chart's Hour/Day/Week/Month buttons, plain links with no
 /// script. The active range carries `active-nav` and `aria-current`. When
 /// auto-refresh is off the links keep `?auto=off`, and `series_arg` keeps the
 /// chart series toggles.
-fn range_buttons(range_key: &str, auto: Auto, series_arg: &str) -> Markup {
+fn range_buttons(range_key: &str, auto: Auto, series_arg: &str, chart_key: &str) -> Markup {
     let auto_query = if matches!(auto, Auto::Off) {
         "&auto=off"
+    } else {
+        ""
+    };
+    let chart_query = if chart_key == "sharechain" {
+        "chart=sharechain&"
     } else {
         ""
     };
@@ -639,7 +751,7 @@ fn range_buttons(range_key: &str, auto: Auto, series_arg: &str) -> Markup {
         span.range-group aria-label="Chart time range" {
             @for (key, label, _, _, _) in RANGES {
                 a.outline.header-btn.active-nav[key == range_key] role="button"
-                    href=(format!("/dashboard?range={key}{auto_query}{series_arg}"))
+                    href=(format!("/dashboard?{chart_query}range={key}{auto_query}{series_arg}"))
                     aria-current=[(key == range_key).then_some("true")] { (label) }
             }
         }
@@ -658,6 +770,54 @@ fn series_toggles(
     blocks_on: bool,
     range_key: &str,
     auto: Auto,
+    chart_key: &str,
+) -> Markup {
+    let auto_query = if matches!(auto, Auto::Off) {
+        "&auto=off"
+    } else {
+        ""
+    };
+    let chart_query = chart_arg(chart_key);
+    html! {
+        span.series-toggles role="group" aria-label="Chart series" {
+            a.legend-chip.off[!pool_on] role="button" aria-pressed=(pool_on.to_string())
+                href=(format!("/dashboard?range={range_key}{auto_query}{chart_query}{}",
+                    series_q(!pool_on, node_on, network_on, blocks_on, true, true, true, true, true, chart_key))) {
+                span.legend-dot.pool {} "Pool"
+            }
+            a.legend-chip.off[!node_on] role="button" aria-pressed=(node_on.to_string())
+                href=(format!("/dashboard?range={range_key}{auto_query}{chart_query}{}",
+                    series_q(pool_on, !node_on, network_on, blocks_on, true, true, true, true, true, chart_key))) {
+                span.legend-dot.local {} "Node"
+            }
+            a.legend-chip.off[!network_on] role="button" aria-pressed=(network_on.to_string())
+                href=(format!("/dashboard?range={range_key}{auto_query}{chart_query}{}",
+                    series_q(pool_on, node_on, !network_on, blocks_on, true, true, true, true, true, chart_key))) {
+                span.legend-dot.network {} "Network"
+            }
+            a.legend-chip.off[!blocks_on] role="button" aria-pressed=(blocks_on.to_string())
+                href=(format!("/dashboard?range={range_key}{auto_query}{chart_query}{}",
+                    series_q(pool_on, node_on, network_on, !blocks_on, true, true, true, true, true, chart_key))) {
+                span.legend-dot.blocks {} "Blocks"
+            }
+        }
+    }
+}
+
+/// The Sharechain tab's chips, in the series' own order: Height,
+/// Uncle, Weak, Min diff, Max diff and the found-block diamonds, same
+/// stateless-link pattern as the hashrate tab's chips. The height
+/// chip's dot is white, the colour of its line.
+#[allow(clippy::too_many_arguments)] // one bool per chip: each chip links its own flip
+fn sharechain_toggles(
+    height_on: bool,
+    dmin_on: bool,
+    dmax_on: bool,
+    uncles_on: bool,
+    weak_on: bool,
+    blocks_on: bool,
+    range_key: &str,
+    auto: Auto,
 ) -> Markup {
     let auto_query = if matches!(auto, Auto::Off) {
         "&auto=off"
@@ -666,28 +826,155 @@ fn series_toggles(
     };
     html! {
         span.series-toggles role="group" aria-label="Chart series" {
-            a.legend-chip.off[!pool_on] role="button" aria-pressed=(pool_on.to_string())
-                href=(format!("/dashboard?range={range_key}{auto_query}{}",
-                    series_q(!pool_on, node_on, network_on, blocks_on))) {
-                span.legend-dot.pool {} "Pool"
+            a.legend-chip.off[!height_on] role="button" aria-pressed=(height_on.to_string())
+                href=(format!("/dashboard?chart=sharechain&range={range_key}{auto_query}{}",
+                    series_q(true, true, false, true, !height_on, dmin_on, dmax_on, uncles_on, weak_on, "sharechain"))) {
+                span.legend-dot style="background:#ffffff;border-radius:50%" {} "Height"
             }
-            a.legend-chip.off[!node_on] role="button" aria-pressed=(node_on.to_string())
-                href=(format!("/dashboard?range={range_key}{auto_query}{}",
-                    series_q(pool_on, !node_on, network_on, blocks_on))) {
-                span.legend-dot.local {} "Node"
+            a.legend-chip.off[!uncles_on] role="button" aria-pressed=(uncles_on.to_string())
+                href=(format!("/dashboard?chart=sharechain&range={range_key}{auto_query}{}",
+                    series_q(true, true, false, true, height_on, dmin_on, dmax_on, !uncles_on, weak_on, "sharechain"))) {
+                span.legend-dot style="background:#f43f5e;border-radius:50%" {} "Uncle"
             }
-            a.legend-chip.off[!network_on] role="button" aria-pressed=(network_on.to_string())
-                href=(format!("/dashboard?range={range_key}{auto_query}{}",
-                    series_q(pool_on, node_on, !network_on, blocks_on))) {
-                span.legend-dot.network {} "Network"
+            a.legend-chip.off[!weak_on] role="button" aria-pressed=(weak_on.to_string())
+                href=(format!("/dashboard?chart=sharechain&range={range_key}{auto_query}{}",
+                    series_q(true, true, false, true, height_on, dmin_on, dmax_on, uncles_on, !weak_on, "sharechain"))) {
+                span.legend-dot style="background:#f59e0b;border-radius:50%" {} "Weak"
+            }
+            a.legend-chip.off[!dmin_on] role="button" aria-pressed=(dmin_on.to_string())
+                href=(format!("/dashboard?chart=sharechain&range={range_key}{auto_query}{}",
+                    series_q(true, true, false, true, height_on, !dmin_on, dmax_on, uncles_on, weak_on, "sharechain"))) {
+                span.legend-dot style="background:#06b6d4;border-radius:50%" {} "Min diff"
+            }
+            a.legend-chip.off[!dmax_on] role="button" aria-pressed=(dmax_on.to_string())
+                href=(format!("/dashboard?chart=sharechain&range={range_key}{auto_query}{}",
+                    series_q(true, true, false, true, height_on, dmin_on, !dmax_on, uncles_on, weak_on, "sharechain"))) {
+                span.legend-dot style="background:#a78bfa;border-radius:50%" {} "Max diff"
             }
             a.legend-chip.off[!blocks_on] role="button" aria-pressed=(blocks_on.to_string())
-                href=(format!("/dashboard?range={range_key}{auto_query}{}",
-                    series_q(pool_on, node_on, network_on, !blocks_on))) {
-                span.legend-dot.blocks {} "Blocks"
+                href=(format!("/dashboard?chart=sharechain&range={range_key}{auto_query}{}",
+                    series_q(true, true, false, !blocks_on, height_on, dmin_on, dmax_on, uncles_on, weak_on, "sharechain"))) {
+                span.legend-dot style="background:var(--ms-green);border-radius:1px;transform:rotate(45deg)" {} "Blocks"
             }
         }
     }
+}
+
+/// The card heading: both chart names side by side -- the current chart's
+/// word underlined in full colour (aria-current), the other's word plain
+/// and dimmed as the switch link. Each link carries the range, auto and
+/// its own chart's series flips, so hidden lines round-trip through a
+/// switch. Hashrate is the default, so its URLs stay clean of a chart=
+/// parameter.
+#[allow(clippy::too_many_arguments)] // carries the range, auto and every series flag to both links
+fn chart_switch(
+    chart_key: &str,
+    range_key: &str,
+    auto: Auto,
+    pool_on: bool,
+    node_on: bool,
+    network_on: bool,
+    blocks_on: bool,
+    height_on: bool,
+    dmin_on: bool,
+    dmax_on: bool,
+    uncles_on: bool,
+    weak_on: bool,
+) -> Markup {
+    let auto_query = if matches!(auto, Auto::Off) {
+        "&auto=off"
+    } else {
+        ""
+    };
+    html! {
+        @for (key, label) in CHART_TABS {
+            @let is_active = *key == *chart_key;
+            @let query_prefix = if *key == *"hashrate" { "" } else { "chart=sharechain&" };
+            @let series_arg = series_q(pool_on, node_on, network_on, blocks_on,
+                height_on, dmin_on, dmax_on, uncles_on, weak_on, key);
+            a.head-switch.dim[!is_active] aria-current=[is_active.then_some("true")]
+                title=[(!is_active).then(|| format!("Switch to the {label} chart"))]
+                href=(format!("/dashboard?{query_prefix}range={range_key}{auto_query}{series_arg}")) {
+                (label)
+            }
+        }
+    }
+}
+
+/// The Sharechain tab's series, built at the hashrate sample times.
+///
+/// Height: the share-chain tip at each sample time (a step line -- it only
+/// rises when a share lands). Min/Max diff: the difficulty envelope of the
+/// shares in the trailing hour before each sample, step-held when that
+/// window holds no share. Uncle and weak shares are also trailing-hour
+/// count step-lines: Uncle counts the uncle timestamps inside (t-3600, t];
+/// Weak sums the parent shares' `weak_count` over the same window. Both
+/// step-hold; line_chart's floor=1.0 draws their zero minutes at the floor
+/// line rather than clamping them onto the difficulty band.
+#[allow(clippy::type_complexity)] // five (time, value) series in the replica's order: height, dmin, dmax, uncles, weak
+pub(crate) fn sharechain_series(
+    shares: &[ShareSeriesItem],
+    samples: &[Sample],
+) -> (
+    Vec<(u64, f64)>,
+    Vec<(u64, f64)>,
+    Vec<(u64, f64)>,
+    Vec<(u64, f64)>,
+    Vec<(u64, f64)>,
+) {
+    let times: Vec<u64> = samples.iter().map(|s| s.time).collect();
+    if times.is_empty() || shares.is_empty() {
+        return (vec![], vec![], vec![], vec![], vec![]);
+    }
+    let mut height_points = Vec::with_capacity(times.len());
+    let mut diff_min = Vec::with_capacity(times.len());
+    let mut diff_max = Vec::with_capacity(times.len());
+    let mut uncle_points = Vec::with_capacity(times.len());
+    let mut weak_points = Vec::with_capacity(times.len());
+    let mut idx = 0usize;
+    let mut last_height: Option<f64> = None;
+    let mut last_min: Option<f64> = None;
+    let mut last_max: Option<f64> = None;
+    for &t in &times {
+        while idx < shares.len() && u64::from(shares[idx].time) <= t {
+            last_height = Some(f64::from(shares[idx].height));
+            idx += 1;
+        }
+        if let Some(h) = last_height {
+            height_points.push((t, h));
+        }
+        // Trailing hour: shares in (t - 3600, t].
+        let lo_t = t.saturating_sub(3600);
+        // Find the range of shares whose time is in (lo_t, t].
+        let start_win = shares.partition_point(|s| u64::from(s.time) <= lo_t);
+        let end_win = shares.partition_point(|s| u64::from(s.time) <= t);
+        let window = &shares[start_win..end_win];
+        let diffs: Vec<f64> = window
+            .iter()
+            .map(|s| s.difficulty)
+            .filter(|&d| d > 0.0)
+            .collect();
+        if !diffs.is_empty() {
+            last_min = Some(diffs.iter().cloned().fold(f64::INFINITY, f64::min));
+            last_max = Some(diffs.iter().cloned().fold(f64::NEG_INFINITY, f64::max));
+            // Uncle count and weak sum over the same trailing-hour window.
+            let uncle_sum: u64 = window
+                .iter()
+                .flat_map(|s| &s.uncle_times)
+                .filter(|&&ut| u64::from(ut) > lo_t && u64::from(ut) <= t)
+                .count() as u64;
+            uncle_points.push((t, uncle_sum as f64));
+            let weak_sum: u64 = window.iter().map(|s| u64::from(s.weak_count)).sum();
+            weak_points.push((t, weak_sum as f64));
+        }
+        if let Some(mn) = last_min {
+            diff_min.push((t, mn));
+        }
+        if let Some(mx) = last_max {
+            diff_max.push((t, mx));
+        }
+    }
+    (height_points, diff_min, diff_max, uncle_points, weak_points)
 }
 
 /// Previous and next links for a long table. `base` is the page's URL
@@ -930,7 +1217,7 @@ pub(crate) fn overview(view: &Overview) -> Markup {
     }
     // All toggles off: a note about the toggles, not the "first points"
     // note the chart shows before any sample arrives.
-    let chart = if shown.is_empty() {
+    let hashrate_chart = if shown.is_empty() {
         html! {
             p.empty { "All series hidden. Click a legend chip to show one." }
         }
@@ -952,7 +1239,93 @@ pub(crate) fn overview(view: &Overview) -> Markup {
             fmt_hour_edge,
         )
     };
-    let series_arg = series_q(view.pool_on, view.node_on, view.network_on, view.blocks_on);
+    // The sharechain tab's chart: rendering is conditional on toggles.
+    let sharechain_chart = if view.chart_key == "sharechain" {
+        let (height_pts, dmin_pts, dmax_pts, uncle_pts, weak_pts) =
+            sharechain_series(&view.share_series, &samples);
+        let mut share_series_list = Vec::with_capacity(5);
+        let any_on =
+            view.height_on || view.dmin_on || view.dmax_on || view.uncles_on || view.weak_on;
+        if view.height_on {
+            share_series_list.push(Series {
+                label: "Height",
+                class: "height",
+                points: height_pts,
+            });
+        }
+        if view.dmin_on {
+            share_series_list.push(Series {
+                label: "Min diff",
+                class: "dmin",
+                points: dmin_pts,
+            });
+        }
+        if view.dmax_on {
+            share_series_list.push(Series {
+                label: "Max diff",
+                class: "dmax",
+                points: dmax_pts,
+            });
+        }
+        if view.uncles_on {
+            share_series_list.push(Series {
+                label: "Uncle (trailing hour)",
+                class: "uncles",
+                points: uncle_pts,
+            });
+        }
+        if view.weak_on {
+            share_series_list.push(Series {
+                label: "Weak shares (trailing hour)",
+                class: "weak",
+                points: weak_pts,
+            });
+        }
+        if !any_on {
+            html! {
+                p.empty { "All series hidden. Click a legend chip to show one." }
+            }
+        } else {
+            let chart_blocks: &[ChartBlock] = if view.blocks_on {
+                &view.chart_blocks
+            } else {
+                &[]
+            };
+            line_chart_with(
+                &format!("Share chain height and difficulty over the last {period}"),
+                &share_series_list,
+                chart_blocks,
+                fmt_difficulty,
+                fmt_day_time,
+                fmt_hour_tick,
+                fmt_hour_edge,
+                Some(1.0),
+                &["uncles", "weak"],
+                &[
+                    ("height", "Height"),
+                    ("dmin", "Min"),
+                    ("dmax", "Max"),
+                    ("uncles", "Uncle"),
+                    ("weak", "Weak"),
+                ],
+                "tight",
+            )
+        }
+    } else {
+        html! {}
+    };
+    let series_arg = series_q(
+        view.pool_on,
+        view.node_on,
+        view.network_on,
+        view.blocks_on,
+        view.height_on,
+        view.dmin_on,
+        view.dmax_on,
+        view.uncles_on,
+        view.weak_on,
+        view.chart_key,
+    );
     let last_block = view.blocks.first().map(|block| block.time);
     let body = html! {
         div.kpi-grid {
@@ -974,9 +1347,19 @@ pub(crate) fn overview(view: &Overview) -> Markup {
                   format!("Effort {}", fmt_effort(view.work_since_last_block, view.network_difficulty))]))
         }
         div.panel {
-            h2.hashrate-head { "Hashrate" (range_buttons(view.range_key, view.auto, &series_arg)) }
-            (series_toggles(view.pool_on, view.node_on, view.network_on, view.blocks_on, view.range_key, view.auto))
-            div.chart-wrap { (chart) }
+            h2.hashrate-head {
+                (chart_switch(view.chart_key, view.range_key, view.auto,
+                    view.pool_on, view.node_on, view.network_on, view.blocks_on,
+                    view.height_on, view.dmin_on, view.dmax_on, view.uncles_on, view.weak_on))
+                (range_buttons(view.range_key, view.auto, &series_arg, view.chart_key))
+            }
+            @if view.chart_key == "hashrate" {
+                (series_toggles(view.pool_on, view.node_on, view.network_on, view.blocks_on, view.range_key, view.auto, view.chart_key))
+                div.chart-wrap { (hashrate_chart) }
+            } @else {
+                (sharechain_toggles(view.height_on, view.dmin_on, view.dmax_on, view.uncles_on, view.weak_on, view.blocks_on, view.range_key, view.auto))
+                div.chart-wrap { (sharechain_chart) }
+            }
         }
         div.panel {
             h2 { "Blocks" span.panel-note { (view.blocks_found) " in all" } }
@@ -1283,7 +1666,16 @@ pub(crate) fn miner(view: &MinerView) -> Markup {
                 (stat("Shares in the window", html! {
                     (report.share_count) " of " (report.window.share_count) " (" (percent(report.share_fraction)) ")"
                 }))
-                (stat("Uncles credited", html! { (report.uncle_count) }))
+                @if let Some(weak) = weak_summary(report) {
+                    div.stat-item {
+                        div.k { "Uncles credited" }
+                        div.v { (report.uncle_count) }
+                        div.k { "Weak shares" }
+                        small { (weak.0) " carried, " (weak.1) " credited" }
+                    }
+                } @else {
+                    (stat("Uncles credited", html! { (report.uncle_count) }))
+                }
                 @if let (Some(level), Some(satoshis)) = (report.payout_level, report.payout_level_satoshis) {
                     (stat("Payout level", html! {
                         (level) " (" (satoshis) " satoshis)"
@@ -1341,7 +1733,12 @@ pub(crate) fn miner(view: &MinerView) -> Markup {
                                 tr.uncle-row[share.nephew.is_some()] {
                                     td { (share.height) }
                                     td { (share_link(&share.blockhash)) }
-                                    td { @if share.nephew.is_some() { "uncle" } @else { "share" } }
+                                    td {
+                                        @if is_weak_share(share) { "weak" }
+                                        @else if share.nephew.is_some() { "uncle" }
+                                        @else { "share" }
+                                        @if share.weak_count > 0 { " " span.badge-weak { (share.weak_count) " weak" } }
+                                    }
                                     td.mono { (share.difficulty) }
                                     td.mono { (share.weight) }
                                 }
@@ -1710,6 +2107,13 @@ mod tests {
             network_on: false,
             blocks_on: true,
             chart_blocks: Vec::new(),
+            chart_key: "hashrate",
+            height_on: true,
+            dmin_on: true,
+            dmax_on: true,
+            uncles_on: true,
+            weak_on: true,
+            share_series: Vec::new(),
         }
     }
 
@@ -1756,16 +2160,16 @@ mod tests {
 
     #[test]
     fn the_range_buttons_mark_the_active_range_without_script() {
-        let markup = range_buttons("1h", Auto::On, "").into_string();
+        let markup = range_buttons("1h", Auto::On, "", "hashrate").into_string();
         assert!(markup.contains("aria-label=\"Chart time range\""));
         assert!(markup.contains(
             "class=\"outline header-btn active-nav\" role=\"button\" href=\"/dashboard?range=1h\" aria-current=\"true\">Hour</a>"
         ));
         assert!(markup.contains("href=\"/dashboard?range=24h\">Day</a>"));
         assert!(!markup.contains("auto="));
-        let paused = range_buttons("24h", Auto::Off, "").into_string();
+        let paused = range_buttons("24h", Auto::Off, "", "hashrate").into_string();
         assert!(paused.contains("href=\"/dashboard?range=1h&amp;auto=off\""));
-        let toggled = range_buttons("24h", Auto::On, "&pool=0").into_string();
+        let toggled = range_buttons("24h", Auto::On, "&pool=0", "hashrate").into_string();
         assert!(toggled.contains("href=\"/dashboard?range=1h&amp;pool=0\""));
     }
 
@@ -1787,24 +2191,52 @@ mod tests {
 
     #[test]
     fn the_series_query_lists_only_the_hidden_series() {
-        assert_eq!(series_q(true, true, false, true), "");
-        assert_eq!(series_q(false, true, false, true), "&pool=0");
-        assert_eq!(series_q(true, false, false, true), "&node=0");
-        assert_eq!(series_q(false, false, false, true), "&pool=0&node=0");
+        assert_eq!(
+            series_q(
+                true, true, false, true, true, true, true, true, true, "hashrate"
+            ),
+            ""
+        );
+        assert_eq!(
+            series_q(
+                false, true, false, true, true, true, true, true, true, "hashrate"
+            ),
+            "&pool=0"
+        );
+        assert_eq!(
+            series_q(
+                true, false, false, true, true, true, true, true, true, "hashrate"
+            ),
+            "&node=0"
+        );
+        assert_eq!(
+            series_q(
+                false, false, false, true, true, true, true, true, true, "hashrate"
+            ),
+            "&pool=0&node=0"
+        );
     }
 
     #[test]
     fn the_series_query_carries_the_network_turn_on() {
-        assert_eq!(series_q(true, true, true, true), "&network=1");
         assert_eq!(
-            series_q(false, false, true, true),
+            series_q(
+                true, true, true, true, true, true, true, true, true, "hashrate"
+            ),
+            "&network=1"
+        );
+        assert_eq!(
+            series_q(
+                false, false, true, true, true, true, true, true, true, "hashrate"
+            ),
             "&pool=0&node=0&network=1"
         );
     }
 
     #[test]
     fn the_series_toggles_link_both_states_without_script() {
-        let both_on = series_toggles(true, true, false, true, "24h", Auto::On).into_string();
+        let both_on =
+            series_toggles(true, true, false, true, "24h", Auto::On, "hashrate").into_string();
         assert!(both_on.contains("aria-label=\"Chart series\""));
         assert!(both_on.contains("class=\"legend-chip\" role=\"button\" aria-pressed=\"true\""));
         assert!(both_on.contains("span class=\"legend-dot pool\""));
@@ -1812,7 +2244,8 @@ mod tests {
         assert!(both_on.contains("/dashboard?range=24h&amp;pool=0"));
         assert!(both_on.contains("/dashboard?range=24h&amp;node=0"));
         // Each chip flips only its own series, keeping the other's state.
-        let pool_hidden = series_toggles(false, true, false, true, "1h", Auto::Off).into_string();
+        let pool_hidden =
+            series_toggles(false, true, false, true, "1h", Auto::Off, "hashrate").into_string();
         assert!(
             pool_hidden
                 .contains("class=\"legend-chip off\" role=\"button\" aria-pressed=\"false\"")
@@ -1820,21 +2253,24 @@ mod tests {
         assert!(pool_hidden.contains("/dashboard?range=1h&amp;auto=off\""));
         assert!(pool_hidden.contains("/dashboard?range=1h&amp;auto=off&amp;pool=0&amp;node=0"));
         assert!(!pool_hidden.contains("pool=0\""));
-        let both_hidden = series_toggles(false, false, false, true, "24h", Auto::On).into_string();
+        let both_hidden =
+            series_toggles(false, false, false, true, "24h", Auto::On, "hashrate").into_string();
         assert!(both_hidden.contains("legend-chip off"));
         assert!(both_hidden.contains("aria-pressed=\"false\""));
     }
 
     #[test]
     fn the_network_toggle_links_both_states_without_script() {
-        let hidden = series_toggles(true, true, false, true, "24h", Auto::On).into_string();
+        let hidden =
+            series_toggles(true, true, false, true, "24h", Auto::On, "hashrate").into_string();
         assert!(hidden.contains("span class=\"legend-dot network\""));
         assert!(
             hidden.contains("aria-pressed=\"false\" href=\"/dashboard?range=24h&amp;network=1\"")
         );
         // Shown: the network chip drops its own turn-on, while the other
         // chips keep it so the flip does not lose it.
-        let shown = series_toggles(true, true, true, true, "24h", Auto::On).into_string();
+        let shown =
+            series_toggles(true, true, true, true, "24h", Auto::On, "hashrate").into_string();
         assert!(shown.contains("span class=\"legend-dot network\""));
         assert!(shown.contains("aria-pressed=\"true\" href=\"/dashboard?range=24h\""));
         assert!(shown.contains("href=\"/dashboard?range=24h&amp;pool=0&amp;network=1\""));
@@ -1842,20 +2278,32 @@ mod tests {
 
     #[test]
     fn the_series_query_carries_the_blocks_turn_off() {
-        assert_eq!(series_q(true, true, false, false), "&blocks=0");
-        assert_eq!(series_q(false, true, false, false), "&pool=0&blocks=0");
+        assert_eq!(
+            series_q(
+                true, true, false, false, true, true, true, true, true, "hashrate"
+            ),
+            "&blocks=0"
+        );
+        assert_eq!(
+            series_q(
+                false, true, false, false, true, true, true, true, true, "hashrate"
+            ),
+            "&pool=0&blocks=0"
+        );
     }
 
     #[test]
     fn the_blocks_toggle_links_both_states_without_script() {
-        let shown = series_toggles(true, true, false, true, "24h", Auto::On).into_string();
+        let shown =
+            series_toggles(true, true, false, true, "24h", Auto::On, "hashrate").into_string();
         assert!(shown.contains("span class=\"legend-dot blocks\""));
         assert!(shown.contains(">Blocks</a>"));
         // Shown: the chip links its own turn-off, keeping the other series
         // as they are.
         assert!(shown.contains("aria-pressed=\"true\" href=\"/dashboard?range=24h&amp;blocks=0\""));
         // Hidden: the chip links back to the clean URL and marks itself off.
-        let hidden = series_toggles(true, true, false, false, "24h", Auto::On).into_string();
+        let hidden =
+            series_toggles(true, true, false, false, "24h", Auto::On, "hashrate").into_string();
         assert!(hidden.contains("class=\"legend-chip off\""));
         assert!(hidden.contains("aria-pressed=\"false\" href=\"/dashboard?range=24h\""));
     }
@@ -1874,6 +2322,12 @@ mod tests {
     #[test]
     fn chart_times_carry_the_day() {
         assert_eq!(fmt_day_time(1_792_000_000), "Oct 14 17:46 UTC");
+        // A day below ten is not padded.
+        assert_eq!(fmt_day_time(1_699_142_400), "Nov 5 00:00 UTC");
+        assert_eq!(fmt_utc(1_700_000_000), "2023-11-14 22:13 UTC");
+        assert_eq!(fmt_hour_edge(1_700_000_000), "22:13");
+        // Past the year 9999 the number itself is shown.
+        assert_eq!(fmt_utc(u64::MAX), u64::MAX.to_string());
     }
 
     #[test]
@@ -2613,5 +3067,128 @@ mod tests {
 
         assert!(!page.contains("Expected income a month"));
         assert!(!page.contains("Monthly swing"));
+        assert!(!page.contains("Weak shares"));
+        assert!(!page.contains("badge-weak"));
+    }
+
+    /// A miner view with a carrying share, a weak credit row and an uncle,
+    /// the rows the weak markup distinguishes.
+    fn weak_miner_view() -> MinerView {
+        let carrying = MinerShare {
+            blockhash: "ab".repeat(32),
+            height: 10,
+            nephew: None,
+            difficulty: "4".to_string(),
+            weight: "10".to_string(),
+            payout_address: "bchtest:qpayout".to_string(),
+            weak_count: 2,
+            weak_shares: 0,
+        };
+        // A weak credit names the carrying share as both its blockhash and
+        // its nephew, which is how the row is told apart.
+        let weak = MinerShare {
+            blockhash: "ab".repeat(32),
+            height: 10,
+            nephew: Some("ab".repeat(32)),
+            difficulty: "1".to_string(),
+            weight: "3".to_string(),
+            payout_address: "bchtest:qpayout".to_string(),
+            weak_count: 0,
+            weak_shares: 4,
+        };
+        let uncle = MinerShare {
+            blockhash: "cd".repeat(32),
+            height: 9,
+            nephew: Some("ab".repeat(32)),
+            difficulty: "4".to_string(),
+            weight: "5".to_string(),
+            payout_address: "bchtest:qpayout".to_string(),
+            weak_count: 0,
+            weak_shares: 0,
+        };
+        // A plain share with no weak fields: it must render as before.
+        let plain = MinerShare {
+            blockhash: "ef".repeat(32),
+            height: 8,
+            nephew: None,
+            difficulty: "4".to_string(),
+            weight: "7".to_string(),
+            payout_address: "bchtest:qpayout".to_string(),
+            weak_count: 0,
+            weak_shares: 0,
+        };
+        MinerView {
+            site: site(),
+            now: 1_000,
+            report: MinerResponse {
+                address: "bchtest:qpayout".to_string(),
+                address_type: "payout",
+                anchor: "cd".repeat(32),
+                anchor_height: 30,
+                window: WindowSummary {
+                    newest_height: Some(29),
+                    oldest_height: Some(0),
+                    share_count: 30,
+                    weight: "300".to_string(),
+                },
+                share_count: 4,
+                uncle_count: 1,
+                weak_share_count: 4,
+                weight: "25".to_string(),
+                share_fraction: 0.1,
+                payout_fraction: 0.2,
+                payout_level: None,
+                payout_level_satoshis: None,
+                expected_payments_a_month: None,
+                expected_income_a_month: None,
+                monthly_swing: None,
+                shares: vec![carrying, weak, uncle, plain],
+            },
+            hashrate: None,
+            recent_window: None,
+            workers: Vec::new(),
+            paging: Paging { page: 1, pages: 1 },
+        }
+    }
+
+    #[test]
+    fn the_miner_page_reports_weak_shares_under_the_uncles_tile() {
+        let page = miner(&weak_miner_view()).into_string();
+
+        // The heading sits beside the values, not inside .v, so it keeps
+        // the same .k style as "Uncles credited".
+        assert!(page.contains(
+            "<div class=\"k\">Uncles credited</div><div class=\"v\">1</div>\
+             <div class=\"k\">Weak shares</div><small>2 carried, 4 credited</small>"
+        ));
+        assert!(page.contains("<span class=\"badge-weak\">2 weak</span>"));
+    }
+
+    #[test]
+    fn the_miner_page_labels_weak_rows_and_keeps_uncle_rows() {
+        let page = miner(&weak_miner_view()).into_string();
+
+        // The weak credit relabels its Kind to "weak" and keeps the uncle
+        // row class; a plain uncle stays "uncle".
+        assert!(page.contains(">weak</td>"));
+        assert!(page.contains(">uncle</td>"));
+        assert!(page.contains(">share</td>"));
+        assert_eq!(page.matches("class=\"uncle-row\"").count(), 2);
+    }
+
+    #[test]
+    fn the_miner_page_leaves_the_uncles_tile_alone_without_weak_shares() {
+        let mut view = weak_miner_view();
+        view.report.weak_share_count = 0;
+        for share in &mut view.report.shares {
+            share.weak_count = 0;
+            share.weak_shares = 0;
+        }
+        view.report.shares.truncate(1);
+        let page = miner(&view).into_string();
+
+        assert!(!page.contains("Weak shares"));
+        assert!(!page.contains("carried"));
+        assert!(page.contains("<div class=\"k\">Uncles credited</div><div class=\"v\">1</div>"));
     }
 }

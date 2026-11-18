@@ -471,6 +471,13 @@ fn overview(samples: Vec<Sample>, shares: Vec<ShareRow>, blocks: Vec<FoundBlockR
         network_on: false,
         blocks_on: true,
         chart_blocks,
+        chart_key: "hashrate",
+        height_on: true,
+        dmin_on: true,
+        dmax_on: true,
+        uncles_on: true,
+        weak_on: true,
+        share_series: Vec::new(),
     })
     .into_string()
 }
@@ -503,6 +510,8 @@ fn miner_report(shares: Vec<MinerShare>) -> MinerResponse {
 }
 
 fn miner_share(nephew: Option<String>) -> MinerShare {
+    // Only the share row can carry weak shares; an uncle never does.
+    let carries_weak = nephew.is_none();
     MinerShare {
         blockhash: "ef".repeat(32),
         height: 3,
@@ -510,6 +519,8 @@ fn miner_share(nephew: Option<String>) -> MinerShare {
         difficulty: "4".to_string(),
         weight: "10".to_string(),
         payout_address: "bchtest:qpayout".to_string(),
+        weak_count: u16::from(carries_weak),
+        weak_shares: 0,
     }
 }
 

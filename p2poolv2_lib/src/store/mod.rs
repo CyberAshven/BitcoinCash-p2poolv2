@@ -28,63 +28,10 @@ const STORE_FORMAT_KEY: &[u8] = b"store_format";
 /// refuses it, so the operator resyncs the share chain instead of mixing
 /// old and new data in one database.
 ///
-/// - 1 (2026-10-30): chain work counts the work of each uncle a share
-///   names. Stores written before this have no version.
-/// - 2 (2026-11-05): Bitcoin Cash pays the genesis share only as the last
-///   resort (`BCH_GENESIS_LAST_RESORT_RULE_TAG`). A chain's first hours
-///   were validated under the old rule, so a node could not sync them from
-///   peers under the new one; the chain starts again.
-/// - 3 (2026-11-09): Bitcoin Cash has one share chain, the mini chain's,
-///   and its share headers carry a difficulty band (`BCH_BAND_RULE_TAG`):
-///   the share's minimum, the target its node wanted and its band cap. A
-///   stored header has none of these and would not decode, and the merged
-///   chain starts from a new genesis.
-/// - 4 (2026-11-09): Bitcoin Cash share headers carry their miner's payout
-///   level, and a slice below its payee's level is paid by a draw
-///   (`BCH_PAYOUT_LEVELS_RULE_TAG`). A stored header has no level and would
-///   not decode, its coinbase was validated without the draw, and the chain
-///   starts from a new genesis.
-/// - 5 (2026-11-09): Bitcoin Cash share headers carry a weak ratio and
-///   commit the weak shares their bodies carry (`BCH_WEAK_SHARE_RULE_TAG`),
-///   the store keeps those weak shares and a summary of their credit, and
-///   the PPLNS window credits proofs from jobs at the minimum at the weak
-///   work. A stored header has no weak ratio and would not decode, and its
-///   chain was paid under the old credit; the chain starts again.
-/// - 6 (2026-11-12): a Bitcoin Cash share's weak root commits each carried
-///   weak share's whole encoding, not only its proof-of-work hash
-///   (`BCH_WEAK_SHARE_RULE_TAG`, `weak2`). A stored share carrying weak
-///   shares commits the old root, which every node now refuses, so the
-///   chain starts again.
-/// - 7 (2026-11-12): Bitcoin Cash weak shares carry a 1% includer cut, may
-///   wait 48 shares for a carrier and are at most 256 times easier than the
-///   minimum (`BCH_WEAK_SHARE_RULE_TAG`, `weak2-64-100-48-256`, study #85).
-///   A stored chain was credited under the old cut and starts from a genesis
-///   whose weak ratio is the old `R_MAX`; the chain starts again.
-/// - 8 (2026-11-12): Bitcoin Cash payout levels start at the lowest
-///   (`BCH_PAYOUT_LEVELS_RULE_TAG`, `levels-546x2-k1`). A stored chain was
-///   validated under the rule that allowed level 0; the chain starts again.
-/// - 9 (2026-11-12): a weak share a share carries is held to its carrier's
-///   time (`BCH_WEAK_SHARE_RULE_TAG`, `weak3-64-100-48-256`). A stored chain
-///   was validated against each node's clock; the chain starts again.
-/// - 10 (2026-11-15): Bitcoin Cash share headers count the weak shares they
-///   carry that ask for an easier weak target, and the weak ratio follows
-///   those asks (`BCH_WEAK_SHARE_RULE_TAG`,
-///   `weak4-640-100-48-256-320-64-4096-64-32`). A stored header has no such count
-///   and would not decode, and the chain starts from a new genesis.
-/// - 11 (2026-11-16): a Bitcoin Cash share's weak root also commits the
-///   summary of the weak shares it carries (`BCH_WEAK_SHARE_RULE_TAG`,
-///   `-summary`), the `WeakSummaries` column family keeps their leaf root
-///   beside the summary (`PrunedWeakShares`), and whole weak shares are
-///   pruned one payout depth below the confirmed tip. A stored share
-///   carrying weak shares commits the old root, which every node now
-///   refuses, and a stored summary has no leaf root; the chain starts again.
-/// - 12 (2026-11-16): each known Bitcoin Cash header carries its
-///   CHIP-2025-03 ticks and next interval, worked out from its own branch's
-///   median time past (`BCH_CURRENT_CHAIN_RULE_TAG`, `bch-prev-1off-ticks`,
-///   and `BCH_MERGE_MINING_RULE_TAG`, `mm2-roots-asert8-ticks`). A stored
-///   header has neither and would not decode, and a stored chain was
-///   validated with intervals each node learned while running; the chain
-///   starts again.
+/// The version rises whenever what the store holds, or the rules a stored
+/// chain was validated under, change: the share-chain rule flag days and
+/// chain work that counts uncle work. `docs/sharechain/rule-history.md`
+/// lists each version.
 pub const STORE_FORMAT_VERSION: u32 = 12;
 
 pub mod bch_headers;

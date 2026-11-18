@@ -264,14 +264,8 @@ mod tests {
     // values were computed before and after the upstream sync through
     // `61810c56`, which moved the Bitcoin genesis blocks to `.dat` files.
 
-    /// Pinned again on 2026-11-09: the header gained its band (`shares::band`),
-    /// its payout level (`accounting::payout::payout_levels`) and its weak
-    /// ratio and weak shares (`shares::weak`), each of which changed every
-    /// Bitcoin Cash genesis hash in a flag day. Pinned again on 2026-11-12:
-    /// the genesis weak ratio is `R_MAX`, which fell from 4096 to 256. Pinned
-    /// again on 2026-11-15: the header gained `weak_asking`, how many of the
-    /// weak shares a share carries ask (`shares::weak`), none at genesis.
-    /// Pinned again on 2026-11-16: the genesis weak ratio is 32, not `R_MAX`.
+    /// Pinned again at every flag day that changed the share header or the
+    /// genesis share; `docs/sharechain/rule-history.md` lists each one.
     #[test]
     fn mainnet_mini_genesis_hash_is_pinned() {
         let genesis = build(BchShareNetwork::Mainnet).unwrap();

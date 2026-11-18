@@ -15,6 +15,7 @@ pub mod payout_trees;
 pub mod share;
 pub mod share_headers;
 pub mod share_transaction;
+pub mod sharechain;
 pub mod shares;
 pub mod transaction;
 

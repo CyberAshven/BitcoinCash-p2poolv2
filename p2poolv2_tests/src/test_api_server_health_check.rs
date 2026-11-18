@@ -3,7 +3,6 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 use base64::Engine;
-use chrono::{TimeZone, Utc};
 use p2poolv2_api::api::error::ApiError;
 use p2poolv2_api::start_api_server;
 use p2poolv2_lib::accounting::{
@@ -15,6 +14,7 @@ use p2poolv2_lib::node::actor::NodeHandle;
 use p2poolv2_lib::stratum::work::tracker::start_tracker_actor;
 use p2poolv2_lib::test_utils::setup_test_chain_store_handle;
 use reqwest::{Client, header};
+use time::macros::datetime;
 use tokio::time::{Duration, sleep};
 
 #[tokio::test]
@@ -273,16 +273,8 @@ async fn test_pplns_shares_endpoint_get_all() -> Result<(), ApiError> {
         .await
         .map_err(|e| ApiError::ServerError(e.to_string()))?;
 
-    let share1_timestamp = Utc
-        .with_ymd_and_hms(2025, 10, 17, 19, 40, 0)
-        .single()
-        .unwrap()
-        .timestamp() as u64;
-    let share2_timestamp = Utc
-        .with_ymd_and_hms(2025, 10, 17, 19, 50, 0)
-        .single()
-        .unwrap()
-        .timestamp() as u64;
+    let share1_timestamp = datetime!(2025-10-17 19:40:00 UTC).unix_timestamp() as u64;
+    let share2_timestamp = datetime!(2025-10-17 19:50:00 UTC).unix_timestamp() as u64;
 
     let shares = vec![
         SimplePplnsShare::new(
@@ -391,16 +383,8 @@ async fn test_pplns_shares_endpoint_limit() -> Result<(), ApiError> {
         .await
         .map_err(|e| ApiError::ServerError(e.to_string()))?;
 
-    let t1 = Utc
-        .with_ymd_and_hms(2025, 10, 17, 19, 40, 0)
-        .single()
-        .unwrap()
-        .timestamp() as u64;
-    let t2 = Utc
-        .with_ymd_and_hms(2025, 10, 17, 19, 50, 0)
-        .single()
-        .unwrap()
-        .timestamp() as u64;
+    let t1 = datetime!(2025-10-17 19:40:00 UTC).unix_timestamp() as u64;
+    let t2 = datetime!(2025-10-17 19:50:00 UTC).unix_timestamp() as u64;
 
     let shares = vec![
         SimplePplnsShare::new(
@@ -504,16 +488,8 @@ async fn test_pplns_shares_endpoint_time_filter() -> Result<(), ApiError> {
         .await
         .map_err(|e| ApiError::ServerError(e.to_string()))?;
 
-    let share1_timestamp = Utc
-        .with_ymd_and_hms(2025, 10, 17, 19, 40, 0)
-        .single()
-        .unwrap()
-        .timestamp() as u64;
-    let share2_timestamp = Utc
-        .with_ymd_and_hms(2025, 10, 17, 19, 50, 0)
-        .single()
-        .unwrap()
-        .timestamp() as u64;
+    let share1_timestamp = datetime!(2025-10-17 19:40:00 UTC).unix_timestamp() as u64;
+    let share2_timestamp = datetime!(2025-10-17 19:50:00 UTC).unix_timestamp() as u64;
 
     let shares = vec![
         SimplePplnsShare::new(

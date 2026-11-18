@@ -51,163 +51,18 @@ fn genesis_tag(genesis_hash: BlockHash) -> String {
 /// Tag naming the share chain rules a Bitcoin Cash node enforces beyond
 /// upstream's, or `None` on Bitcoin, whose protocol strings stay upstream's.
 ///
-/// Bitcoin Cash sizes the PPLNS window by the paying block's difficulty
-/// (`BCH_PPLNS_WINDOW_BLOCKS`) behind its own maturity
-/// (`BCH_COINBASE_MATURITY`). A node on the earlier fixed window, or with
-/// another number of blocks or another maturity, rebuilds a different
-/// coinbase for every share, so the two must not peer: they would only
-/// exchange shares the other rejects. The tag is derived from the constants,
-/// so changing either rule changes the tag without anyone having to remember
-/// a version bump, as re-anchoring genesis does for `genesis_tag`.
+/// One segment per rule, each built from the rule's own constants, so
+/// changing a rule changes the tag without anyone having to remember a
+/// version bump, as re-anchoring genesis does for `genesis_tag`. A node on
+/// other rules would rebuild other coinbases or refuse shares this node
+/// accepts, so the two must not peer: their protocol strings differ and the
+/// handshake fails. Each constant's own documentation says what its rule is.
 ///
-/// Bitcoin Cash also anchors ASERT at each share's parent
-/// (`BCH_ASERT_ANCHOR_TAG`). A node anchoring at genesis computes another
-/// target for every share once the chain has been behind schedule, so it
-/// is kept apart the same way.
-///
-/// Then come the share transaction rules (`BCH_SHARE_TRADE_RULE_TAG`): the
-/// share-trading contract, dust-floored P2PKH or P2SH32 outputs and height
-/// finality. A node without them disagrees on shares carrying a contract
-/// spend, a dust output or an `OP_RETURN` output.
-///
-/// Then comes the payout to the holder of each share's payout right
-/// (`BCH_PAYOUT_HOLDER_RULE_TAG`). A node paying `miner_bitcoin_address`
-/// rebuilds another coinbase once any right has moved.
-///
-/// Then the hybrid payout (`bch_payout_rule_tag`, built from the token
-/// share's coinbase limit and the payout tree's fan-out, fee rates, filler
-/// and covenant version). A node on other values rebuilds another coinbase
-/// whenever payees go to the tree.
-///
-/// Then the donation and fee taken from each share's own weight at its own
-/// settings (`BCH_PER_SHARE_CUTS_RULE_TAG`). A node taking them off the
-/// whole coinbase at the paying share's settings rebuilds another coinbase
-/// whenever window shares differ in their cuts.
-///
-/// Then comes the rule that an uncle may have only one nephew on a chain
-/// (`BCH_UNCLE_ONCE_RULE_TAG`). A node without it accepts a share naming an
-/// uncle an ancestor already names, and pays that uncle twice.
-///
-/// Last come the other rules of the 2026-10-24 share-chain rule batch, one
-/// segment each, in the batch's item order: the share body limit
-/// (`BCH_SHARE_BODY_RULE_TAG`, item 2), payout scripts
-/// (`BCH_PAYOUT_SCRIPT_RULE_TAG`, 3), the 32-level merkle branch
-/// (`bch_merkle_rule_tag`, 4), depths from the 100-share maturity
-/// (`bch_depth_rule_tag`, 5), SigChecks (`bch_sig_checks_rule_tag`, 6), no
-/// SegWit commitment (`BCH_NO_SEGWIT_RULE_TAG`, 7), weights by work
-/// (`BCH_WORK_WEIGHT_RULE_TAG`, 8), merge-mining format v2 with the ASERT
-/// check (`BCH_MERGE_MINING_RULE_TAG`, 9) and the share-version vote
-/// (`BCH_SHARE_VERSION_RULE_TAG`, 10). The batch's item 1, the hybrid
-/// payout, took over the payout cap's slot above.
-///
-/// From that batch on, a rule change was to be a new share version that
-/// activates by a vote of the miners' work (`shares::share_version`),
-/// keeping this tag so nodes on the old and the new version peer for the
-/// vote to see both. Mining on the current chain
-/// (`BCH_CURRENT_CHAIN_RULE_TAG`, 2026-10-30) is the owner's exception for
-/// the alpha: it changes the share messages themselves, which now carry
-/// Bitcoin Cash headers a node before it cannot read, so it ships as a flag
-/// day with its own last segment. Later rule changes go through the vote.
-///
-/// Paying the genesis share only as the last resort
-/// (`BCH_GENESIS_LAST_RESORT_RULE_TAG`, 2026-11-05) is the owner's second
-/// exception, also a flag day with its own segment. It changes a coinbase
-/// only while genesis is in the window, in a new chain's first hours, and a
-/// vote cannot switch a chain before its parent is
-/// `SHARE_VERSION_VOTE_DEPTH` shares high, three days, by when genesis has
-/// left every window.
-///
-/// The difficulty band (`BCH_BAND_RULE_TAG`, 2026-11-09, issue #79 row 3) is
-/// the third flag day, shipped with the merge of the main and mini chains
-/// into one chain at the mini chain's genesis. A share may be up to `C_MAX`
-/// (64) times harder than the minimum, with its minimum, the target its node
-/// wanted and its band cap in its header (`shares::band`), and the next
-/// share's ASERT anchors at the minimum. A node before it cannot read the
-/// longer header and would refuse every heavier share, and the merged chain
-/// starts from a new genesis, so every node upgrades together on a fresh
-/// store rather than through the vote.
-///
-/// Payout levels (`BCH_PAYOUT_LEVELS_RULE_TAG`, 2026-11-09, issue #79 row 3,
-/// part 4) are the fourth flag day, on the same restart. Each share header
-/// carries its miner's payout level, and a slice of a found block below its
-/// payee's level `546 * 2^k` satoshis is paid by a draw among the slices at
-/// that level, seeded from the share's parent (`payout_levels`). A node
-/// before it cannot read the longer header and would rebuild another
-/// coinbase whenever a payee is below its level, and the header change gives
-/// the chain a new genesis, so every node upgrades together on a fresh store
-/// rather than through the vote.
-///
-/// Weak shares (`BCH_WEAK_SHARE_RULE_TAG`, 2026-11-09, issue #79 row 5) ship
-/// on the same flag day: a share carries up to `WEAK_CAP` easier proofs
-/// of work on jobs at the minimum, each with its parent at most `WEAK_DEPTH`
-/// shares below it, and the PPLNS window credits every proof from a job
-/// at the minimum at the weak work, with `INCLUDER_CUT` (100 basis points) of
-/// each weak share's credit to the share carrying it (`shares::weak`). The
-/// share header carries a weak ratio and commits the carried weak shares,
-/// and weak shares travel in a new message, none of which a node before it
-/// can read, so it cannot go through the vote.
-///
-/// The segment became `weak2` on 2026-11-12, a flag day of its own: a
-/// share's weak root now commits each carried weak share's whole encoding
-/// rather than its proof-of-work hash alone (`shares::weak::weak_root`). The
-/// old root left a carried weak share's coinbase value, branch, scriptSig and
-/// coinbase proof free for a relaying peer to change, and the change made an
-/// honest share invalid after its body was stored. A node on `weak` computes
-/// another root for every share carrying weak shares and refuses it, so the
-/// two cannot share a chain, and the vote cannot carry a fix to what a body
-/// check binds while the old rule lets any peer split a node off.
-///
-/// Its numbers changed on 2026-11-12, another flag day (study #85):
-/// `INCLUDER_CUT` from 500 to 100 basis points, `WEAK_DEPTH` from 6 to 48 and
-/// `R_MAX` from 4096 to 256, now in the segment. Nodes on the two credit weak
-/// shares differently and start from different genesis shares, so they
-/// cannot share a chain.
-///
-/// Payout levels' lowest rung changed on 2026-11-12, another flag day
-/// (`BCH_PAYOUT_LEVELS_RULE_TAG`, now `levels-546x2-k1`). Level 0 is not a
-/// valid payout level: it paid 546 satoshis, which is below dust once the
-/// payout tree's fee is taken, so a level 0 win that landed in the tree went
-/// to the tree's largest payee. A node on `levels-546x2` still accepts that
-/// header and pays the win, and the genesis share's level byte changed, so
-/// the two cannot share a chain.
-///
-/// The weak segment became `weak3` on 2026-11-12, another flag day: a weak
-/// share a share carries is held to its carrier's time, not to each node's
-/// clock (`check_carried_weak_time`). On `weak2` a share carrying a weak
-/// share stamped two minutes ahead was valid on a node whose clock had
-/// passed that time and invalid for good on one whose clock had not.
-///
-/// The weak segment became `weak4-640-100-48-256-320-64-4096-64-32` on 2026-11-15,
-/// another flag day (issue #79, part 6 of the design page): the weak ratio
-/// follows the weak shares that ask. A weak share asks when its
-/// `wanted_bits` is easier than the weak target it met, each share header
-/// counts the asking weak shares it carries as `weak_asking`, and while more
-/// than one in `WEAK_ASK_DIVISOR` (64) of them ask the weak ratio rises, past
-/// `R_MAX` as far as `R_ASK_MAX` (4096), until a share carries more than
-/// `WEAK_FILL_MAX` (320); a share may carry `WEAK_CAP` (640) weak shares,
-/// where it carried 64. A node on `weak3` cannot read the longer header,
-/// refuses a share whose `wanted_bits` is easier than its own target and
-/// steps the weak ratio without the asks, and the header change gives the
-/// chain a new genesis, so every node upgrades together on a fresh store
-/// rather than through the vote.
-///
-/// The weak segment gained `-summary` on 2026-11-16, before any node ran
-/// `weak4`, another flag day: a share's weak root also commits the summary
-/// of the weak shares it carries, so a node that pruned them one payout
-/// depth below its tip serves the body with their leaf root and summary, and
-/// a syncing peer checks those against the header. Every share carrying
-/// weak shares has another root under the two, and a node without it cannot
-/// read a body served that way.
-///
-/// The current-chain and merge-mining segments gained `-ticks` on
-/// 2026-11-15, another flag day (`bch-prev-1off-ticks`,
-/// `mm2-roots-asert8-ticks`): each known Bitcoin Cash header carries its
-/// CHIP-2025-03 ticks and next block interval, worked out from its own
-/// branch's median time past as BCHN does, and the nBits a peer's header
-/// must carry, the nBits that size a payout window and a token share's
-/// ASERT band follow them. Before, each node learned one-minute blocks
-/// while running from its own Bitcoin Cash node, so two nodes could require
-/// different nBits of one header; the two rules cannot share a chain.
+/// Rule changes after the 2026-10-24 batch were to go through the
+/// share-version vote (`shares::share_version`) and keep this tag. During
+/// the alpha each has instead shipped as a flag day, with a new segment and
+/// a fresh store. `docs/sharechain/rule-history.md` lists the segments and
+/// when each changed.
 fn share_chain_rule_tag(chain: Chain) -> Option<String> {
     match chain {
         Chain::Bitcoin => None,
@@ -232,31 +87,30 @@ fn share_chain_rule_tag(chain: Chain) -> Option<String> {
 /// the two apart, as it does for a rule. The network is in alpha: every node
 /// restarts on the new binary.
 ///
-/// `weak-by-hash` since 2026-11-15: a new share relayed to peers lists the
-/// weak shares it carries by proof-of-work hash (`ShareWithWeakHashes`),
-/// sending whole beside the list only the ones its peers probably lack, and
-/// a peer whose weak pool still lacks some asks the sender for them
-/// (`GetCarriedWeakShares`, answered with `CarriedWeakShares`). A node
-/// before it cannot read any of the three. Sync still sends weak shares
-/// whole.
+/// `weak-by-hash`: a new share relayed to peers lists the weak shares it
+/// carries by proof-of-work hash (`ShareWithWeakHashes`), sending whole
+/// beside the list only the ones its peers probably lack, and a peer whose
+/// weak pool still lacks some asks the sender for them
+/// (`GetCarriedWeakShares`, answered with `CarriedWeakShares`).
 ///
-/// `without-payouts` since 2026-11-16: a new share whose coinbase outputs
-/// are large (`RELAY_WITHOUT_PAYOUTS_MIN_BYTES`) is relayed without them
+/// `without-payouts`: a new share whose coinbase outputs are large
+/// (`RELAY_WITHOUT_PAYOUTS_MIN_BYTES`) is relayed without them
 /// (`ShareWithoutPayouts`, which also lists the weak shares by hash), and the
 /// receiver rebuilds them from its PPLNS window as validation does. A
 /// smaller share still goes whole, as `ShareWithWeakHashes` or `ShareBlock`.
-/// A node before it cannot read the new message. Sync still sends shares
-/// whole.
 ///
-/// `headers-resume` since 2026-11-18, with upstream's request-response
-/// protocol 1.1.0 (`ProtocolVersion`): `GetShareHeaders` carries the last
-/// header the requester got (`resume_after`), and the answer serves every
-/// share at a height, a page ending inside a height if it fills, where 1.0.0
-/// cuts each height at `MAX_BLOCKS_PER_HEIGHT` shares. Upstream picks the
-/// version per stream, so without the segment a node before it would peer on
-/// 1.0.0 and get cut heights, which can leave out the share the chain goes
-/// through. With it, Bitcoin Cash nodes always speak 1.1.0 to each other;
-/// 1.0.0 stays for a Bitcoin node and upstream's nodes.
+/// `headers-resume`: upstream's request-response protocol 1.1.0
+/// (`ProtocolVersion`). `GetShareHeaders` carries the last header the
+/// requester got (`resume_after`), and the answer serves every share at a
+/// height, a page ending inside a height if it fills, where 1.0.0 cuts each
+/// height at `MAX_BLOCKS_PER_HEIGHT` shares. Upstream picks the version per
+/// stream, so without the segment a node before it would peer on 1.0.0 and
+/// get cut heights, which can leave out the share the chain goes through.
+/// With it, Bitcoin Cash nodes always speak 1.1.0 to each other; 1.0.0 stays
+/// for a Bitcoin node and upstream's nodes.
+///
+/// Sync still sends shares and weak shares whole.
+/// `docs/sharechain/rule-history.md` lists when each segment came.
 const BCH_MESSAGES_TAG: &str = "weak-by-hash/without-payouts/headers-resume";
 
 /// The share chain part of every protocol string: the genesis tag, followed
@@ -656,8 +510,8 @@ mod tests {
         );
     }
 
-    /// From 2026-11-15 a new share is relayed with the weak shares it
-    /// carries listed by hash. A node before it derived the same string
+    /// A new share is relayed with the weak shares it carries listed by
+    /// hash. A node before it derived the same string
     /// without `/weak-by-hash`: it cannot read the new share message or the
     /// request for carried weak shares, so the two strings differ and the
     /// nodes fail the handshake rather than decode each other's messages as
@@ -688,8 +542,7 @@ mod tests {
         );
     }
 
-    /// From 2026-11-16 a new share with large coinbase outputs is relayed
-    /// without them (`ShareWithoutPayouts`). A node on `weak-by-hash` alone
+    /// A new share with large coinbase outputs is relayed without them (`ShareWithoutPayouts`). A node on `weak-by-hash` alone
     /// derived the string without `/without-payouts`: it cannot read the new
     /// share message, so the two fail the handshake rather than drop large
     /// shares as malformed.
@@ -712,8 +565,8 @@ mod tests {
         assert_ne!(kad, kad.replace("/without-payouts/", "/"));
     }
 
-    /// From 2026-11-18 a header request carries the last header the
-    /// requester got and the answer serves every share at a height
+    /// A header request carries the last header the requester got and the
+    /// answer serves every share at a height
     /// (request-response 1.1.0). A node on `without-payouts` derived the
     /// string without `/headers-resume` and would peer on 1.0.0, where heights
     /// are cut, so the two strings differ and the nodes fail the handshake
@@ -1016,8 +869,7 @@ mod tests {
         );
     }
 
-    /// From 2026-11-15 each known Bitcoin Cash header carries its ticks and
-    /// next interval from its own branch, and token shares' ASERT band
+    /// Each known Bitcoin Cash header carries its ticks and next interval from its own branch, and token shares' ASERT band
     /// follows them. A node on `bch-prev-1off` and `mm2-roots-asert8` learned
     /// one-minute blocks while running and could require other nBits, so the
     /// new string differs and the two cannot negotiate.
@@ -1038,7 +890,7 @@ mod tests {
         );
     }
 
-    /// From 2026-11-12 a carried weak share is held to its carrier's time. A
+    /// A carried weak share is held to its carrier's time. A
     /// node on `weak2` judges it by its own clock, so the new string differs
     /// and the two cannot negotiate.
     #[test]
@@ -1119,7 +971,7 @@ mod tests {
         );
     }
 
-    /// From 2026-11-12 a Bitcoin Cash payout level starts at the lowest. A
+    /// A Bitcoin Cash payout level starts at the lowest. A
     /// node on `levels-546x2` still accepts level 0, so the new string differs
     /// and the two cannot negotiate.
     #[test]

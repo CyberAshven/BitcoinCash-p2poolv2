@@ -181,6 +181,46 @@ tr.uncle-row {
   flex-shrink: 0;
 }
 
+/* The heading's chart-tab switch: both names side by side, the active one
+   underlined in full colour, the inactive one muted and without underline.
+   The server dashboard renders it as an <a> and the wasm one as a <button>;
+   these declarations flatten Pico's button chrome so both read as plain
+   heading text. */
+.hashrate-head .head-switch {
+  appearance: none;
+  color: inherit;
+  text-decoration: none;
+  background: none;
+  border: 0;
+  margin: 0;
+  padding: 0;
+  box-shadow: none;
+  font: inherit;
+  cursor: pointer;
+  /* Pico's button reset spells text-transform:none, which would drop the
+     heading's uppercase; inherit keeps the titles exactly as .panel h2
+     renders them, on both dashboards. */
+  text-transform: inherit;
+  /* Chromium's UA sheet forces letter-spacing:normal on buttons; Pico
+     restores inherit for inputs but not buttons. The server's <a>
+     titles inherit .panel h2's tracking, so the wasm buttons must
+     too or their titles set tighter. */
+  letter-spacing: inherit;
+  /* Same weight as the range buttons beside it, not Pico's bold h2. */
+  --pico-font-weight: 400;
+}
+.hashrate-head .head-switch[aria-current] {
+  text-decoration: underline;
+  text-underline-offset: 0.2em;
+}
+.hashrate-head .head-switch.dim {
+  color: var(--pico-muted-color);
+  text-decoration: none;
+}
+.hashrate-head .head-switch:hover {
+  color: var(--pico-primary-color);
+}
+
 /* Pool/Node/Network series toggles: their own row under the hashrate heading,
    so the stateless links can flip ?pool=0/?node=0/?network=1 (server) or
    toggle the signals (wasm) without a script. The network line is opt-in. */
@@ -235,6 +275,24 @@ tr.uncle-row {
   background: var(--ms-green);
   border-radius: 1px;
   transform: rotate(45deg);
+}
+/* Sharechain chips: the server dashboard paints these dots with inline
+   styles, the wasm one with these classes; the colours are the series
+   colours of .chart-wrap .line.* below, so chip, line and tracer agree. */
+.series-toggles .legend-dot.height {
+  background: #ffffff;
+}
+.series-toggles .legend-dot.uncles {
+  background: #f43f5e;
+}
+.series-toggles .legend-dot.weak {
+  background: #f59e0b;
+}
+.series-toggles .legend-dot.dmin {
+  background: #06b6d4;
+}
+.series-toggles .legend-dot.dmax {
+  background: #a78bfa;
 }
 .series-toggles .legend-chip.off {
   opacity: 0.45;
@@ -301,6 +359,42 @@ tr.uncle-row {
   border-radius: 1px;
   transform: rotate(45deg);
 }
+/* Sharechain series colours: height white, min diff cyan, max diff light
+   violet, uncles rose, weak amber. Each group covers line, dot, key, tracer. */
+.chart-wrap .line.height { stroke: #ffffff; }
+.chart-wrap .dot.height,
+.chart-wrap .key.height { fill: #ffffff; color: #ffffff; }
+.chart-wrap .tracer.height {
+  fill: #ffffff; stroke: #ffffff;
+  filter: drop-shadow(0 0 1px #fff) drop-shadow(0 0 3px #fff); }
+.chart-wrap .line.dmin { stroke: #06b6d4; }
+.chart-wrap .dot.dmin,
+.chart-wrap .key.dmin { fill: #06b6d4; color: #06b6d4; }
+.chart-wrap .tracer.dmin {
+  fill: #06b6d4; stroke: #06b6d4;
+  filter: drop-shadow(0 0 1px #06b6d4) drop-shadow(0 0 3px #06b6d4); }
+.chart-wrap .line.dmax { stroke: #a78bfa; }
+.chart-wrap .dot.dmax,
+.chart-wrap .key.dmax { fill: #a78bfa; color: #a78bfa; }
+.chart-wrap .tracer.dmax {
+  fill: #a78bfa; stroke: #a78bfa;
+  filter: drop-shadow(0 0 1px #a78bfa) drop-shadow(0 0 3px #a78bfa); }
+.chart-wrap .line.uncles { stroke: #f43f5e; }
+.chart-wrap .dot.uncles,
+.chart-wrap .key.uncles { fill: #f43f5e; color: #f43f5e; }
+.chart-wrap .tracer.uncles {
+  fill: #f43f5e; stroke: #f43f5e;
+  filter: drop-shadow(0 0 1px #f43f5e) drop-shadow(0 0 3px #f43f5e); }
+.chart-wrap .line.weak { stroke: #f59e0b; }
+.chart-wrap .dot.weak,
+.chart-wrap .key.weak { fill: #f59e0b; color: #f59e0b; }
+.chart-wrap .tracer.weak {
+  fill: #f59e0b; stroke: #f59e0b;
+  filter: drop-shadow(0 0 1px #f59e0b) drop-shadow(0 0 3px #f59e0b); }
+/* The key chip for uncle/weak counts shows an integer (no decimal point or
+   units) so the tip rows read "Uncle 3" instead of "Uncle 3.00". */
+.chart-wrap .key.uncles,
+.chart-wrap .key.weak { font-variant-numeric: tabular-nums; }
 .chart-wrap figcaption {
   display: flex;
   gap: 1rem;

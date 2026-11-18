@@ -194,7 +194,7 @@ impl From<ToolError> for Exit {
 
 /// `[HH:MM:SS] message`, the progress line format of the harness.
 pub fn log_message(message: &str) {
-    println!("[{}] {message}", chrono::Local::now().format("%H:%M:%S"));
+    println!("[{}] {message}", crate::wall_clock::time_of_day());
 }
 
 /// The scenario names `failures` and `nightly` accept.

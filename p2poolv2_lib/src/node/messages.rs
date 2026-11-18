@@ -32,10 +32,6 @@ use std::fmt::Display;
 /// branches). 2,144 KiB holds either, the share with a few KB to spare;
 /// `test_full_share_headers_response_fits_max_message_size` and
 /// `test_largest_bch_share_block_fits_max_message_size` guard the margin.
-///
-/// 1,280 KiB until 2026-11-15, when `WEAK_BYTES` rose from 96 KiB with the
-/// weak shares a share may carry (`BCH_WEAK_SHARE_RULE_TAG`): the limit rose
-/// by the same 864 KiB, so the share keeps the room it had.
 pub const MAX_P2P_MESSAGE_SIZE: usize = 2_144 * 1024;
 
 /// Most headers, and most distinct branches, a `ShareHeaderBatch` may carry:

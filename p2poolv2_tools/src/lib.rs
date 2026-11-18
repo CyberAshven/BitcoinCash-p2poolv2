@@ -29,5 +29,6 @@ pub mod sim;
 pub mod stats;
 pub mod tcp_monitor;
 pub mod terminal;
+pub mod wall_clock;
 
 pub use error::{ToolError, ToolResult};

@@ -34,18 +34,13 @@ use serde::{Deserialize, Serialize};
 /// in common format v2 with its format checks, a pool-built share's token
 /// root in its header (`roots`), and the ASERT header check of token shares
 /// with the test networks' band of an eighth to eight times the computed
-/// target (`asert8`; mainnet's is a half to 1.05 times). A node on the old
-/// `fabe6d6d` output rebuilds another coinbase for every share, one without
-/// pool-built roots cannot read their headers, and one on the earlier 1.05
-/// test-network easy side refuses chipnet token shares this rule accepts.
+/// target (`asert8`; mainnet's is a half to 1.05 times).
 ///
-/// `mm2-roots-asert8-ticks` since 2026-11-15: the ASERT check of a token
-/// share computes its target from the CHIP-2025-03 ticks and next interval
-/// of the block the share builds on, its known header's where block
-/// validation has it and the network's pins by height at the header gate.
-/// A node on `mm2-roots-asert8` learned one-minute blocks while running and
-/// computed ten-minute targets before that, so the two refuse each other's
-/// token shares around a switch.
+/// `-ticks`: the ASERT check of a token share computes its target from the
+/// CHIP-2025-03 ticks and next interval of the block the share builds on,
+/// its known header's where block validation has it and the network's pins
+/// by height at the header gate. `docs/sharechain/rule-history.md` lists the
+/// earlier segments.
 pub const BCH_MERGE_MINING_RULE_TAG: &str = "mm2-roots-asert8-ticks";
 
 /// The tag that opens the commitment's data: `"CTMM"`.
