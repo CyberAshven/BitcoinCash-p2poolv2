@@ -33,7 +33,8 @@ Mainnet and chipnet run the same rules; only the network setting differs.
 Nodes only talk to nodes on the same chain and rules. Every libp2p protocol
 string carries the Bitcoin Cash network, the share chain's genesis and, on
 Bitcoin Cash, a tag for each share-chain rule and last a tag for the P2P
-messages, `weak-by-hash/without-payouts` today (`network_prologue` in
+messages, `weak-by-hash/without-payouts/headers-resume` today
+(`network_prologue` in
 `p2poolv2_lib/src/node/behaviour/request_response.rs`). A node on another
 chain or rule fails the handshake instead of exchanging shares the other
 side would reject, and a node speaking other messages fails it instead of

@@ -916,6 +916,12 @@ prologue and Identify use `network_prologue()`, frozen at the v0.18 string, so
 old and new nodes still connect. Share chain isolation comes from the chain and
 genesis segments of these strings, not from the version.
 
+On Bitcoin Cash the strings also carry the rule and message tags, and the
+message tag gained `headers-resume` with 1.1.0. A Bitcoin Cash node from before
+it fails the Noise handshake with a current one instead of falling back to
+1.0.0, so Bitcoin Cash nodes always speak 1.1.0 to each other and 1.0.0 is left
+for a Bitcoin node talking to upstream's.
+
 A server answers `GetShareHeaders` by the version it arrived on:
 
 - **1.0.0** (`get_headers_for_locator`): from `MAX_UNCLES_DEPTH` heights below

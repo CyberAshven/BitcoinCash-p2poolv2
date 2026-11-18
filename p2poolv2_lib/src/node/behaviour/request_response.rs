@@ -247,7 +247,17 @@ fn share_chain_rule_tag(chain: Chain) -> Option<String> {
 /// smaller share still goes whole, as `ShareWithWeakHashes` or `ShareBlock`.
 /// A node before it cannot read the new message. Sync still sends shares
 /// whole.
-const BCH_MESSAGES_TAG: &str = "weak-by-hash/without-payouts";
+///
+/// `headers-resume` since 2026-11-18, with upstream's request-response
+/// protocol 1.1.0 (`ProtocolVersion`): `GetShareHeaders` carries the last
+/// header the requester got (`resume_after`), and the answer serves every
+/// share at a height, a page ending inside a height if it fills, where 1.0.0
+/// cuts each height at `MAX_BLOCKS_PER_HEIGHT` shares. Upstream picks the
+/// version per stream, so without the segment a node before it would peer on
+/// 1.0.0 and get cut heights, which can leave out the share the chain goes
+/// through. With it, Bitcoin Cash nodes always speak 1.1.0 to each other;
+/// 1.0.0 stays for a Bitcoin node and upstream's nodes.
+const BCH_MESSAGES_TAG: &str = "weak-by-hash/without-payouts/headers-resume";
 
 /// The share chain part of every protocol string: the genesis tag, followed
 /// on Bitcoin Cash by the rule tag and the message tag.
@@ -641,7 +651,7 @@ mod tests {
         assert_eq!(
             network_prologue(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash),
             format!(
-                "/p2pool/test/{expected_tag}/pplns-k3-m100/asert-parent/trade-htlc/payout-holder/payout-hybrid-t3072-f500-r1to3-z8-cov1/cuts-per-share/uncle-once/body-1000000-204800/payee-p2pkh-p2sh20-p2sh32/merkle32/depths-m100/sigchecks3000-1452/no-segwit/weight-work/mm2-roots-asert8-ticks/version-vote/bch-prev-1off-ticks/genesis-last-resort/band-c64/levels-546x2-k1/weak4-640-100-48-256-320-64-4096-64-32-summary/weak-by-hash/without-payouts/1.0.0"
+                "/p2pool/test/{expected_tag}/pplns-k3-m100/asert-parent/trade-htlc/payout-holder/payout-hybrid-t3072-f500-r1to3-z8-cov1/cuts-per-share/uncle-once/body-1000000-204800/payee-p2pkh-p2sh20-p2sh32/merkle32/depths-m100/sigchecks3000-1452/no-segwit/weight-work/mm2-roots-asert8-ticks/version-vote/bch-prev-1off-ticks/genesis-last-resort/band-c64/levels-546x2-k1/weak4-640-100-48-256-320-64-4096-64-32-summary/weak-by-hash/without-payouts/headers-resume/1.0.0"
             )
         );
     }
@@ -663,7 +673,7 @@ mod tests {
         assert_ne!(current, before, "weak shares by hash change the messages");
         assert!(
             current.ends_with(
-                "/weak4-640-100-48-256-320-64-4096-64-32-summary/weak-by-hash/without-payouts/1.0.0"
+                "/weak4-640-100-48-256-320-64-4096-64-32-summary/weak-by-hash/without-payouts/headers-resume/1.0.0"
             ),
             "{current}"
         );
@@ -673,7 +683,7 @@ mod tests {
         );
         let kad = kad_protocol_string(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash);
         assert!(
-            kad.ends_with("/weak-by-hash/without-payouts/kad/1.0.0"),
+            kad.ends_with("/weak-by-hash/without-payouts/headers-resume/kad/1.0.0"),
             "{kad}"
         );
     }
@@ -689,7 +699,9 @@ mod tests {
             .unwrap()
             .block_hash();
         let current = network_prologue(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash);
-        let weak_by_hash_only = current.replace("/without-payouts/", "/");
+        let weak_by_hash_only = current
+            .replace("/headers-resume/", "/")
+            .replace("/without-payouts/", "/");
 
         assert_ne!(current, weak_by_hash_only);
         assert!(
@@ -698,6 +710,33 @@ mod tests {
         );
         let kad = kad_protocol_string(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash);
         assert_ne!(kad, kad.replace("/without-payouts/", "/"));
+    }
+
+    /// From 2026-11-18 a header request carries the last header the
+    /// requester got and the answer serves every share at a height
+    /// (request-response 1.1.0). A node on `without-payouts` derived the
+    /// string without `/headers-resume` and would peer on 1.0.0, where heights
+    /// are cut, so the two strings differ and the nodes fail the handshake
+    /// instead. Kademlia's string changes with it.
+    #[test]
+    fn test_bitcoin_cash_protocol_string_carries_the_headers_resume_messages() {
+        let genesis_hash = bch_genesis::build(BchShareNetwork::Chipnet)
+            .unwrap()
+            .block_hash();
+        let current = network_prologue(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash);
+        let before = current.replace("/headers-resume/", "/");
+
+        assert_ne!(current, before);
+        assert!(
+            current.ends_with("/without-payouts/headers-resume/1.0.0"),
+            "{current}"
+        );
+        assert!(
+            before.ends_with("/weak-by-hash/without-payouts/1.0.0"),
+            "{before}"
+        );
+        let kad = kad_protocol_string(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash);
+        assert_ne!(kad, kad.replace("/headers-resume/", "/"));
     }
 
     /// On Bitcoin Cash both request-response versions carry the prologue's
@@ -1194,7 +1233,7 @@ mod tests {
         assert_eq!(
             kad_protocol_string(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash),
             format!(
-                "/p2pool/test/{expected_tag}/pplns-k3-m100/asert-parent/trade-htlc/payout-holder/payout-hybrid-t3072-f500-r1to3-z8-cov1/cuts-per-share/uncle-once/body-1000000-204800/payee-p2pkh-p2sh20-p2sh32/merkle32/depths-m100/sigchecks3000-1452/no-segwit/weight-work/mm2-roots-asert8-ticks/version-vote/bch-prev-1off-ticks/genesis-last-resort/band-c64/levels-546x2-k1/weak4-640-100-48-256-320-64-4096-64-32-summary/weak-by-hash/without-payouts/kad/1.0.0"
+                "/p2pool/test/{expected_tag}/pplns-k3-m100/asert-parent/trade-htlc/payout-holder/payout-hybrid-t3072-f500-r1to3-z8-cov1/cuts-per-share/uncle-once/body-1000000-204800/payee-p2pkh-p2sh20-p2sh32/merkle32/depths-m100/sigchecks3000-1452/no-segwit/weight-work/mm2-roots-asert8-ticks/version-vote/bch-prev-1off-ticks/genesis-last-resort/band-c64/levels-546x2-k1/weak4-640-100-48-256-320-64-4096-64-32-summary/weak-by-hash/without-payouts/headers-resume/kad/1.0.0"
             )
         );
     }
