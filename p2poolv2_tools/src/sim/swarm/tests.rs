@@ -353,6 +353,41 @@ fn node_config_escapes_paths_for_toml() {
     );
 }
 
+/// The swarm's stores share one run directory, where a kept node key would
+/// be shared too, so every node takes a new peer ID on each start, and none
+/// asks Nostr relays for peers.
+#[test]
+fn every_node_takes_its_own_identity_and_stays_off_nostr() {
+    let shape = NodeShape {
+        hashrate: "5".to_string(),
+        latency_ms: 0,
+    };
+    let config = node_config(
+        &settings(3),
+        &NodeIdentity {
+            index: 1,
+            payout_address: DEFAULT_MINER_ADDRESS,
+            shape: &shape,
+        },
+    );
+    let parsed: toml::Table = config.parse().expect("config parses");
+    let network = parsed.get("network").expect("a network section");
+
+    assert_eq!(
+        network
+            .get("ephemeral_node_key")
+            .and_then(toml::Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        network
+            .get("nostr_relays")
+            .and_then(toml::Value::as_array)
+            .map(Vec::len),
+        Some(0)
+    );
+}
+
 #[test]
 fn nodes_mine_bitcoin_cash_regtest() {
     let shape = NodeShape {
