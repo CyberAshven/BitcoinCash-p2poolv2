@@ -74,7 +74,7 @@ that commit:
 | Upstream page | This book | Notes |
 |---|---|---|
 | `docs/architecture/async-flow.md` | [Async flow and concurrency](architecture/async-flow.md) | Monitoring broadcast and Electrum tip watcher rows, beside the share transaction relay row. |
-| `docs/architecture/pruning.md` | [Pruning](architecture/pruning.md) | Script history and its compaction filter; on Bitcoin Cash the window is `BCH_PAYOUT_DEPTH`. |
+| `docs/architecture/pruning.md` | [Pruning](architecture/pruning.md) | Script history and its compaction filter; on Bitcoin Cash the script history window is `BCH_PAYOUT_DEPTH`. |
 | `docs/architecture/store-schema.md` | [Store schema](architecture/store-schema.md) | The `ScriptHistory` column family. |
 | `docs/testnet5.md` | not ported | A Bitcoin test network; upstream's `Chain` config type for it collides with this fork's `chain` setting. |
 

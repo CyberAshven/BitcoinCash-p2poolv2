@@ -66,7 +66,7 @@ not yet measured.
   serve them ([Small miners](../small-miners.md)), and shares can be sold
   for BCH ([Selling shares](../payouts/selling-shares.md)).
 - **Node resources.** Each node keeps the share headers forever (about 1 KB a
-  share, 3.1 GB a year) and block bodies for about 29 days,
+  share, 3.1 GB a year) and block bodies for about 28 days,
   mostly coinbases, which grow with the number of payees
   ([Requirements](../requirements.md#disk), [Pruning](../architecture/pruning.md)).
   Memory and CPU have not been measured.
