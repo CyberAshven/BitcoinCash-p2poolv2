@@ -227,6 +227,9 @@ format and genesis re-pin.
 
 ### Changed
 
+- Connections Kademlia opens for a lookup close once no query needs them, so
+  `target_outgoing_peers` and its /16 rule set a node's outgoing peers; the
+  peer stays in the routing table (#154).
 - The header rules of the weak shares a share carries are checked on several
   cores, one fewer than the node's CPUs; the verdict is unchanged (#127).
 - A new share with 50,000 bytes or more of coinbase outputs is relayed
@@ -363,9 +366,14 @@ format and genesis re-pin.
 
 ### Fixed
 
+- Chipnet blocks are no longer lost as `bad-diffbits` at the
+  minimum-difficulty mark: a share's time must suit its job's nBits, and a
+  new template is fetched a second after the mark (#155).
+- An SV1 miner's first job on a new previous block is always sent with
+  `clean_jobs`, even when a second template replaced the clean one (#153).
 - The sim swarm's nodes connect again: since #142 they all read one node key
   from their shared run directory and refused to dial each other. Each now
-  takes a new peer ID at every start and stays off Nostr.
+  takes a new peer ID at every start and stays off Nostr (#151).
 - Templates from a node without long polling, such as Knuth, parse again: a
   missing `longpollid` reads as empty (#123).
 - Requests to the Bitcoin Cash node time out after 30 seconds without data,

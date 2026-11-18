@@ -41,6 +41,10 @@ use std::sync::Arc;
 use std::time::SystemTime;
 use tracing::{debug, error, info};
 
+/// The reply to a share whose nTime its job's nBits do not allow
+/// ([`BlockTemplate::allows_ntime`]).
+const NTIME_OUT_OF_RANGE: &str = "nTime out of range for the job's nBits";
+
 /// Handle the "mining.submit" message
 /// This function is called when a miner submits a share to the Stratum server.
 /// It sends a response with the submission status.
@@ -61,6 +65,11 @@ use tracing::{debug, error, info};
 /// share meeting the pool target is emitted to the share chain. In Hydrapool
 /// mode a share whose hash meets the session difficulty is queued for the PPLNS
 /// share worker; it is never emitted.
+///
+/// On a test network a share whose nTime its job's nBits do not allow under
+/// the minimum-difficulty rule ([`BlockTemplate::allows_ntime`]) is refused
+/// before it is counted or submitted, so no block the node must refuse goes
+/// out.
 pub(crate) async fn handle_submit<'a, D: DifficultyAdjusterTrait>(
     message: SimpleRequest<'a>,
     session: &mut Session<D>,
@@ -117,6 +126,22 @@ pub(crate) async fn handle_submit<'a, D: DifficultyAdjusterTrait>(
                 return Ok(vec![Message::Response(response)]);
             }
         };
+
+    // On a test network the minimum-difficulty rule ties the job's nBits to
+    // the block's time; a share dated on the wrong side of the mark would be
+    // a block the node refuses as bad-diffbits.
+    if !job
+        .blocktemplate
+        .allows_ntime(validation_result.header.time)
+    {
+        debug!(
+            "Share nTime {} is not allowed with job {job_id:x}'s nBits",
+            validation_result.header.time
+        );
+        let response = Response::new_error(message.id, StratumErrorCode::OtherUnknown)
+            .with_message(NTIME_OUT_OF_RANGE.to_string());
+        return Ok(vec![Message::Response(response)]);
+    }
 
     // Compute the block hash once; it is reused for dedup, the pool-target
     // check, and the true-difficulty calculation on this hot path.

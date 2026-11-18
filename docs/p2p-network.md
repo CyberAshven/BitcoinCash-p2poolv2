@@ -144,8 +144,8 @@ looks tells its relays it is a P2Pool node on that network.
 ## Outgoing peers
 
 A node keeps at least `[network] target_outgoing_peers` outgoing peers (16
-by default): connected peers it dialed, from `dial_peers`, a Kademlia query
-or the target. While short, it dials one more peer a second
+by default): connected peers it dialed and keeps, from `dial_peers`, the
+target, or a DNS or Nostr seed. While short, it dials one more peer a second
 (`p2poolv2_lib/src/node/outgoing_peer_target.rs`):
 
 - **Peers it has heard of.** A book of up to 1,000 peers and their
@@ -157,9 +157,18 @@ or the target. While short, it dials one more peer a second
   full book drops a random unverified peer for a new one.
 - **Spread over network groups.** The target picks a random network group
   with a candidate, then a peer in it, and never dials into an IPv4 /16 or
-  IPv6 /32 that already holds an outgoing connection, as Bitcoin Cash Node
+  IPv6 /32 that already holds an outgoing peer, as Bitcoin Cash Node
   does (`CConnman::ThreadOpenConnections`, `CNetAddr::GetGroup`).
   `dial_peers` connections hold no group and are left to the reconnector.
+- **Lookups close.** Kademlia dials each unconnected peer a lookup asks, and
+  share relay would keep those connections open, so lookups, not the target,
+  would pick a node's peers. An outgoing connection none of the node's own
+  dials opened is Kademlia's: it holds no group, does not count, and closes
+  after 10 seconds once no query runs, or after 60, Kademlia's query
+  timeout, as Bitcoin Cash Node's feeler connections close. The peer stays
+  in the routing table and the book. A connection to an anchor is the
+  target's; inbound connections stay; `target_outgoing_peers = 0` keeps
+  lookups open.
 - **Within the limits.** Dials in flight count toward the target, no dial
   passes `max_established_outgoing`, and the target's own dials in flight
   stay below half of `max_pending_outgoing`. Blocked IPs are never dialed.

@@ -47,6 +47,24 @@ transactions make it into the work.
 
 Setup: [Running P2Poolv2 on Bitcoin Cash](bch-quickstart.md).
 
+**Minimum-difficulty mark (test networks).** On chipnet a block dated more
+than twice its parent's next interval after the parent (2 minutes after a
+one-minute block, 20 after a ten-minute one) must carry the proof-of-work
+limit's nBits, `1d00ffff`, and a block dated up to that mark must carry
+ASERT's; anything else is `bad-diffbits`. The template relay
+(`relay_templates_learning_prevs` in `node/bch_header_feeder.rs`) bounds
+each template by its parent's mark (`BchHeaderRules::min_difficulty_mark`):
+a job with ASERT's nBits carries a time no later than the mark, one with the
+limit's a time after it, and a share dated on the wrong side is refused
+(`nTime out of range` on SV1, `invalid-ntime` on SV2) instead of becoming a
+block the node refuses. While the latest template carries ASERT's nBits and
+its mark is ahead, the relay asks for a new template a second after the
+mark, and new nBits on the same parent clean the jobs, so miners move to the
+easier work at once rather than at the next poll. A Template Provider pushes
+its own templates, so with `template_source = "sv2"` only the bounds apply.
+Mainnet has no such rule; regtest never retargets, and scalenet's nBits are
+not checked here, so neither is bounded.
+
 **Job builder.** Turns each template into a mining job whose coinbase pays
 miners by the PPLNS window, after the donation and the operator fee. It also
 carries the merge-mining commitment as output 0

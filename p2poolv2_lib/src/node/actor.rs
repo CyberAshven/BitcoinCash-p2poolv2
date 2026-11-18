@@ -1006,6 +1006,7 @@ impl NodeActor {
                     self.node.attempt_reconnections();
                 }
                 _ = outgoing_target_interval.tick(), if self.node.outgoing_peer_target.has_target() => {
+                    self.node.close_finished_lookups();
                     self.node.dial_toward_outgoing_target();
                 }
                 _ = sync_retry_interval.tick(), if !self.chain_store_handle.is_current() => {
@@ -1188,10 +1189,7 @@ impl NodeActor {
                 }
             }
             // Event sent from dns seed resolution
-            SwarmSend::Dial(address) => match self.node.swarm.dial(address.clone()) {
-                Ok(_) => info!("Dialed {address}"),
-                Err(error) => debug!("Failed to dial {address}: {error}"),
-            },
+            SwarmSend::Dial(address) => self.node.dial_seed(address),
         }
     }
 

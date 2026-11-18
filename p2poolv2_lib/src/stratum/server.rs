@@ -36,7 +36,9 @@ use crate::stratum::sv2::{self, PoolTransactionCache, Sv2Mining};
 use crate::stratum::work::band_policy::miner_job_band;
 use crate::stratum::work::error::WorkError;
 use crate::stratum::work::level_policy::session_payout_level;
-use crate::stratum::work::prepared_notify::{PreparedNotifyParams, build_notify_with_job_id};
+use crate::stratum::work::prepared_notify::{
+    PreparedNotifyParams, build_notify_with_job_id, set_clean_jobs,
+};
 use crate::stratum::work::tracker::JobTracker;
 use crate::utils::time_provider::{SystemTimeProvider, TimeProvider};
 use bitcoindrpc::{BitcoinRpcConfig, BitcoindRpcClient};
@@ -933,6 +935,12 @@ fn session_hashrate<D: DifficultyAdjusterTrait>(
 /// bits. Its job carries its payout level: the one its login chose, or the
 /// node's, lowered when it would expect fewer than 3 payments a month
 /// (`level_policy::session_payout_level`).
+///
+/// A job on another previous block than the last one the miner got is sent
+/// with `clean_jobs`, whatever the template says. The notifier sets it only
+/// on the first template on a new previous block, and the watch channel
+/// keeps only the latest template, so a second template on that block can
+/// replace the first before this session reads it.
 fn job_lines<D: DifficultyAdjusterTrait>(
     session: &mut Session<D>,
     prepared: &PreparedNotifyParams,
@@ -965,7 +973,7 @@ fn job_lines<D: DifficultyAdjusterTrait>(
     let lowered = session
         .difficulty_adjuster
         .set_share_difficulty_ceiling(ceiling);
-    let (notify_json, job_id) = build_notify_with_job_id(
+    let (mut notify_json, job_id) = build_notify_with_job_id(
         prepared,
         commitment_address,
         share_address,
@@ -973,6 +981,11 @@ fn job_lines<D: DifficultyAdjusterTrait>(
         payout_level,
         tracker_handle,
     )?;
+    let prevhash = &prepared.template().previousblockhash;
+    let new_prevhash = session.last_job_prevhash.as_ref() != Some(prevhash);
+    if new_prevhash {
+        set_clean_jobs(&mut notify_json);
+    }
     let mut lines = String::with_capacity(notify_json.len() + 1024);
     if let Some(difficulty) = lowered {
         lines.push_str(&serialize_line(&Message::SetDifficulty(
@@ -992,6 +1005,9 @@ fn job_lines<D: DifficultyAdjusterTrait>(
                 sv1_merge_leaves_params(&format!("{job_id:016x}"), &tokens),
             ),
         ))?);
+    }
+    if new_prevhash {
+        session.last_job_prevhash = Some(prevhash.clone());
     }
     Ok(lines)
 }
@@ -1065,8 +1081,10 @@ where
 #[cfg(test)]
 mod stratum_server_tests {
     use super::*;
+    use crate::accounting::OutputPair;
     use crate::stratum::messages::SimpleRequest;
     use crate::stratum::server;
+    use crate::stratum::work::prepared_notify::PreparedNotifyParamsBuilder;
     use crate::stratum::work::tracker::start_tracker_actor;
     use crate::test_utils::{TestShareBlockBuilder, setup_test_chain_store_handle};
     use crate::test_utils::{make_test_share_address, test_bch_prepared, test_bch_stratum_context};
@@ -2778,5 +2796,68 @@ mod stratum_server_tests {
         let lines = job_lines(&mut session, &prepared, false, None, &tracker_handle).unwrap();
 
         assert_eq!(lines.lines().count(), 1);
+    }
+
+    /// The notifier publishes `clean_jobs` only on the first template on a
+    /// new previous block. When a second template on that block replaces it
+    /// in the watch channel before the connection reads it, the job the
+    /// miner gets is still clean. The next job on the same block is not.
+    #[tokio::test]
+    async fn job_lines_send_a_new_previous_block_clean_after_its_clean_template_is_replaced() {
+        let tracker_handle = start_tracker_actor();
+        let first = create_test_prepared_notify();
+        let base_template = Arc::clone(first.template());
+        let prepared_on_new_block = |clean_jobs: bool| {
+            let mut template = base_template.as_ref().clone();
+            template.previousblockhash = "11".repeat(32);
+            let payee = OutputPair {
+                address: bitcoin::Address::p2pkh(
+                    bitcoin::PubkeyHash::from_byte_array([1; 20]),
+                    bitcoin::Network::Regtest,
+                )
+                .into(),
+                amount: bitcoin::Amount::from_sat(template.coinbasevalue),
+            };
+            Arc::new(
+                PreparedNotifyParamsBuilder::new(
+                    Arc::new(template),
+                    vec![payee],
+                    b"test_pool",
+                    clean_jobs,
+                )
+                .bits(bitcoin::CompactTarget::from_consensus(0x1d00ffff))
+                .build()
+                .unwrap(),
+            )
+        };
+        let is_clean = |lines: String| {
+            let notify: serde_json::Value = serde_json::from_str(lines.trim()).unwrap();
+            notify["params"][8].as_bool().unwrap()
+        };
+        let mut session = Session::<DifficultyAdjuster>::new(1, 1, None, DEFAULT_VERSION_MASK);
+        let (template_tx, mut template_rx) = watch::channel(Some(first));
+        let job = template_rx.borrow_and_update().clone().unwrap();
+        job_lines(&mut session, &job, false, None, &tracker_handle).unwrap();
+
+        // Both templates on the new block land before the connection reads.
+        template_tx.send(Some(prepared_on_new_block(true))).unwrap();
+        template_tx
+            .send(Some(prepared_on_new_block(false)))
+            .unwrap();
+        template_rx.changed().await.unwrap();
+        let job = template_rx.borrow_and_update().clone().unwrap();
+        let lines = job_lines(&mut session, &job, false, None, &tracker_handle).unwrap();
+        assert!(
+            is_clean(lines),
+            "the miner's first job on a new previous block must be clean"
+        );
+
+        template_tx
+            .send(Some(prepared_on_new_block(false)))
+            .unwrap();
+        template_rx.changed().await.unwrap();
+        let job = template_rx.borrow_and_update().clone().unwrap();
+        let lines = job_lines(&mut session, &job, false, None, &tracker_handle).unwrap();
+        assert!(!is_clean(lines));
     }
 }
