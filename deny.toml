@@ -97,6 +97,13 @@ ignore = [
     # libp2p-tcp -> if-watch -> netlink-packet-core. Remove when that chain
     # drops paste.
     "RUSTSEC-2024-0436",  # paste 1.0.15
+
+    # Unmaintained, no maintained release to move to. chrono is a direct
+    # dependency of the node, API, CLI, tools and tests, as in upstream
+    # P2Poolv2, which uses it the same way; dropping it means migrating every
+    # timestamp. Remove when upstream moves off chrono or chrono is
+    # maintained again.
+    "RUSTSEC-2026-0543",  # chrono 0.4.45
 ]
 yanked = "deny"
 # "all" rather than "workspace": unmaintained transitive crates are the ones we
