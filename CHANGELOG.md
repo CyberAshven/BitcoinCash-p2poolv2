@@ -364,7 +364,7 @@ format and genesis re-pin.
 ### Fixed
 
 - An SV1 miner's first job on a new previous block is always sent with
-  `clean_jobs`, even when a second template replaced the clean one.
+  `clean_jobs`, even when a second template replaced the clean one (#153).
 - Templates from a node without long polling, such as Knuth, parse again: a
   missing `longpollid` reads as empty (#123).
 - Requests to the Bitcoin Cash node time out after 30 seconds without data,
