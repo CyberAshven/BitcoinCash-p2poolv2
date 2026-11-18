@@ -1892,6 +1892,12 @@ mod tests {
     #[test]
     fn chart_times_carry_the_day() {
         assert_eq!(fmt_day_time(1_792_000_000), "Oct 14 17:46 UTC");
+        // A day below ten is not padded.
+        assert_eq!(fmt_day_time(1_699_142_400), "Nov 5 00:00 UTC");
+        assert_eq!(fmt_utc(1_700_000_000), "2023-11-14 22:13 UTC");
+        assert_eq!(fmt_hour_edge(1_700_000_000), "22:13");
+        // Past the year 9999 the number itself is shown.
+        assert_eq!(fmt_utc(u64::MAX), u64::MAX.to_string());
     }
 
     #[test]

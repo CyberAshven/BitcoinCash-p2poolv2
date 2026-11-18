@@ -95,6 +95,13 @@ mod test {
     use std::time::{Duration, UNIX_EPOCH};
 
     #[test]
+    fn test_format_timestamp_is_utc_to_the_second() {
+        assert_eq!(format_timestamp(1_700_000_000), "2023-11-14 22:13:20 UTC");
+        assert_eq!(format_timestamp(0), "1970-01-01 00:00:00 UTC");
+        assert_eq!(format_timestamp(u64::MAX), "Invalid timestamp");
+    }
+
+    #[test]
     fn test_mock_time_provider() {
         let fixed_time = UNIX_EPOCH + Duration::from_secs(1000);
         let time_provider = TestTimeProvider::new(fixed_time);

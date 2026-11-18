@@ -767,6 +767,12 @@ mod tests {
         setup_test_chain_store_handle,
     };
 
+    #[test]
+    fn test_format_ts_hms_is_the_utc_time_of_day() {
+        assert_eq!(format_ts_hms(1_700_000_000), "22:13:20");
+        assert_eq!(format_ts_hms(0), "00:00:00");
+    }
+
     /// Helper: set up a store with genesis and return the Store reference and temp dir.
     /// The ChainStoreHandle populates the store; we then query it directly via Store.
     async fn setup_store_with_genesis() -> (std::sync::Arc<Store>, tempfile::TempDir) {
