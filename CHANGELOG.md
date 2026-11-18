@@ -363,6 +363,11 @@ format and genesis re-pin.
 
 ### Fixed
 
+- An SV1 miner's first job on a new previous block is always sent with
+  `clean_jobs`, even when a second template replaced the clean one (#153).
+- The sim swarm's nodes connect again: since #142 they all read one node key
+  from their shared run directory and refused to dial each other. Each now
+  takes a new peer ID at every start and stays off Nostr (#151).
 - Two nodes whose stores share a directory no longer take one peer ID from the
   shared `p2p_node_key` and never connect, or load each other's peers from
   `p2p_peers.json`: a node holds `p2p_node_key.lock` and `p2p_peers.json.lock`
