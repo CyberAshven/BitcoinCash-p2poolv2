@@ -148,11 +148,11 @@ pub(crate) fn append_pool_merge_mining(suffix: &mut Vec<u8>, commitment: &MergeM
         .expect("encoding the merge-mining commitment should never fail");
 }
 
-/// Layout version of a Bitcoin Cash Job Declaration token: 2 since the
-/// share version follows the fee (`ShareCommitment::from_mining_job_token`),
-/// 3 since the band cap follows the share version (2026-11-09), 4 since the
-/// payout level follows the band cap (2026-11-09), 5 since the weak ratio
-/// follows the payout level (2026-11-09).
+/// Layout version of a Bitcoin Cash Job Declaration token: the layout
+/// `decode_job_token_terms` reads, where the share version, the band cap,
+/// the payout level and the weak ratio follow the fee
+/// (`ShareCommitment::from_mining_job_token`). `docs/sharechain/rule-history.md`
+/// lists the earlier layouts.
 pub const BCH_JOB_TOKEN_VERSION: u8 = 5;
 
 /// Append the share version to a commitment suffix: what a Bitcoin Cash
