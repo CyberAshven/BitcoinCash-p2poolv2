@@ -97,6 +97,10 @@ format and genesis re-pin.
 
 ### Added
 
+- The dashboard, server-rendered and WASM, gains a Sharechain chart tab
+  (served as JSON at `/sharechain`), income tiles and weak share detail on
+  the miner pages. The miner report shows each share's weak count; payouts
+  are unchanged (#146).
 - A node keeps its peer ID across restarts: its libp2p key is kept in
   `p2p_node_key` beside the store, or at `[network] node_key_path`;
   `ephemeral_node_key = true` makes a new one at every start (#142).
