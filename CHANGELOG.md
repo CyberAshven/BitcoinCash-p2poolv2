@@ -223,6 +223,8 @@ format and genesis re-pin.
 
 ### Changed
 
+- The header rules of the weak shares a share carries are checked on several
+  cores, one fewer than the node's CPUs; the verdict is unchanged (#127).
 - A new share with 50,000 bytes or more of coinbase outputs is relayed
   without them, and peers rebuild them from their PPLNS window (message
   segment `without-payouts`; nodes restart together, no store change, #131).

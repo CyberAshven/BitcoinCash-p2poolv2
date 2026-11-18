@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 pub mod cpu;
+pub mod parallel;
 pub mod serde_support;
 pub mod short_hex;
 pub mod snowflake_simplified;
