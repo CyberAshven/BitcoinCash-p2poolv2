@@ -980,6 +980,7 @@ fn provided_block_template(
             solutions,
         }),
         light: None,
+        min_difficulty_mark: None,
     };
     template.validate_bch()?;
     let branches = build_merkle_branches_for_template(&template)?
