@@ -5,7 +5,7 @@ and what a miner can expect from each block, with the Bitcoin Cash rules of
 this fork:
 
 - one share chain with 10-second shares, at the former mini chain's anchor and
-  ceiling (the main and mini chains merged on 2026-11-09);
+  ceiling;
 - a difficulty band, so big miners can mine heavier shares;
 - weak shares, so work at the minimum is credited many times a share period;
 - payout levels, so no payment is dust;
@@ -14,11 +14,10 @@ this fork:
 
 Upstream's wiki pages "Shares For Small Miners" and "Expected Number of
 Shares" do the same arithmetic for Bitcoin; this page redoes it for BCH, with
-the one-minute blocks of CHIP-2025-03 (on chipnet since 2026-11-15, on
-mainnet from 2027-05-15). "Ten-minute blocks, for comparison" at the end
-says what changed.
+the one-minute blocks of CHIP-2025-03 (on chipnet now, on mainnet from
+2027-05-15).
 
-The rules are in
+The rules and constants are in
 [Share chain redesign for payout variance and fees](sharechain/small-miners-design.md)
 and [architecture/payout-distribution.md](architecture/payout-distribution.md).
 The numbers under "Worked examples" are the payout simulator's
@@ -37,7 +36,7 @@ varies around it.
 | Share period | 10 s, 8,640 chain shares a day | share chain ASERT |
 | Share target ceiling | difficulty about 4.55 (2e10 hashes) | `MINI_ANCHOR_TARGET` |
 | Band cap `C` | heavier shares up to 64 times the minimum's work | `BAND_CAP_MAX_MULTIPLE` |
-| Weak shares | up to 64 carried a share; the weak ratio `R_w` settles near 34.5 weak shares a share | `WEAK_CAP`, `WEAK_FILL`, payout simulator |
+| Weak shares | the weak ratio `R_w` settles near 34.5 weak shares a share while nobody asks, at most 64; up to 640 while small miners ask | `WEAK_FILL`, `WEAK_IDLE_CAP`, `WEAK_CAP`, payout simulator |
 | Includer cut | 1% of a weak share's credit, to the share that carries it | `INCLUDER_CUT` |
 | Window | shares worth `K = 3` blocks of work, at most `W` = 120,960 shares; weak work counts in the work and takes no slots | plan decision 11 |
 | Maturity skip | 100 shares (about 17 minutes) | plan decision 11 |
@@ -58,12 +57,11 @@ miner with hashrate `m` in it:
   chain makes one share every 10 seconds. With every miner at the minimum,
   `D = P * 10 / 2^32`. A miner that would make more than
   `max(4 shares per pool block, 300 a month)` at the minimum gets heavier
-  shares (the node default), so the chain makes fewer of its shares and
-  ASERT eases `D` for everyone else. With one-minute blocks 4 shares a pool
+  shares (the node default), so ASERT eases `D` for everyone else; 4 a pool
   block pass 300 a month from 0.17% of BCH (1,728 a month at 1%, 17,280 at
   10%), so only miners far above the pool's average get heavier shares. The
-  minimum is never easier than the ceiling (4.55). The ceiling binds below
-  about 2 GH/s, where shares come slower than one per 10 seconds.
+  minimum is never easier than the ceiling (4.55), which binds for a pool
+  below about 2 GH/s.
 - **Weak shares:** a miner on a job at the minimum also finds weak shares,
   at `D / R_w`, about `R_w - 1` of them for each full share. Every proof from
   a job at the minimum, full share or weak share, is credited the weak work.
@@ -76,12 +74,11 @@ miner with hashrate `m` in it:
   size and with every rule on this page. PPLNS is fair on average: the
   window, the band, weak shares and levels change how lumpy payouts are, not
   their mean.
-- **Payout levels:** a payee whose slice of a block is below its level `L`
-  does not get a sub-level output. The payees below their level share one
-  pot per level, and a draw over the pot pays `L` to about `pot / L` of
-  them, each with a chance in proportion to its slice. A payee at or above
-  its level is paid its slice directly. Either way a payment is never below
-  546 satoshis, and the expected payment equals the slice.
+- **Payout levels:** a payee at or above its level `L` is paid its slice
+  directly; the payees below it share one pot per level, and a draw pays
+  `L` to about `pot / L` of them, each with a chance in proportion to its
+  slice ([the draw](sharechain/small-miners-design.md#4-payout-levels)). A
+  payment is never below 546 satoshis, and its expected value is the slice.
 - **Payments a month:** about `income / L` for a miner below its level every
   block, one each pool block for a miner above it. A node lowers a miner's
   level, from its choice or the default, until the miner can expect at least
@@ -180,7 +177,10 @@ that still finds three a month is:
 | 5.17e13 (1,000 times) | 121 TH/s | 363 | 604 | 1,088 |
 
 These are from the payout simulator's `scale` table, for a pool with half
-its hashrate from home miners. A smaller miner is still paid fairly, in
+its hashrate from home miners and nobody asking; where small miners find
+fewer than 16 weak shares a month their asks raise the count a share
+carries, up to ten times
+([Weak shares that follow the asks](sharechain/small-miners-design.md#6-weak-shares-that-follow-the-asks)). A smaller miner is still paid fairly, in
 rarer and larger pieces: at today's difficulty a 1.2 TH/s miner is paid 25
 times a month in a pool at 10% of BCH and 9 times at 90%; at ten times the
 difficulty, 5 times and once. So a device ages out as the difficulty grows,
@@ -205,29 +205,18 @@ counts both.
 
 ## Ten-minute blocks, for comparison
 
-Before CHIP-2025-03 a block came every ten minutes and paid 3.125 BCH. The
-window is sized by the paying block's difficulty, so it shrank with the
-block interval on its own: it was `min(180 / f, 120,960)` shares, 50 hours
-at 1% of BCH, with a pool block every 16.7 hours. A share's slice of a block
-is the same now (a tenth of the reward over a tenth of the window's work),
-and a share still meets about three pool blocks while it is in the window,
-so a small miner's income, payments and swing stay about the same. What
-changed:
-
-- the node default aims a heavy miner at ten times the shares a month, so
-  in the simulated mixes the band changes nothing from 10% of BCH up, where
-  it used to lower the minimum at 10% too;
-- a miner's slice of a block is a tenth, so the ASIC above goes to the level
-  draw from about 5% of BCH instead of about 50%;
-- a pool's coinbase holds a tenth of the payees at the same pool size, and
-  only a pool under about 0.06% of BCH reaches the 1 MB coinbase limit
-  ([network simulation](simulation/network-sim.md));
-- a second of delay in relaying a found block costs ten times the BCH orphan
-  risk.
-
-Tuning `K`, the cap and the share period for faster blocks is an open
-question in [bch-plan.md](bch-plan.md); the 10-second share period is kept
-for now (decision 11).
+With ten-minute blocks (3.125 BCH each) the window, sized by the paying
+block's difficulty, was ten times as long, `min(180 / f, 120,960)` shares,
+and a share still met about three pool blocks in it, so a small miner's
+income, payments and swing are about the same with one-minute blocks. What
+differs: a heavy miner's node default aims at ten times the shares a month,
+so the band changes nothing from 10% of BCH up; the ASIC above goes to the
+level draw from about 5% of BCH instead of about 50%; a pool's coinbase holds
+a tenth of the payees, so only a pool under about 0.06% of BCH reaches the
+1 MB coinbase limit ([network simulation](simulation/network-sim.md)); and a
+second of delay in relaying a found block costs ten times the BCH orphan
+risk. The 10-second share period is kept (decision 11 in
+[bch-plan.md](bch-plan.md)).
 
 ## Network size
 
@@ -235,9 +224,10 @@ Upstream sized P2Poolv2 for about 1,000 nodes. On BCH, 1% of the network is
 37 PH/s: about 370 machines of 100 TH/s, or 31,000 Bitaxes. Each share is
 about 1 KB to store (see [architecture/pruning.md](architecture/pruning.md),
 "Growth of Data Kept Forever"), about 8.6 MB a day, whatever the number of
-miners. Weak shares cost about 2.9 KB/s of messages at `WEAK_CAP` 64 and
-`WEAK_FILL` 32, against 0.1 KB/s of shares, at any pool size (payout
-simulator, "Results", item 5). Each block's coinbase pays every payee at or
+miners. Weak shares cost about 2.9 KB/s of messages at `WEAK_FILL` 32,
+against 0.1 KB/s of shares, at any pool size (payout simulator, "Results",
+item 5), and up to 28 KB/s where small miners' asks open the count to 320 a
+share ([What it costs a node](sharechain/small-miners-design.md#what-it-costs-a-node)). Each block's coinbase pays every payee at or
 above its level one output and the draw's winners one each, which is where
 many small miners cost space; see [known-attacks.md](known-attacks.md) and
 [requirements.md](requirements.md) for the coinbase size limits of stock

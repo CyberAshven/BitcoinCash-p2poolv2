@@ -58,8 +58,6 @@ hashrate (one-minute blocks under CHIP-2025-03, 10-second shares):
 | 10% | about 180 shares, 30 minutes |
 | 30% | about 60 shares, 10 minutes |
 
-With ten-minute blocks each window was ten times as long.
-
 ### How this differs from upstream
 
 | | Upstream (Bitcoin) | This fork (Bitcoin Cash) |
@@ -128,8 +126,8 @@ weight follows its payout right.
 
 ## Weak shares and the weak-work credit (Bitcoin Cash)
 
-Since 2026-11-09 a Bitcoin Cash share may carry weak shares, easier proofs of
-work on jobs at the minimum
+A Bitcoin Cash share may carry weak shares, easier proofs of work on jobs at
+the minimum
 ([Share validation](validation.md#weak-shares-follow-the-rules-bitcoin-cash);
 [Share chain redesign](small-miners-design.md#how-weak-shares-are-paid)).
 Every proof of work from a job at the minimum is credited at the weak work of
@@ -145,10 +143,10 @@ credited at its own work:
 | Weak share | the weak work, less 1% (`INCLUDER_CUT`) | 1% of it |
 
 The hashes that meet the weak target are a fair sample of a miner's work, so
-every miner is paid in proportion to its work: per unit of work a miner at
-the minimum and a heavier one earn the same. Crediting a full share at its own
-work on top of its weak shares would pay those hashes twice. When `R` is 1 the
-weak work is the minimum's and nothing changes.
+per unit of work a miner at the minimum and a heavier one earn the same;
+crediting a full share at its own work on top of its weak shares would pay
+those hashes twice. When `R` is 1 the weak work is the minimum's and nothing
+changes.
 
 A weak share's weight goes to its own payout address after its own donation
 and fee, like an uncle's; it has no share coinbase and no payout right to

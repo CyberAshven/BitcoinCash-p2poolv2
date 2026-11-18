@@ -82,14 +82,13 @@ includes them, with the fee output keeping its inputs' root height
 depth.
 
 This fork does not. On Bitcoin Cash a transaction's fee is the share units it
-burns, its inputs less its outputs, and nobody receives them. Nodes rank the
-transactions they relay and mine by units burned per byte, first seen first
-at equal rates. This is node policy, not a share-chain rule: a share may carry
-any valid transaction, with or without a fee. Units carry no payout on
-Bitcoin Cash (the payout right does), so a fee to the share's miner would hand
-out units with no right attached. The reasoning is in plan decision 15
-([bch-plan.md](../bch-plan.md)) and in
-[Trading shares for BCH](../atomic-swap/bch-share-trading.md#why-a-priority-not-a-fee-rule).
+burns, its inputs less its outputs, and nobody receives them: units carry no
+payout (the payout right does), so a fee to the share's miner would hand out
+units with no right attached. Nodes rank the transactions they relay and
+mine by units burned per byte, first seen first at equal rates; this is node
+policy, and a share may carry any valid transaction, with or without a fee
+(plan decision 15, [bch-plan.md](../bch-plan.md);
+[Trading shares for BCH](../atomic-swap/bch-share-trading.md#why-a-priority-not-a-fee-rule)).
 
 ## Code
 
@@ -122,7 +121,5 @@ Miner mines a share
   -> more than 121,063 shares after the root: the output can no longer be spent
 ```
 
-Upstream ties a share output's earnings to its root height. On Bitcoin Cash
-they follow the share's payout right instead, and the right earns only while
-its own share is in the window, which is usually far shorter than the time
-the output stays spendable.
+The right usually stops earning long before the output stops being
+spendable ([What expiry means on Bitcoin Cash](spending-outputs.md#what-expiry-means-on-bitcoin-cash)).
