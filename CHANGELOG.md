@@ -365,6 +365,9 @@ format and genesis re-pin.
 
 - An SV1 miner's first job on a new previous block is always sent with
   `clean_jobs`, even when a second template replaced the clean one (#153).
+- The sim swarm's nodes connect again: since #142 they all read one node key
+  from their shared run directory and refused to dial each other. Each now
+  takes a new peer ID at every start and stays off Nostr (#151).
 - Templates from a node without long polling, such as Knuth, parse again: a
   missing `longpollid` reads as empty (#123).
 - Requests to the Bitcoin Cash node time out after 30 seconds without data,
