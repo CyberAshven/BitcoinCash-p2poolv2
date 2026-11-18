@@ -114,35 +114,26 @@ contributed work.
 Before PR #33 these were `bitcoin_blocks_found_total` and
 `bitcoin_block_found_time_seconds`, and the per-user and per-worker series
 were labelled `btcaddress` instead of `payout_address`. The dashboards in
-`prometheus/grafana/` use the new names; a dashboard of your own needs the
-same renames.
+`prometheus/grafana/` use the new names.
 
-Persisted after BCHN acceptance (`store/found_block.rs`, see
-`store-schema.md`). Confirmation records shares and uncles meeting their
-own claimed BCH targets in the `FoundBlocks` column family as unverified
-candidates. Meeting a claimed target does not establish that BCHN
-requires that target or accepts the block. Candidates are excluded from
-the API and found-block metrics until accepted.
+Only blocks the node accepted count (`store/found_block.rs`, store schema
+14 and 14a). Confirmation records shares and uncles meeting their own
+claimed BCH targets in `FoundBlocks` as unverified candidates, which the
+API and these metrics leave out. A candidate becomes a find when a local
+`submitblock` answers `accepted` or a valid `duplicate`, or when a
+background worker (`node/found_block_verifier.rs`) finds the node's block
+hash at the claimed height matching. Inconclusive, rejected and failed
+submissions establish nothing, RPC failures only defer the check, and a
+duplicate acceptance adds no find, so nodes can report different counts
+while verification catches up. An accepted find is never deleted by a share
+chain reorg; whether the block later left the node's best chain is left to
+the block explorer.
 
-- **Restart-safe.** Positive BCHN `submitblock` verdicts (`accepted` or a
-  valid `duplicate`) are persisted in `AcceptedFoundBlocks`. A duplicate
-  acceptance does not add another find. Inconclusive, rejected and failed
-  submissions do not establish acceptance.
-- **Verified across nodes.** A background worker checks candidates from
-  any miner, including uncles and header-only historical shares, against
-  BCHN's block hash at the claimed height. A matching hash records
-  acceptance. RPC failures defer the check without affecting shares.
-  Different nodes can report different counts while verification catches
-  up or their BCHN nodes are unavailable.
-- **Never deleted after acceptance.** A share chain reorg does not remove
-  the record. Whether the block later left BCHN's best chain is left to
-  the block explorer.
 - **Not limited by Prometheus retention.** Every scrape carries the full
   list, so an instant query always shows every found block.
 
-The stratum submit handler still submits the block to BCHN on a local find;
-what each node answered is counted separately, in
-`found_block_submissions_total` (see "Found block submissions" below).
+The stratum submit handler still submits the block on a local find; what
+each node answered is counted in `found_block_submissions_total` (below).
 
 **Grafana:**
 - *Blocks found*: Stat of `found_blocks_total` (instant).
@@ -183,7 +174,7 @@ Why the confirmed-chain work and not a per-share accumulator:
   chainwork), so it survives restarts and agrees across nodes. It also
   survives pruning, since the tip metadata carries the cumulative scalar
   rather than re-summing shares.
-- **Includes named uncle work.** Since 2026-10-30 `chain_work` sums the
+- **Includes named uncle work.** `chain_work` sums the
   work of the main-chain shares and of every uncle they name, each uncle
   once. This measures the hashrate behind the chain plus its named uncles.
   It still undercounts total pool hashrate by the orphan rate: a share no
@@ -216,19 +207,16 @@ periods.
 `work_since_last_block` accumulates the pool difficulty of each confirmed
 sharechain share (via `MetricsMessage::RecordConfirmedShare` from the
 organise worker's `record_confirmed_block`) and resets to zero
-(`MetricsMessage::ResetBlockEffort`) after a newly recorded BCHN-accepted
-pool block. A positive local submission verdict or the background
-verifier's matching BCHN chain hash can trigger the reset, so blocks found
-by other nodes' miners count too. A share merely meeting its claimed BCH
-target never resets effort, and duplicate acceptances reset it only once.
-This makes it a pool "round luck" metric
-(>100% means the pool is overdue for a block). No counter is persisted:
-at startup the node recomputes the value from the store with
-`work_since_last_block_from_chain`, summing the difficulty of the
-confirmed shares above the last BCHN-accepted found block (or above
-genesis when none has been accepted), so work already done survives a
-restart and a fresh store starts at zero. Uncles are excluded so it tracks
-the same confirmed-chain work basis as `sharechain_work_total`.
+(`MetricsMessage::ResetBlockEffort`) after a newly recorded accepted pool
+block: a positive local submission verdict or the background verifier's
+matching chain hash, so blocks found by other nodes' miners count too. A
+share merely meeting its claimed BCH target never resets effort, and a
+duplicate acceptance resets it only once. This makes it a pool "round luck"
+metric (>100% means the pool is overdue for a block). No counter is
+persisted: at startup `work_since_last_block_from_chain` sums the difficulty
+of the confirmed shares above the last accepted find (or genesis), so work
+already done survives a restart. Uncles are excluded so it tracks the
+same confirmed-chain work basis as `sharechain_work_total`.
 `network_difficulty` is the
 mainnet-relative difficulty (`difficulty_float`) from the latest job
 template `bits`, sharing units with the accumulated share difficulty. The
@@ -240,14 +228,10 @@ sync `record_confirmed_block` replays the whole backlog and `work_since_last_blo
 never resets (no real bitcoin block is found during replay), so it would
 balloon to the entire chain's work and report an absurd effort. Only
 real-time confirmed shares count. The acceptance verifier also skips
-effort resets for historical candidates present at startup or observed
-while syncing, so later verification cannot erase current-round effort.
-
-The startup seed does not apply that skip: it is chain-derived, so it
-counts every confirmed share above the anchor, including a backlog synced
-before the node started. A node that has been up continuously still
-under-counts sync-backlog shares as described above; the seed and the live
-increment agree from the moment the node is current.
+effort resets for historical candidates (present at startup or seen while
+syncing), so a late verification cannot erase current-round effort. The
+startup seed is chain-derived and so counts a backlog synced before the
+start; seed and live increment agree from the moment the node is current.
 
 **Grafana:** Gauge or Bar gauge of
 `work_since_last_block / network_difficulty`. Values around 1.0 (100%)
@@ -255,24 +239,16 @@ are expected luck; higher means the pool is running "unlucky" on the
 current block.
 
 **Per-block snapshots.** Each accepted block keeps the work and difficulty
-at its own effort reset in the `AcceptedBlockEffort` column family
-(`store-schema.md` 14b), exposed in the found-blocks exposition as
-`found_block_effort{blockhash,height,miner,network}`: the stored `work`
-divided by the difficulty of the header that claimed the block (that
-header's own nBits, not the live `network_difficulty` gauge -- same
-units). A ratio near 1.0 is expected luck; `* 100` in Grafana is the
-percent both dashboards' blocks tables show, and `/found_blocks` carries
-the same snapshot as its `effort` field. The line is emitted only when a
-snapshot with a difficulty exists, so a block accepted before snapshots
-were kept shows no line rather than a zero.
-
-Ordering and failure: the acceptance is persisted first, then the metric
-resets (the reset returns the pre-reset work), then the snapshot is
-attached best effort -- if the attachment fails the block still counts,
-without effort, and a warning is logged. Duplicate verdicts and
-historical candidates (present at startup or found while syncing) never
-reset the effort and never write a snapshot, so their blocks read
-`effort: null` forever.
+at its own effort reset (`AcceptedBlockEffort`, store schema 14b), exposed
+as `found_block_effort{blockhash,height,miner,network}`: the stored work over
+the difficulty of the header that claimed the block (its own nBits, the
+units of `network_difficulty`). Near 1.0 is expected luck; `* 100` is the
+percent the dashboards' blocks tables show, and `/found_blocks` carries it
+as `effort`. The acceptance is persisted first, then the effort resets,
+then the snapshot is attached best effort (a failure logs a warning and
+leaves the block without effort). A block with no snapshot (accepted before
+snapshots were kept, a duplicate, a historical candidate) shows no line,
+never a zero, and `effort: null`.
 
 ### Found block submissions
 
@@ -317,6 +293,10 @@ the simulation count nothing.
 | `p2p_share_relay_bytes_total` | counter | node actor, at each share broadcast |
 | `p2p_share_relay_whole_bytes_total` | counter | node actor, at each share broadcast |
 | `p2p_share_relay_prefilled_weak_shares_total` | counter | node actor, at each share broadcast |
+| `p2p_share_rebuilds_total` | counter | node, at each share relayed without payouts it rebuilt |
+| `p2p_share_rebuilds_fetched_whole_total` | counter | node, at each share relayed without payouts it fetched whole |
+| `p2p_share_rebuild_microseconds_total` | counter | node, time spent rebuilding those coinbases |
+| `p2p_share_rebuild_max_microseconds` | gauge | node, longest single rebuild since start |
 
 The counters are plain integers kept where their events happen and updated
 on the node actor loop. They are **not** sent to the `MetricsActor`: every
@@ -339,14 +319,15 @@ fewer outgoing peers than `[network] target_outgoing_peers`
 (`node/outgoing_peer_target.rs`; see `docs/p2p-network.md`).
 
 The share relay counters count the share messages a node sends its peers
-when it relays a new share, one a peer, and their payload bytes as encoded.
-A Bitcoin Cash share carrying weak shares goes with them listed by hash
-(`ShareWithWeakHashes`); `p2p_share_relay_whole_bytes_total` counts what the
-same messages would have taken with every weak share whole, so one run shows
-the saving, and `p2p_share_relay_prefilled_weak_shares_total` the weak
-shares those messages sent whole beside the hashes, for peers likely to
-lack them (pooled less than 400 ms before, or not in the pool). Answers to
-block requests in sync are not counted.
+when it relays a new share, one a peer, and their encoded payload bytes.
+`p2p_share_relay_whole_bytes_total` counts what the same messages would
+take with every weak share whole, and
+`p2p_share_relay_prefilled_weak_shares_total` the weak shares sent whole
+beside the hashes
+([relay by hash](share-processing-pipeline.md#shares-relayed-with-their-weak-shares-by-hash)).
+The rebuild series cover shares relayed without their payouts
+([relay without payouts](share-processing-pipeline.md#shares-relayed-without-their-payouts)).
+Answers to block requests in sync are not counted.
 
 **Grafana / alerting:**
 - *P2P is up but broken* -- the signature of the 2026-09-17 incident:
@@ -369,69 +350,64 @@ block requests in sync are not counted.
 ### Weak shares (Bitcoin Cash)
 
 Weak shares are easier proofs of work that later shares carry
-(`docs/sharechain/small-miners-design.md`, part 3). A Bitcoin Cash P2Pool
+([Weak shares](../sharechain/small-miners-design.md#3-weak-shares)). A
 node checks them in the weak share worker (`node/weak_share_worker.rs`),
 keeps the ones that pass in its weak pool (`shares/weak_pool.rs`), relays
-them, and fills its own shares from the pool.
+them, and fills its own shares from the pool. Sources: the weak pool, read
+at scrape time, except the two `carried` counters (the actor) and the two
+`sharechain_*` gauges (the confirmed tip header).
 
-| Metric | Type | Source | Notes |
-|---|---|---|---|
-| `weak_shares_found_total` | counter | live read of the weak pool | Weak shares this node's miners found that passed the checks |
-| `weak_shares_received_total` | counter | live read of the weak pool | Weak shares from peers that passed the checks |
-| `weak_shares_relayed_total` | counter | live read of the weak pool | Weak shares queued for relay to every peer but the one that sent them |
-| `weak_shares_carried_by_node_total` | counter | actor, from the stratum submit path | Weak shares carried by the shares this node's miners found, counted when the share goes to the share chain |
-| `weak_shares_carried_on_chain_total` | counter | actor, from the organise worker | Weak shares carried by shares confirmed on the share chain, whichever node found them; counted only while the chain is current |
-| `weak_shares_expired_total` | counter | live read of the weak pool | Weak shares the best chain had not carried, dropped from the pool because no share could carry them any more: their parent fell more than `WEAK_DEPTH` below the tip, or a full pool made room for one on a newer parent |
-| `weak_shares_refused_total{reason}` | counter | live read of the weak pool | Weak shares the pool did not take, by reason (below) |
-| `weak_pool_size` | gauge | live read of the weak pool | Weak shares waiting in the pool for a share to carry them |
-| `weak_pool_waiting_for_parent` | gauge | live read of the weak pool | Weak shares held, unchecked, until their parent arrives |
-| `weak_shares_filled_from_pool_total` | counter | live read of the weak pool | Weak shares of shares relayed by hash (`ShareWithWeakHashes`) that this node filled from its weak pool |
-| `weak_shares_prefilled_total` | counter | live read of the weak pool | Weak shares the sender prefilled, whole beside the hashes, that filled one the pool lacked |
-| `weak_shares_prefilled_unused_total` | counter | live read of the weak pool | Prefilled weak shares the pool already had, so sent for nothing |
-| `weak_shares_fetched_for_shares_total` | counter | live read of the weak pool | Weak shares of shares relayed by hash that the pool lacked, the sender did not prefill, and the sender then sent (`GetCarriedWeakShares`) |
-| `weak_share_fills_fetched_whole_total` | counter | live read of the weak pool | Shares relayed by hash whose weak shares could not all be filled -- the sender did not answer in 10 s, sent too few, or listed hashes that do not rebuild the weak root -- asked for whole instead |
-| `sharechain_weak_ratio` | gauge | live read of the confirmed tip header | The tip's weak ratio `R` as a multiple: the weak target over the minimum |
-| `sharechain_band_cap` | gauge | live read of the confirmed tip header | The tip's band cap `C` as a multiple: how many times harder than the minimum a share may be |
+| Metric | Type | Counts |
+|---|---|---|
+| `weak_shares_found_total` | counter | found by this node's miners and passed |
+| `weak_shares_received_total` | counter | from peers and passed |
+| `weak_shares_relayed_total` | counter | queued for relay to every peer but the sender |
+| `weak_shares_carried_by_node_total` | counter | carried by shares this node's miners found (stratum submit path) |
+| `weak_shares_carried_on_chain_total` | counter | carried by confirmed shares, any node's (organise worker), only while current |
+| `weak_shares_expired_total` | counter | dropped uncarried: parent more than `WEAK_DEPTH` below the tip, or room made in a full pool for a newer parent |
+| `weak_shares_refused_total{reason}` | counter | not taken, by reason (below) |
+| `weak_pool_size` | gauge | waiting in the pool for a carrier |
+| `weak_pool_waiting_for_parent` | gauge | held unchecked until their parent arrives |
+| `weak_shares_filled_from_pool_total` | counter | of shares relayed by hash, filled from the pool |
+| `weak_shares_prefilled_total` | counter | prefilled by the sender and filling a gap |
+| `weak_shares_prefilled_unused_total` | counter | prefilled but already in the pool |
+| `weak_shares_fetched_for_shares_total` | counter | lacking, not prefilled, then sent on `GetCarriedWeakShares` |
+| `weak_share_fills_fetched_whole_total` | counter | shares relayed by hash not filled (no answer in 10 s, too few, or not rebuilding the weak root), fetched whole |
+| `sharechain_weak_ratio` | gauge | the tip's weak ratio `R`: weak target over the minimum |
+| `sharechain_band_cap` | gauge | the tip's band cap `C`: how many times harder than the minimum a share may be |
 
 `reason` is one of a fixed set, so the series stay bounded:
 
 | Reason | A weak share that |
 |---|---|
-| `duplicate` | had a proof of work that already passed its checks, usually relayed by another peer first, or was already held |
-| `rate_limited` | came from a peer sending weak shares faster than its rate |
+| `duplicate` | had a proof of work that already passed, or was already held |
+| `rate_limited` | came from a peer sending faster than its rate |
 | `invalid` | broke a share-chain rule |
-| `unchecked` | could not be checked: a store read failed, or data the check needs can no longer arrive |
+| `unchecked` | could not be checked: a store read failed, or needed data can no longer arrive |
 | `pool_full` | found the pool full of weak shares on parents no older than its own |
-| `too_deep` | had a parent too deep for a share on the tip to carry it, found before any other check, or when a held one's parent arrived |
-| `unknown_parent` | was held for its parent, or for a check that could not finish yet, and did not get it in `WEAK_DEPTH` share periods, or was the oldest held when newer ones needed the room |
+| `too_deep` | had a parent too deep for a share on the tip to carry it |
+| `unknown_parent` | did not get its parent, or a pending check, within `WEAK_DEPTH` share periods, or was the oldest held when room was needed |
 
-A weak share dropped on a full worker queue, before the pool sees it, is
-not counted. The pool's counters are plain integers behind the pool's
-own lock, read at scrape time without the node actor; like the actor's two
-carried counters they are runtime-only and reset on restart. Bitcoin and
-Hydrapool nodes keep no weak pool: they omit the pool's series, and their
-carried counters stay at zero. `sharechain_weak_ratio` and
-`sharechain_band_cap` are omitted while the tip is not a Bitcoin Cash
-share.
+A weak share dropped on a full worker queue is not counted. All these
+counters are runtime-only and reset on restart. Bitcoin and Hydrapool nodes
+keep no weak pool: they omit the pool's series, and their carried counters
+stay at zero. The two `sharechain_*` gauges are omitted while the tip is not
+a Bitcoin Cash share.
 
 **Grafana / alerting:**
 - *Weak share flow*: `rate()` of the found, received, relayed and carried
-  counters over 5 minutes, one time series panel.
+  counters over 5 minutes.
 - *Weak shares that missed their carrier*:
-  `rate(weak_shares_expired_total[1h]) / rate(weak_shares_received_total[1h])`;
-  a steady rise means shares are not carrying others' weak shares.
+  `rate(weak_shares_expired_total[1h]) / rate(weak_shares_received_total[1h])`.
 - *Refusals*: `sum by (reason) (rate(weak_shares_refused_total[5m]))`;
-  `invalid` from one peer's traffic or a jump in `rate_limited` points at a
-  misbehaving peer.
-- *Difficulty state*: `sharechain_weak_ratio` and `sharechain_band_cap` as
-  stats; `R` falls while shares carry more than half the cap of weak
-  shares, and `C` grows while heavy miners are held back by it.
+  `invalid` or a jump in `rate_limited` points at a misbehaving peer.
+- *Difficulty state*: `R` and `C` as stats; `R` falls while shares carry
+  more than half the cap of weak shares, and `C` grows while heavy miners
+  are held back by it.
 - *Weak shares of relayed shares*: `rate()` of the filled-from-pool,
-  prefilled and fetched counters; the fetched part shows how often a weak
-  share reaches a node after the share that carries it and was not
-  prefilled, each one a round trip, the unused prefilled part what the
-  prefill bound costs for nothing, and a rise in
-  `weak_share_fills_fetched_whole_total` a peer that does not answer.
+  prefilled and fetched counters; fetches are round trips, unused prefills
+  are waste, and a rise in `weak_share_fills_fetched_whole_total` means a
+  peer that does not answer.
 
 ## Planned metrics (later releases)
 

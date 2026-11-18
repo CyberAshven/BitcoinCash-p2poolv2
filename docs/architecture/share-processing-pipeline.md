@@ -148,10 +148,9 @@ handler serves both peer broadcasts and `GetData` responses. Nothing else does:
 a candidate reorg never re-validates, and the block fetcher will not re-request
 the body since `share_block_exists` is true. The retry is therefore
 opportunistic -- it depends on a peer sending the block again, which this node
-does not solicit. A delivery that arrives while the block is still being
-checked starts no second check; the validation worker notes it and, when the
-check ends without a verdict, queues the block once more, as the delivery
-would have.
+does not solicit. A delivery that arrives during the check is noted and
+queues the block once more if the check ends without a verdict (`CheckQueue`,
+under "Validation Worker").
 
 The BlockReceiver's ancestry gate (below) makes the common causes unreachable,
 but not all of them: `collect_recent_ancestry` walks `MAX_UNCLES_DEPTH` of
@@ -161,54 +160,39 @@ confirmation at its height.
 
 ### Shares relayed without their payouts
 
-`send_share_block_broadcast` relays a new Bitcoin Cash share whose coinbase
-outputs take at least `RELAY_WITHOUT_PAYOUTS_MIN_BYTES` (50,000) as
-`Message::ShareWithoutPayouts`: its Bitcoin Cash coinbase keeps its input
-and loses every output, and the message carries the outputs' total. Below
-that the bytes saved do not pay for a rebuild at each hop (the arithmetic is
-on the constant), and the share goes whole, as `ShareWithWeakHashes` or
-`ShareBlock`. `handle_share_without_payouts` (`receivers/share_without_payouts.rs`) hands
-a stored share, or one failing the header or coinbase proof check, to
-`handle_share_block` as it came. For any other it rebuilds the outputs from
-the PPLNS window at the share's parent and the header, through the same
-`rebuild_coinbase_paying_window` a weak share's coinbase check uses, on the
-blocking thread pool with a small payout cache (`CoinbaseRebuilder`), and
-goes on only when the rebuilt coinbase's txid is the one the header's
-coinbase proof gives. A share it cannot rebuild that way (parent or window
-not here yet, or another txid, which a share relayed before its body was
-validated may give) is never stored or validated and costs no peer its
-connection: the block fetcher fetches it whole. `p2p_share_rebuild_*`
-series count the rebuilds, their time and the whole fetches. Header sync
-and `GetData::Block` still send the coinbase whole.
+A new Bitcoin Cash share whose coinbase outputs take at least
+`RELAY_WITHOUT_PAYOUTS_MIN_BYTES` (50,000) is broadcast as
+`Message::ShareWithoutPayouts`: its coinbase without the outputs, plus their
+total (`send_share_block_broadcast`); a smaller one goes whole, and the
+constant's comment gives the arithmetic. `handle_share_without_payouts`
+(`receivers/share_without_payouts.rs`) rebuilds the outputs from the PPLNS
+window at the share's parent (`rebuild_coinbase_paying_window`, through
+`CoinbaseRebuilder` on the blocking pool) and goes on only when the coinbase
+txid is the one the coinbase proof gives. A stored share, or one failing the
+header or coinbase proof check, goes to `handle_share_block` as it came. A
+share it cannot rebuild is never stored and costs no peer its connection: the
+block fetcher fetches it whole. The `p2p_share_rebuild_*` metrics count the
+rebuilds and whole fetches. Header sync and `GetData::Block` send coinbases
+whole.
 
 ### Shares relayed with their weak shares by hash
 
-A relayed share's weak shares are listed by proof-of-work hash
-(`ShareWithWeakHashes`, also inside `ShareWithoutPayouts`), which the peer
-has from the weak share gossip, and whole beside the list the ones it may
-not have yet
-(`weak_shares_to_prefill`: those the weak pool took less than
-`PREFILL_WEAK_SHARE_MILLIS`, 400 ms, ago, or does not hold).
-`handle_share_with_weak_hashes` (`receivers/share_with_weak_hashes.rs`),
-handed a `ShareWithoutPayouts` once its coinbase is rebuilt, hands a stored share, or one
-failing the header or coinbase proof check, to
-`handle_share_block` as it came. Any other share must list exactly
-`weak_count` hashes, each once, and prefill only listed ones, each once, or
-the peer is refused as for a bad copy. The handler fills the list from the
-weak pool's checked weak shares (`WeakPool::pooled_weak_shares`), then from
-the prefilled ones, and asks the sender for the rest with
-`GetCarriedWeakShares`, which the sender answers from its store with
-`CarriedWeakShares`. Prefilled and fetched weak shares that fill a gap also
-go to the weak share worker as weak shares the sender relayed. The share then
-waits in the fill book
-(`node/weak_share_fill.rs`, one wait a share, 64 in all, 8 a peer) for up to
-`WEAK_FILL_TIMEOUT` (10 s), in a task of its own so the peer's request
-service is not held. Rebuilt, the share must match its header's weak root
-(`check_weak_shares_match_header`) and then goes to `handle_share_block`
-exactly as a share sent whole. One that cannot be rebuilt in time or does
-not match is never stored or validated: the block fetcher fetches it whole,
-from another peer that relayed it meanwhile if there is one. Header sync and
-`GetData::Block` still send weak shares whole.
+A relayed share lists its weak shares by proof-of-work hash
+(`ShareWithWeakHashes`, also inside `ShareWithoutPayouts`) and sends whole
+only those a peer may lack (`weak_shares_to_prefill`: taken by the weak pool
+less than `PREFILL_WEAK_SHARE_MILLIS`, 400 ms, ago, or not held).
+`handle_share_with_weak_hashes` (`receivers/share_with_weak_hashes.rs`)
+refuses the peer, as for a bad copy, unless the list holds exactly
+`weak_count` hashes, each once, and the prefill only listed ones. It fills
+the list from the weak pool (`WeakPool::pooled_weak_shares`) and the
+prefilled ones, asks the sender for the rest (`GetCarriedWeakShares`,
+answered with `CarriedWeakShares`), and passes the gap-fillers to the weak
+share worker. The share waits up to `WEAK_FILL_TIMEOUT` (10 s) in the fill
+book (`node/weak_share_fill.rs`: 64 waits, 8 a peer), then must match its
+header's weak root (`check_weak_shares_match_header`) and goes to
+`handle_share_block`. One not filled in time, or not matching, is never
+stored: the block fetcher fetches it whole. Header sync and `GetData::Block`
+send weak shares whole.
 
 ### BlockReceiver ancestry gate
 
@@ -230,90 +214,47 @@ Blocks below `prune_height` are exempt because their bodies are never fetched;
 requiring one would stall the chain permanently at the boundary. Spends cannot
 reach below it either: `min_coinbase_root_height` caps them one payout depth
 back (`PAYOUT_DEPTH`) while bodies are retained for two (`PRUNE_DEPTH`). A
-block spending an output below it, which only a proof-of-work-only verdict
-can accept, is stored with an unknown coinbase root on its outputs
-(`pruning.md`, "Missing Input at Write Time").
+block spending below it, which only a proof-of-work-only verdict can accept,
+is stored with an unknown coinbase root on its outputs
+([Missing Input at Write Time](pruning.md#missing-input-at-write-time)).
 
-Only a block whose parent and uncles the node already knows is buffered:
-each has a header in the store or waits in `pending` itself
-(`BlockReceiver::ancestors_known`). A block naming any other ancestor, such
-as a made-up parent, is dropped. The node asks the sender for headers
-whenever a share names an ancestor it lacks
-(`request_headers_for_missing_blocks`, for the parent and the uncles), so an
-honest share dropped this way comes back through header sync and the block
-fetcher. A block waiting on a buffered parent stays, so a parent and child
-gossiped in turn still commit together.
-
-The buffer is bounded (`PendingLimits` in `block_receiver.rs`): at most
-`MAX_PENDING_BLOCKS` (1,024) blocks and `MAX_PENDING_BYTES` (32 MiB, by
-consensus encoding), the oldest evicted first, and a block that has waited
-longer than `PENDING_BLOCK_TTL` (10 minutes) is dropped on the next arrival. A
-block naming a known parent whose body never arrives costs one share of proof
-of work (the admission gate checks its coinbase proof), and the mini chain's
-shares are cheap, so without the bounds a peer could grow the buffer without
-limit.
-The bound is global, not per peer: peer identities are free. An honest block
-that is evicted or expires while still on the candidate chain is fetched again
-by the block fetcher's missing-data scan. Upstream's design diagram
-(`receive_block.puml`, "No cap. No TTL. No eviction.") still describes the
+Only a block whose parent and uncles are known (stored, or waiting in
+`pending`; `BlockReceiver::ancestors_known`) is buffered; any other is
+dropped, and the node asks the sender for the missing headers
+(`request_headers_for_missing_blocks`). The buffer is bounded globally,
+since peer identities are free (`PendingLimits`): `MAX_PENDING_BLOCKS`
+(1,024) blocks, `MAX_PENDING_BYTES` (32 MiB), oldest evicted first, and a
+block older than `PENDING_BLOCK_TTL` (10 minutes) dropped on the next
+arrival. An honest block evicted while on the candidate chain is fetched
+again by the block fetcher. Upstream's `receive_block.puml` still shows an
 unbounded buffer.
 
 ### Relay after the header check
 
-A share from a peer is relayed to this node's peers as soon as its header
-checks out and it is stored, before its body is validated
-(`BlockReceiver::store_and_emit_validation`), as BIP152's high-bandwidth
-compact blocks are relayed before full validation. The header check is
-everything a share passes before the BlockReceiver stores it:
-
-- at the admission gate (`handle_share_block`): the proof of work against
-  the share's own target, a target no easier than the ceiling, the share
-  owner, payout cuts and scripts, at most `MAX_UNCLES` uncles, the share
-  version on its own, the token share ASERT check, the coinbase proof that
-  binds the header to its proof of work, the body's size, and the body the
-  header binds (`validate_body_matches_header`: the share transactions'
-  witness root, the share coinbase, the bitcoin coinbase's txid, and the weak
-  shares: exactly `weak_count`, none twice, the header's weak root);
-- in the BlockReceiver (`validate_header_before_storing`), once the parent
-  and uncles are stored: the minimum target ASERT gives from the parent's
-  header, the difficulty band and weak ratio one step from the parent's, the
-  timestamp rules, the uncle rules, and a known Bitcoin Cash prev.
-
-The parent need only be stored and header-checked itself, not validated. This
-is the same set header sync applies to a header, plus the body binding. Full
-validation follows: the payouts, the share transactions and their inputs, the
-carried weak shares' headers and coinbases, and the share version vote.
+A share from a peer is relayed once its header checks out and it is stored,
+before its body is validated (`BlockReceiver::store_and_emit_validation`), as
+BIP152 high-bandwidth compact blocks are. The header check is what header
+sync applies, plus the body binding ([Share validation](../sharechain/validation.md)):
+the admission gate in `handle_share_block` (proof of work, the coinbase
+proof, `validate_body_matches_header` with the weak root, size and payout
+script checks), then `validate_header_before_storing` in the BlockReceiver
+once parent and uncles are stored (ASERT minimum from the parent's header,
+the difficulty band, timestamps, uncle rules, a known Bitcoin Cash prev). The
+parent need only be header-checked. Full validation (payouts, share
+transactions, carried weak shares, the version vote) follows.
 
 A share is relayed once (`BlockReceiver::should_relay`): when its body is
-first stored (a later copy finds the body stored and is not relayed), not
-when it or its parent is `Invalid`, and only while the chain is current. A
-share whose header check fails is never stored, so never relayed. The
-validation worker broadcasts only shares this node mined, once validated, as
-upstream decided (p2poolv2#573).
+first stored, not when it or its parent is `Invalid`, and only while the
+chain is current. The validation worker broadcasts only shares this node
+mined, as upstream does (p2poolv2#573). Mining (`get_mining_base`), uncles
+(`find_uncles`) and confirmation still take only `BlockValid` shares.
 
-Nothing a node builds on changes. It mines only on `BlockValid` shares
-(`get_mining_base`), names only `BlockValid` shares as uncles (`find_uncles`),
-and confirms only `BlockValid` shares. The candidate chain is headers-first,
-as before: a node organises a share's header when it stores it, whoever sent
-it.
-
-There is no peer score. A request that fails a check at receipt (the gate,
-or a weak-hash list that does not hold exactly the weak shares the header
-counts) fails, and the peer's service disconnects the peer; that is
-unchanged. The full validation verdict comes later, in the validation
-worker, and never disconnects anyone: since every node relays a share once
-its header checks out, the peer that sent a share whose body fails may only
-have forwarded it, as a BIP152 high-bandwidth peer is not penalised for a
-block that fails after its header. A share failing the header check is
-relayed by no node, so only its miner sends one, and is refused as before.
-
-The proof of work bounds what a peer can make the network relay. Each relayed
-share carries a proof of work at its own target, which lies in the band at
-or below the share chain's minimum from its parent's header, and the coinbase
-proof and body binding fix the header and body to it: a changed body fails
-the gate as a bad copy, and a copy of a stored share is dropped. Relaying
-invalid bodies therefore costs as much work a share as mining valid ones,
-and every node relays each once and marks it `Invalid` after validating it.
+There is no peer score. A failure at receipt (the gate, or a weak-hash list
+that does not match the header) disconnects the peer; a full validation
+verdict never does, since the sender may only have forwarded the share. Each
+relayed share carries proof of work in the band bound to its header and
+body, so relaying invalid bodies costs as much work as mining valid ones,
+and each is relayed once, then marked `Invalid`.
 
 ### OrganiseEvent::InvalidBlock(BlockHash)
 - **Purpose**: Record that a block failed pre-context validation
@@ -355,12 +296,9 @@ outside the worker, by the direct `organise_header` calls described above.
   share commitment and its coinbase proof; only P2Poolv2 mode emits.
 - Builds `ShareBlock`: the share coinbase, then the job's share
   transactions (`Emission::share_transactions`, empty on Bitcoin and for
-  declared jobs). On Bitcoin Cash the notifier drew them from the share
-  transaction pool when it built the job (`ShareTransactionPool::select_for_share`)
-  and committed their witness root in every miner's share commitment, so the
-  set is fixed by the proof of work (see
-  `docs/atomic-swap/bch-share-trading.md`, "Share transactions on the
-  network")
+  declared jobs; on Bitcoin Cash drawn by `ShareTransactionPool::select_for_share`
+  when the job was built and fixed by its witness root, see
+  [Share trading](../atomic-swap/bch-share-trading.md))
 - Persists it and organises its header onto the candidate chain in one
   atomic write via `ChainStoreHandle::add_share_block_and_organise_header()`,
   and returns the `ShareBlock`
@@ -396,8 +334,7 @@ never derived from one another, and every stage below treats them separately:
 - The PPLNS window, `append_proportional_distribution` and
   `validate_bitcoin_payout` use `miner_bitcoin_address` only, except that on
   Bitcoin Cash a share whose payout right another key holds pays that key
-  hash's P2PKH address (`payout-distribution.md`, "Bitcoin Cash payout
-  rights").
+  hash's P2PKH address ([payout rights](payout-distribution.md#bitcoin-cash-payout-rights)).
 
 `ShareCommitment::hash()` digests `miner_address` directly, together with
 `share_witness_root`, the BIP141 witness root of the share's non-coinbase
@@ -412,10 +349,8 @@ witness root bound, it follows from the header. See
 - Matches on event type:
   - `Block(share_block)`: gated on its parent's validation state before any
     chain-context validation runs (see "Parent-gated block processing" under
-    Organisation Logic). A block already `BlockValid`, delivered again or
-    drained again from the buffer, goes to promotion without its checks
-    running again, as `validate_share_block` already skips it in the
-    validation worker
+    Organisation Logic). A block already `BlockValid` goes straight to
+    promotion, as `validate_share_block` skips it too
   - `InvalidBlock(blockhash)`: marks the block `Invalid` and advances the
     confirmed chain; no validation or promotion runs for it
 - Error handling reacts to the validation failure kind (`FailureKind`):
@@ -442,22 +377,18 @@ witness root bound, it follows from the header. See
 - Handles `SwarmSend::Broadcast` to send shares to all peers
 
 ### FoundBlockVerifier (`node/found_block_verifier.rs`)
-- Runs as a supervised worker on Bitcoin Cash, independently of validation
-  and organisation, so BCHN latency cannot delay share confirmation.
+- Bitcoin Cash only; a supervised worker apart from validation and
+  organisation, so node latency cannot delay share confirmation.
 - Confirmation records shares and uncles meeting their own claimed BCH
-  targets as unverified candidates. This does not prove BCHN acceptance.
-- Periodically asks BCHN for the block hash at each candidate's height.
-  Matching hashes are recorded in `AcceptedFoundBlocks` by StoreWriter;
-  failures or different hashes leave the candidate available for retry,
-  until BCHN's block at that height is final (10 blocks deep, BCHN's
-  `-maxreorgdepth`); then the candidate is not checked again until a
-  restart.
-- The local submission path also records positive `submitblock` verdicts
-  (`accepted` or a valid `duplicate`). Inconclusive verdicts do not count.
-- A newly persisted acceptance resets runtime effort once. The verifier
-  excludes historical candidates and candidates observed while syncing
-  from effort resets. Neither acceptance nor a missing verdict changes
-  share validity or payout eligibility.
+  targets as unverified candidates. The verifier asks the node for the block
+  hash at each candidate's height and records a match in
+  `AcceptedFoundBlocks` (via StoreWriter); otherwise it retries until the
+  node's block at that height is 10 deep (BCHN's `-maxreorgdepth`), then not
+  again until a restart. A local `submitblock` verdict of `accepted` or a
+  valid `duplicate` is recorded too; inconclusive ones are not.
+- A newly recorded acceptance resets runtime effort once, except for
+  historical candidates and those seen while syncing. Neither acceptance nor
+  its absence changes share validity or payouts.
 
 ### StoreWriter (`store/writer/mod.rs`)
 - Runs on dedicated OS thread via `tokio::task::spawn_blocking`
@@ -466,7 +397,7 @@ witness root bound, it follows from the header. See
 - `WriteCommand::OrganiseHeader` calls `Store::organise_header()` with a single batch for atomic candidate chain updates
 - `WriteCommand::OrganiseBlock` calls `Store::organise_block()` with a single batch for atomic confirmed chain promotion
 - `WriteCommand::RecordAcceptedFoundBlock` serializes acceptance writes and
-  reports whether a block is newly recorded, preventing duplicate resets.
+  reports whether a block is new, so effort resets once
 
 ### ChainStoreHandle (`shares/chain/chain_store_handle.rs`)
 - Wraps `StoreHandle` with chain-level logic (height calculation, chain work)
@@ -486,39 +417,33 @@ witness root bound, it follows from the header. See
 | write_tx/rx | std::sync mpsc | unbounded | StoreHandle -> StoreWriter (serialized writes) |
 
 The organise channel and the organise worker's `pending_blocks` buffer both
-hold whole `ShareBlock`s, each bounded by `handle_share_block` at
-`BLOCK_TXS_SIZE_LIMIT` (200 KB, the share transactions and the bitcoin
-coinbase together) on Bitcoin and at `BCH_SHARE_BODY_SIZE_LIMIT` (a
-1,000,000-byte coinbase plus 200 KiB of share transactions) on Bitcoin Cash.
-Both are bounded by count and by bytes, the bytes counted by each block's
-consensus encoding (`ShareBlock::encoded_size`):
+hold whole `ShareBlock`s, each bounded at `BLOCK_TXS_SIZE_LIMIT` (200 KB, the
+share transactions and the bitcoin coinbase together) by `handle_share_block`, so their capacities set the worst-case memory of the
+organise path -- 512 + 1024 entries, rather than the 8192 + 16384 they held
+before, which allowed several GB of bodies in flight. The channel is pure
+backpressure between the parallel validation tasks and the serial organise
+worker, so a deeper queue buys no throughput and only widens the zone-tiering
+window. `PENDING_BLOCKS_CAPACITY` is sized at twice the channel because a child
+can sit a full channel ahead of its parent.
+
+This fork also bounds both by bytes (`ShareBlock::encoded_size`), since a
+Bitcoin Cash body may reach `BCH_SHARE_BODY_SIZE_LIMIT` (a 1,000,000-byte
+coinbase plus 200 KiB of share transactions): the organise path holds at
+most 192 MiB of bodies, where the counts alone would allow about 620 MB and
+1.2 GB:
 
 | | Count | Bytes | Past a bound |
 |---|---|---|---|
-| Organise channel | 512 events (`ORGANISE_CHANNEL_CAPACITY`) | 64 MiB (`ORGANISE_CHANNEL_BYTES`) | the validation task waits (backpressure) |
+| Organise channel | 512 events (`ORGANISE_CHANNEL_CAPACITY`) | 64 MiB (`ORGANISE_CHANNEL_BYTES`) | the sender waits (backpressure) |
 | `pending_blocks` | 1,024 blocks (`PENDING_BLOCKS_CAPACITY`) | 128 MiB (`PENDING_BLOCKS_BYTES`) | the oldest blocks are evicted |
 
-By count alone, full of the largest Bitcoin Cash shares, they would hold
-about 620 MB and 1.2 GB; with the byte bounds the organise path holds at
-most 192 MiB of bodies. Honest shares are far smaller (about 35 KB at 1,000
-payees), so they meet the count bounds first. The counts were already cut
-from 8192 + 16384, which allowed several GB of bodies in flight.
-
-The channel is pure backpressure between the parallel validation tasks and
-the serial organise worker, so a deeper queue buys no throughput and only
-widens the zone-tiering window. A sender takes as many permits of a
-semaphore as its block has bytes before queuing it and hands them back when
-the worker receives it (`organise_worker/channel.rs`); a block larger than
-the whole budget takes all of it and passes once the queue is empty.
-`InvalidBlock` events carry a hash and take no bytes.
-
-`PENDING_BLOCKS_CAPACITY` and `PENDING_BLOCKS_BYTES` are twice the channel's
-because a child can sit a full channel ahead of its parent. Past either
-bound the oldest arrivals are evicted (`organise_worker/pending_buffer.rs`),
-so blocks stuck behind a parent that never validates cannot pin the buffer.
-An evicted block is already stored with its body; it is not fetched again
-but stays `HeaderValid`, so the worker re-validates it as a stranded parent
-when a descendant arrives (`redrive_stranded_parent`), or at the next start.
+A sender takes one semaphore permit per byte, returned on receipt
+(`organise_worker/channel.rs`); a block larger than the budget takes all of
+it, and `InvalidBlock` takes none. Honest shares (about 35 KB at 1,000
+payees) meet the count bounds first. An evicted block
+(`organise_worker/pending_buffer.rs`) stays stored and `HeaderValid`, and is
+re-validated as a stranded parent when a descendant arrives
+(`redrive_stranded_parent`) or at the next start.
 
 ## BlockHeight Column Family Key Schema
 
@@ -659,15 +584,13 @@ Within a single `WriteBatch`, reads from the DB return pre-batch (committed) sta
 - Receives `ValidationEvent::ValidateBlockHash(BlockHash)` (peer blocks) or
   `ValidationEvent::ValidateShareBlock(ShareBlock)` (locally mined, already in
   hand) via bounded mpsc channel (capacity 8192)
-- Checks each block once at a time (`CheckQueue`): a block is queued once, in
-  the order it first arrived, in a queue bounded like the channel (a full
-  queue stops the worker receiving, so the channel fills and its senders wait
-  as before). A delivery of a block already queued keeps its place; a
-  delivery of one being checked is only noted, and queues it once more if
-  that check ends `Recoverable`, on a store failure or without reading the
-  block. A delivery after the check ended is checked again. Peers relay a
-  share to every peer, so a node used to check the same share once per
-  delivery that arrived before it was confirmed
+- Checks each block once at a time (`CheckQueue`), since peers relay a share
+  to every peer: a block is queued once, in first-arrival order, in a queue
+  bounded like the channel (when full, the worker stops receiving and senders
+  wait). A delivery of a queued block keeps its place; one during its check
+  is noted and queues it once more if the check ends `Recoverable`, on a
+  store failure or without reading the block; one after the check is checked
+  again
 - Spawns capped concurrent validation tasks (semaphore sized to available CPUs)
 - Each task:
   1. Reads the share block from the chain store, unless the event carried it
@@ -676,11 +599,9 @@ Within a single `WriteBatch`, reads from the DB return pre-batch (committed) sta
      `validate_below_pplns_depth()`. Both return Ok early if the block already
      has `BlockValid` status
   3. On success: sends `OrganiseEvent::Block` always. Sends
-     `SwarmSend::BroadcastBlock` for locally mined blocks only: the
-     BlockReceiver relayed each block from a peer once its header checked
-     out, before this validation, and only when `is_current()` was true
-     (suppresses relay of historic blocks during initial sync; see "Relay
-     after the header check"). The task holds its semaphore
+     `SwarmSend::BroadcastBlock` for locally mined blocks only; the
+     BlockReceiver already relayed peer blocks after the header check, while
+     `is_current()` (see "Relay after the header check"). The task holds its semaphore
      permit through the broadcast, so the permits also bound how many
      validated blocks can wait on `swarm_tx`; the node actor loop always
      drains `swarm_tx` without blocking, so that wait is ordinary
@@ -698,8 +619,7 @@ confirmation advances.
 
 There is no cascade back through the validation channel: a block that reaches
 the validation worker and fails is not re-enqueued by anything but a delivery
-of it (see "Retrying a block that failed without a verdict"), counting one
-that arrived while it was being checked.
+of it (see "Retrying a block that failed without a verdict").
 
 ### PPLNS zone tiering
 
@@ -771,15 +691,14 @@ Both counts are fixed share counts with no node-local setting and no bitcoin
 difficulty in them. Every node must pay the same window, so they are network
 constants rather than config.
 
-On Bitcoin Cash the window instead holds `BCH_PPLNS_WINDOW_BLOCKS` blocks'
-worth of work, sized from the nBits Bitcoin Cash requires after the share's
-BCH prev (`bitcoin_header.prev_blockhash`), and pays only the work on that
-prev's chain or one block off it (`sharechain_pplns/bch_eligibility.rs`,
-`mine-on-bitcoin-chain.md`). The notifier passes its template's bits and
-previous block (`PayingBlock`), the validator the share header's. A window
-that places work on a BCH block the node does not know yet is `Recoverable`
-(`UnknownBchPrev`); one that pays no one makes the share `Invalid`
-(`NothingEligible`).
+On Bitcoin Cash the window holds `BCH_PPLNS_WINDOW_BLOCKS` blocks' worth of
+work instead, from the share's BCH prev, and pays only work on that prev's
+chain or one block off it (`sharechain_pplns/bch_eligibility.rs`; rules in
+[PPLNS accounting](../sharechain/pplns-accounting.md) and
+[Current chain](../sharechain/current-chain.md)). The notifier passes its
+template's bits and prev (`PayingBlock`), the validator the share header's.
+Work on a BCH block not known yet is `Recoverable` (`UnknownBchPrev`); a
+window paying no one is `Invalid` (`NothingEligible`).
 
 The window is anchored on the share's declared `prev_share_blockhash`, not the
 live confirmed tip, via `PplnsWindow::get_distribution_from_start_hash`. The
@@ -886,23 +805,16 @@ derives a root whose header fails proof of work. `MAX_HEADERS_IN_RESPONSE`
 
 ### Header timestamps
 
-Header sync applies the timestamp rules of full validation to every header
-before it is organised (`validate_dag_connectivity_and_difficulty` in
-`receivers/share_headers.rs`, `ShareValidator::validate_header_timestamp`):
-`header.time` must be greater than the median of up to `MTP_WINDOW` (11)
-ancestor times and at most `MAX_FUTURE_TIME_SECS` (120) ahead of the local
-clock. Ancestor times come from the batch for headers earlier in it and from
-the store otherwise, each store header read once per batch. Both paths call
-the same `check_median_time_past` and `check_future_time_limit`.
-
-Before, only `validate_timestamp` checked them, in `validate_with_chain_context`,
-which runs inside the full-validation zone only. Blocks below it, and headers
-held without bodies, had unconstrained times, and with the parent-anchored
-ASERT on Bitcoin Cash (decision 12) each header's target comes straight from
-its parent's time. A batch with a bad timestamp is refused whole, without a
-retry, as an ASERT mismatch is. The block receipt path does not repeat the
-check: a block it stores goes on to full validation, or lies below the zone,
-where its header was already checked at header sync.
+Header sync applies the timestamp rules
+([Timestamp limits](../sharechain/validation.md#timestamp-limits)) to every
+header before organising it (`validate_dag_connectivity_and_difficulty` in
+`receivers/share_headers.rs`, `ShareValidator::validate_header_timestamp`),
+because the parent-anchored ASERT takes each header's target from its
+parent's time, below the full-validation zone too. Ancestor times come from
+the batch, else the store. A batch with a bad timestamp is refused whole,
+without a retry. Block receipt applies the same check before storing
+(`BlockReceiver::validate_timestamp`). Both call `check_median_time_past` and
+`check_future_time_limit`.
 
 ### Uncle selection vs uncle acceptance
 
@@ -915,16 +827,13 @@ nephew's own ancestry, and not already an uncle of one of the nephew's
 ancestors). It deliberately does **not** consult mutable per-node state.
 
 The last rule is upstream's "an uncle may have only one nephew"
-(`architecture/validation.adoc`; the wiki's "Uncle Blocks" rule 4). It is
-measured on the nephew's own ancestry, read from the headers
-`collect_recent_ancestry` already walks: an uncle sits at most
-`MAX_UNCLES_DEPTH` below any nephew, so only the nephew's parent and
-grandparent can have named it before. Siblings on different branches may
-each name the same uncle, as the wiki allows, because only one of them can
-stay on the chain. Without the rule the payout window, which credits every
-reference it walks, paid such an uncle twice and both nephews a bonus.
-Applied on Bitcoin and Bitcoin Cash alike; on Bitcoin Cash it is part of the
-`uncle-once` protocol tag.
+(`architecture/validation.adoc`; the wiki's "Uncle Blocks" rule 4), checked
+on the nephew's own ancestry from the headers `collect_recent_ancestry`
+walks: within `MAX_UNCLES_DEPTH`, only the parent and grandparent can have
+named the uncle. Siblings on different branches may each name it, as only
+one can stay on the chain. Without the rule the payout window paid such an
+uncle twice and both nephews a bonus. It applies on both chains; on Bitcoin
+Cash it is part of the `uncle-once` protocol tag.
 
 Whether an uncle's block body is stored is exactly that kind of state, so it is
 checked separately (`validate_uncle_bodies_present`) and only for blocks inside
@@ -956,11 +865,10 @@ that risk, so it is stricter: candidates must be `BlockValid`, skipping
 `HeaderValid`, `Invalid` and `Pending`. Every node validates our produced share the
 same way regardless of what we chose, so declining to reference a block we
 judged invalid cannot diverge anything. Upstream takes `HeaderValid`
-candidates too; this fork does not, because a peer relays a share once its
-header checks out (see "Relay after the header check"), so a share only
-header-validated may be one whose body no node has checked. An honest
-sibling is validated within milliseconds of arriving, so it is named one
-job later at most, while it is still within `MAX_UNCLES_DEPTH`.
+candidates too; this fork does not, because shares are relayed after the
+header check (see "Relay after the header check"), before any node has
+checked the body. An honest sibling is validated within milliseconds, so it
+is named one job later at most, well within `MAX_UNCLES_DEPTH`.
 
 The cost of the gap this leaves is bounded, because an uncle contributes
 **nothing to chain state**. `put_confirmed_entry` applies `add_spends_for_block`
