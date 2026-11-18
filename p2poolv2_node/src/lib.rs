@@ -329,32 +329,6 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
     let tracker_handle = start_tracker_actor();
     let tracker_handle_for_notify = tracker_handle.clone();
 
-    // On Bitcoin Cash each new template's previous block is learned before
-    // the notifier builds jobs on it (mining on the current chain).
-    let notify_tx_for_gbt = if stratum_config.chain == Chain::BitcoinCash {
-        let client = match BitcoindRpcClient::new(
-            &bitcoinrpc_config.url,
-            &bitcoinrpc_config.username,
-            &bitcoinrpc_config.password,
-        ) {
-            Ok(client) => client,
-            Err(e) => {
-                error!("Failed to create the RPC client for the node's templates: {e}");
-                return Err(ExitCode::FAILURE);
-            }
-        };
-        let (learning_tx, learning_rx) = mpsc::channel(NOTIFY_CHANNEL_CAPACITY);
-        tokio::spawn(relay_templates_learning_prevs(
-            client,
-            chain_store_handle.clone(),
-            bitcoin_cash_network,
-            learning_rx,
-            notify_tx.clone(),
-        ));
-        learning_tx
-    } else {
-        notify_tx.clone()
-    };
     let bitcoinrpc_config_cloned = bitcoinrpc_config.clone();
     // ZMQ block notifications only trigger getblocktemplate; a Template
     // Provider pushes its own templates, also after a block this node finds.
@@ -393,6 +367,36 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
                 return Err(ExitCode::FAILURE);
             }
         },
+    };
+
+    // On Bitcoin Cash each new template's previous block is learned before
+    // the notifier builds jobs on it (mining on the current chain), and on a
+    // test network a template is asked for when the minimum-difficulty rule
+    // changes its nBits.
+    let notify_tx_for_gbt = if stratum_config.chain == Chain::BitcoinCash {
+        let client = match BitcoindRpcClient::new(
+            &bitcoinrpc_config.url,
+            &bitcoinrpc_config.username,
+            &bitcoinrpc_config.password,
+        ) {
+            Ok(client) => client,
+            Err(e) => {
+                error!("Failed to create the RPC client for the node's templates: {e}");
+                return Err(ExitCode::FAILURE);
+            }
+        };
+        let (learning_tx, learning_rx) = mpsc::channel(NOTIFY_CHANNEL_CAPACITY);
+        tokio::spawn(relay_templates_learning_prevs(
+            client,
+            chain_store_handle.clone(),
+            bitcoin_cash_network,
+            learning_rx,
+            notify_tx.clone(),
+            template_refresh_tx.clone(),
+        ));
+        learning_tx
+    } else {
+        notify_tx.clone()
     };
 
     if stratum_config.chain == Chain::BitcoinCash {

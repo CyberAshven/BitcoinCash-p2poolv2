@@ -3,13 +3,16 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 use super::*;
-use crate::config::BitcoinCashNetwork;
-use crate::shares::bch_asert::BchAsert;
-use crate::shares::bch_asert::tests::{MAINNET_PAIRS, header};
+use crate::config::{BitcoinCashNetwork, Chain};
+use crate::shares::bch_asert::tests::{MAINNET_PAIRS, chipnet_times_around_activation, header};
+use crate::shares::bch_asert::{BCH_POW_LIMIT_BITS, BchAsert};
 use crate::shares::bch_headers::tests::ten_minute_header;
+use crate::stratum::work::gbt::start_gbt;
+use crate::stratum::work::template_trigger::merge_template_triggers;
 use bitcoin::block::Version;
 use bitcoin::consensus::serialize;
-use bitcoin::{CompactTarget, TxMerkleNode};
+use bitcoin::{CompactTarget, Target, TxMerkleNode};
+use bitcoindrpc::test_utils::{mock_method, setup_mock_bitcoin_rpc};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 use wiremock::matchers::{body_partial_json, method};
@@ -384,7 +387,6 @@ async fn learn_from_walks_back_from_any_block_bchn_knows() {
 /// template on, and asks BCHN only when the previous block changes.
 #[tokio::test]
 async fn the_template_relay_learns_a_new_templates_parent_first() {
-    use crate::stratum::work::block_template::BlockTemplate;
     let chain = chain_from_first_block(3, 0);
     let server = bchn(&chain[2], &at_heights(&chain)).await;
     let held = Arc::new(Mutex::new(Held::default()));
@@ -403,6 +405,7 @@ async fn the_template_relay_learns_a_new_templates_parent_first() {
         None,
         input_rx,
         output_tx,
+        None,
     ));
     for _ in 0..2 {
         input_tx
@@ -422,6 +425,324 @@ async fn the_template_relay_learns_a_new_templates_parent_first() {
         header_requests(&server).await,
         1 + 3,
         "one walk of three headers, not two"
+    );
+}
+
+/// A one-minute chipnet parent dated `time`: block 332,455 moved in time
+/// with its ticks moved by as much, so ASERT's target on it stays the real
+/// one's, harder than the limit.
+fn chipnet_parent_dated(time: u32) -> KnownBchHeader {
+    let times: HashMap<u32, u32> = chipnet_times_around_activation().into_iter().collect();
+    let shift = time - times[&332_455];
+    let tick_info = TickSchedule::for_network(BitcoinCashNetwork::Chipnet).tick_info(332_455);
+    KnownBchHeader {
+        height: 332_455,
+        header: Header {
+            version: Version::from_consensus(0x2000_0000),
+            prev_blockhash: BlockHash::all_zeros(),
+            merkle_root: TxMerkleNode::from_byte_array([0x22; 32]),
+            time,
+            bits: CompactTarget::from_consensus(0x1a21_8c7e),
+            nonce: 0,
+        },
+        ticks: tick_info.ticks + i64::from(shift),
+        next_interval: tick_info.next_interval,
+    }
+}
+
+/// This node's clock, in seconds since the epoch.
+fn seconds_now() -> u32 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as u32
+}
+
+/// The relay bounds a chipnet template with ASERT's bits by its mark, two
+/// minutes after its one-minute parent, and asks for a new template a second
+/// after the mark, not before: then the node gives the limit's bits.
+#[tokio::test]
+async fn the_relay_asks_for_a_template_a_second_after_the_minimum_difficulty_mark() {
+    let now = seconds_now();
+    let parent = chipnet_parent_dated(now - 119);
+    let mark = parent.header.time + 120;
+    let rules = BchHeaderRules::for_network(BitcoinCashNetwork::Chipnet);
+    let asert = rules.required_bits(&parent, mark).unwrap();
+    assert_ne!(asert.to_consensus(), BCH_POW_LIMIT_BITS);
+    let held = Arc::new(Mutex::new(Held::default()));
+    held.lock()
+        .unwrap()
+        .headers
+        .insert(parent.block_hash(), parent);
+    let mut template: BlockTemplate = serde_json::from_str(include_str!(
+        "../../../../bitcoindrpc/test_data/bchn-regtest-template.json"
+    ))
+    .unwrap();
+    template.previousblockhash = parent.block_hash().to_string();
+    template.bits = format!("{:08x}", asert.to_consensus());
+    template.mintime = now - 60;
+    template.curtime = now;
+
+    let (input_tx, input_rx) = tokio::sync::mpsc::channel(4);
+    let (output_tx, mut output_rx) = tokio::sync::mpsc::channel(4);
+    let (refresh_tx, mut refresh_rx) = tokio::sync::mpsc::channel(1);
+    let relay = tokio::spawn(relay_templates_learning_prevs(
+        BitcoindRpcClient::new("http://127.0.0.1:1", "user", "pass").unwrap(),
+        store_holding(Arc::clone(&held)),
+        Some(BitcoinCashNetwork::Chipnet),
+        input_rx,
+        output_tx,
+        Some(refresh_tx),
+    ));
+    input_tx
+        .send(NotifyCmd::SendToAll {
+            template: Arc::new(template),
+        })
+        .await
+        .unwrap();
+    let Some(NotifyCmd::SendToAll { template }) = output_rx.recv().await else {
+        panic!("the template is relayed");
+    };
+    assert_eq!(
+        template.min_difficulty_mark,
+        Some(MinDifficultyMark::Until(mark))
+    );
+    assert_eq!(template.curtime, now);
+    assert!(refresh_rx.try_recv().is_err(), "no refresh before the mark");
+
+    timeout(Duration::from_secs(10), refresh_rx.recv())
+        .await
+        .expect("a refresh after the mark")
+        .unwrap();
+    assert!(SystemTime::now() >= UNIX_EPOCH + Duration::from_secs(u64::from(mark) + 1));
+    drop(input_tx);
+    relay.await.unwrap();
+}
+
+/// A chipnet template with ASERT's bits dated past its mark, as a Template
+/// Provider's template dated by this node's clock can be, is moved back to
+/// the mark, and asks for no refresh: the mark has passed.
+#[tokio::test]
+async fn the_relay_moves_a_template_past_its_mark_back_to_it() {
+    let now = seconds_now();
+    let parent = chipnet_parent_dated(now - 150);
+    let mark = parent.header.time + 120;
+    let rules = BchHeaderRules::for_network(BitcoinCashNetwork::Chipnet);
+    let asert = rules.required_bits(&parent, mark).unwrap();
+    let held = Arc::new(Mutex::new(Held::default()));
+    held.lock()
+        .unwrap()
+        .headers
+        .insert(parent.block_hash(), parent);
+    let mut template: BlockTemplate = serde_json::from_str(include_str!(
+        "../../../../bitcoindrpc/test_data/bchn-regtest-template.json"
+    ))
+    .unwrap();
+    template.previousblockhash = parent.block_hash().to_string();
+    template.bits = format!("{:08x}", asert.to_consensus());
+    template.mintime = now - 140;
+    template.curtime = now;
+
+    let (input_tx, input_rx) = tokio::sync::mpsc::channel(4);
+    let (output_tx, mut output_rx) = tokio::sync::mpsc::channel(4);
+    let (refresh_tx, mut refresh_rx) = tokio::sync::mpsc::channel(1);
+    let relay = tokio::spawn(relay_templates_learning_prevs(
+        BitcoindRpcClient::new("http://127.0.0.1:1", "user", "pass").unwrap(),
+        store_holding(Arc::clone(&held)),
+        Some(BitcoinCashNetwork::Chipnet),
+        input_rx,
+        output_tx,
+        Some(refresh_tx),
+    ));
+    input_tx
+        .send(NotifyCmd::SendToAll {
+            template: Arc::new(template),
+        })
+        .await
+        .unwrap();
+    let Some(NotifyCmd::SendToAll { template }) = output_rx.recv().await else {
+        panic!("the template is relayed");
+    };
+    assert_eq!(template.curtime, mark);
+    assert!(template.allows_ntime(mark));
+    assert!(!template.allows_ntime(mark + 1));
+    drop(input_tx);
+    relay.await.unwrap();
+    assert!(refresh_rx.try_recv().is_err());
+}
+
+/// On mainnet the relay passes a template on as the node gave it: no mark,
+/// the node's time.
+#[tokio::test]
+async fn the_relay_leaves_a_mainnet_template_unbounded() {
+    let (parent_height, parent_hex, child_hex) = MAINNET_PAIRS[1];
+    let parent = known(parent_height, header(parent_hex));
+    let held = Arc::new(Mutex::new(Held::default()));
+    held.lock()
+        .unwrap()
+        .headers
+        .insert(parent.block_hash(), parent);
+    let mut template: BlockTemplate = serde_json::from_str(include_str!(
+        "../../../../bitcoindrpc/test_data/bchn-regtest-template.json"
+    ))
+    .unwrap();
+    template.previousblockhash = parent.block_hash().to_string();
+    template.bits = format!("{:08x}", header(child_hex).bits.to_consensus());
+    template.curtime = parent.header.time + 3 * 60 * 60;
+    let curtime = template.curtime;
+
+    let (input_tx, input_rx) = tokio::sync::mpsc::channel(4);
+    let (output_tx, mut output_rx) = tokio::sync::mpsc::channel(4);
+    let (refresh_tx, mut refresh_rx) = tokio::sync::mpsc::channel(1);
+    let relay = tokio::spawn(relay_templates_learning_prevs(
+        BitcoindRpcClient::new("http://127.0.0.1:1", "user", "pass").unwrap(),
+        store_holding(Arc::clone(&held)),
+        Some(BitcoinCashNetwork::Mainnet),
+        input_rx,
+        output_tx,
+        Some(refresh_tx),
+    ));
+    input_tx
+        .send(NotifyCmd::SendToAll {
+            template: Arc::new(template),
+        })
+        .await
+        .unwrap();
+    let Some(NotifyCmd::SendToAll { template }) = output_rx.recv().await else {
+        panic!("the template is relayed");
+    };
+    assert_eq!(template.min_difficulty_mark, None);
+    assert_eq!(template.curtime, curtime);
+    drop(input_tx);
+    relay.await.unwrap();
+    assert!(refresh_rx.try_recv().is_err());
+}
+
+/// The template task, its trigger merge and the relay together, as a node
+/// on chipnet runs them, against a node that gives ASERT's bits until the
+/// mark and the limit's after it: the limit's template arrives a second
+/// after the mark, long before the next poll a minute on.
+#[tokio::test]
+async fn a_chipnet_pool_takes_the_limits_template_a_second_after_the_mark() {
+    let now = seconds_now();
+    let parent = chipnet_parent_dated(now - 119);
+    let mark = parent.header.time + 120;
+    let rules = BchHeaderRules::for_network(BitcoinCashNetwork::Chipnet);
+    let asert = rules.required_bits(&parent, mark).unwrap();
+    let limit = rules.required_bits(&parent, mark + 1).unwrap();
+    let held = Arc::new(Mutex::new(Held::default()));
+    held.lock()
+        .unwrap()
+        .headers
+        .insert(parent.block_hash(), parent);
+    let mut asert_template: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../../bitcoindrpc/test_data/bchn-regtest-template.json"
+    ))
+    .unwrap();
+    asert_template["previousblockhash"] = parent.block_hash().to_string().into();
+    asert_template["mintime"] = (now - 60).into();
+    let mut limit_template = asert_template.clone();
+    asert_template["bits"] = format!("{:08x}", asert.to_consensus()).into();
+    asert_template["target"] = hex::encode(Target::from_compact(asert).to_be_bytes()).into();
+    asert_template["curtime"] = now.into();
+    limit_template["bits"] = format!("{:08x}", limit.to_consensus()).into();
+    limit_template["target"] = hex::encode(Target::from_compact(limit).to_be_bytes()).into();
+    limit_template["curtime"] = (mark + 1).into();
+    let request = serde_json::json!([{
+        "capabilities": ["coinbasevalue", "coinbase/append", "workid"]
+    }]);
+    let (server, config) = setup_mock_bitcoin_rpc().await;
+    mock_method(
+        &server,
+        "getblocktemplate",
+        request.clone(),
+        asert_template.to_string(),
+    )
+    .await;
+
+    let (_zmq_tx, zmq_rx) = tokio::sync::mpsc::channel(1);
+    let (refresh_tx, trigger_rx) = merge_template_triggers(zmq_rx, None);
+    let (learning_tx, learning_rx) = tokio::sync::mpsc::channel(4);
+    let (notify_tx, mut notify_rx) = tokio::sync::mpsc::channel(4);
+    tokio::spawn(relay_templates_learning_prevs(
+        BitcoindRpcClient::new(&config.url, &config.username, &config.password).unwrap(),
+        store_holding(Arc::clone(&held)),
+        Some(BitcoinCashNetwork::Chipnet),
+        learning_rx,
+        notify_tx,
+        Some(refresh_tx),
+    ));
+    start_gbt(
+        config,
+        learning_tx,
+        60,
+        bitcoin::Network::Regtest,
+        Chain::BitcoinCash,
+        false,
+        trigger_rx,
+    )
+    .await
+    .unwrap();
+
+    let Some(NotifyCmd::SendToAll { template }) = timeout(Duration::from_secs(5), notify_rx.recv())
+        .await
+        .unwrap()
+    else {
+        panic!("the first poll's template is relayed");
+    };
+    assert_eq!(template.bits, format!("{:08x}", asert.to_consensus()));
+    assert_eq!(
+        template.min_difficulty_mark,
+        Some(MinDifficultyMark::Until(mark))
+    );
+
+    server.reset().await;
+    mock_method(
+        &server,
+        "getblocktemplate",
+        request,
+        limit_template.to_string(),
+    )
+    .await;
+    let Some(NotifyCmd::SendToAll { template }) =
+        timeout(Duration::from_secs(10), notify_rx.recv())
+            .await
+            .expect("the limit's template before the next poll")
+    else {
+        panic!("the refreshed template is relayed");
+    };
+    assert!(SystemTime::now() >= UNIX_EPOCH + Duration::from_secs(u64::from(mark) + 1));
+    assert_eq!(template.bits, format!("{BCH_POW_LIMIT_BITS:08x}"));
+    assert_eq!(
+        template.min_difficulty_mark,
+        Some(MinDifficultyMark::After(mark))
+    );
+    assert!(template.allows_ntime(template.curtime));
+}
+
+/// A refresh comes a second after the mark of ASERT's bits while the mark
+/// is ahead, never for the limit's bits or a mark that has passed.
+#[test]
+fn a_refresh_comes_a_second_after_a_mark_still_ahead() {
+    let mark = 1_800_000_000;
+    let clock = |seconds: u64, millis: u64| {
+        UNIX_EPOCH + Duration::from_secs(seconds) + Duration::from_millis(millis)
+    };
+    assert_eq!(
+        min_difficulty_refresh_delay(MinDifficultyMark::Until(mark), clock(1_799_999_990, 0)),
+        Some(Duration::from_secs(11))
+    );
+    assert_eq!(
+        min_difficulty_refresh_delay(MinDifficultyMark::Until(mark), clock(1_800_000_000, 500)),
+        Some(Duration::from_millis(500))
+    );
+    assert_eq!(
+        min_difficulty_refresh_delay(MinDifficultyMark::Until(mark), clock(1_800_000_001, 0)),
+        None
+    );
+    assert_eq!(
+        min_difficulty_refresh_delay(MinDifficultyMark::After(mark), clock(1_799_999_990, 0)),
+        None
     );
 }
 

@@ -1,5 +1,7 @@
 use super::*;
 use crate::accounting::stats::metrics;
+#[cfg(not(feature = "sim"))]
+use crate::shares::bch_headers::MinDifficultyMark;
 use crate::shares::share_commitment::ShareCommitment;
 use crate::stratum::block_submit::FoundBlockSubmitter;
 use crate::stratum::difficulty_adjuster::{DifficultyAdjuster, MockDifficultyAdjusterTrait};
@@ -10,6 +12,8 @@ use crate::stratum::session::Session;
 use crate::stratum::work::gbt::build_merkle_branches_for_template;
 use crate::stratum::work::prepared_notify::insert_miner_job;
 use crate::stratum::work::tracker::start_tracker_actor;
+#[cfg(not(feature = "sim"))]
+use crate::test_utils::test_bch_prepared_for_template;
 use crate::test_utils::{
     TEST_COINBASE_NSECS, build_pool_job_submit, build_token_win_submit, create_test_commitment,
     load_valid_stratum_work_components, setup_test_chain_store_handle, solve_job_submit,
@@ -2181,4 +2185,97 @@ async fn a_winning_share_without_the_disclosure_sends_nothing_new() {
             .iter()
             .any(|message| matches!(message, Message::Extension(_)))
     );
+}
+
+/// A share that meets the network target, dated at its job's `curtime`, on
+/// a job whose template is bounded by `mark`. Returns what the node answers
+/// the miner and how many requests the node got: one `submitblock` for a
+/// block that went out, none otherwise.
+#[cfg(not(feature = "sim"))]
+async fn sv1_block_on_a_marked_job(
+    mark: impl FnOnce(u32) -> MinDifficultyMark,
+) -> (Vec<Message<'static>>, usize) {
+    let (mock_server, _) = setup_mock_bitcoin_rpc().await;
+    mock_submit_block_with_any_body(&mock_server).await;
+    let (ctx, _emissions, _directories) = test_bch_stratum_context(&mock_server.uri()).await;
+    let mut template: BlockTemplate = serde_json::from_str(include_str!(
+        "../../../../../bitcoindrpc/test_data/bchn-regtest-template.json"
+    ))
+    .unwrap();
+    template.min_difficulty_mark = Some(mark(template.curtime));
+    let prepared = test_bch_prepared_for_template(template);
+    let payout = PayoutAddress::from(Address::p2pkh(
+        PubkeyHash::from_byte_array([0x22; 20]),
+        Network::Regtest,
+    ));
+    let (job_id, _) = insert_miner_job(
+        &prepared,
+        Some(&payout),
+        Some(ShareOwner::CashP2pkh([0x22; 20])),
+        None,
+        None,
+        &ctx.tracker_handle,
+    );
+    let job = ctx.tracker_handle.get_job(job_id).unwrap();
+    let mut session = Session::<DifficultyAdjuster>::new(1, 1, None, DEFAULT_VERSION_MASK);
+    session.subscribed = true;
+    session.user_id = Some(1);
+    let submit = solve_job_submit(job_id, &job, &session.enonce1_hex, "0000000000000001");
+    let messages = handle_submit(submit, &mut session, ctx).await.unwrap();
+    let requests = mock_server.received_requests().await.unwrap().len();
+    (messages, requests)
+}
+
+/// The error a refused share's reply carries, if any.
+#[cfg(not(feature = "sim"))]
+fn reply_error(messages: &[Message<'_>]) -> Option<String> {
+    match messages.first() {
+        Some(Message::Response(response)) => response
+            .error
+            .as_ref()
+            .map(|error| error.message.to_string()),
+        _ => panic!("expected a response first"),
+    }
+}
+
+/// On a test network a block dated at the minimum-difficulty mark may carry
+/// ASERT's bits: the share is taken and the block submitted.
+#[cfg(not(feature = "sim"))]
+#[tokio::test]
+async fn an_sv1_block_at_the_mark_with_asert_bits_is_submitted() {
+    let (messages, requests) = sv1_block_on_a_marked_job(MinDifficultyMark::Until).await;
+    assert_eq!(reply_error(&messages), None);
+    assert_eq!(requests, 1);
+}
+
+/// A second past the mark ASERT's bits are `bad-diffbits`: the share is
+/// refused and no block goes to the node.
+#[cfg(not(feature = "sim"))]
+#[tokio::test]
+async fn an_sv1_block_a_second_past_the_mark_with_asert_bits_is_refused_and_not_submitted() {
+    let (messages, requests) =
+        sv1_block_on_a_marked_job(|curtime| MinDifficultyMark::Until(curtime - 1)).await;
+    assert_eq!(reply_error(&messages).as_deref(), Some(NTIME_OUT_OF_RANGE));
+    assert_eq!(requests, 0);
+}
+
+/// At the mark the limit's bits are `bad-diffbits`: the share is refused and
+/// no block goes to the node.
+#[cfg(not(feature = "sim"))]
+#[tokio::test]
+async fn an_sv1_block_at_the_mark_with_the_limits_bits_is_refused_and_not_submitted() {
+    let (messages, requests) = sv1_block_on_a_marked_job(MinDifficultyMark::After).await;
+    assert_eq!(reply_error(&messages).as_deref(), Some(NTIME_OUT_OF_RANGE));
+    assert_eq!(requests, 0);
+}
+
+/// A second past the mark the limit's bits are valid: the share is taken
+/// and the block submitted.
+#[cfg(not(feature = "sim"))]
+#[tokio::test]
+async fn an_sv1_block_a_second_past_the_mark_with_the_limits_bits_is_submitted() {
+    let (messages, requests) =
+        sv1_block_on_a_marked_job(|curtime| MinDifficultyMark::After(curtime - 1)).await;
+    assert_eq!(reply_error(&messages), None);
+    assert_eq!(requests, 1);
 }

@@ -334,6 +334,7 @@ async fn test_metrics_endpoint_exposes_coinbase_split() {
         weightlimit: 0,
         provided: None,
         light: None,
+        min_difficulty_mark: None,
     };
 
     let pool_signature = b"P2Poolv2";

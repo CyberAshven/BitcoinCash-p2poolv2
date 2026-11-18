@@ -363,6 +363,9 @@ format and genesis re-pin.
 
 ### Fixed
 
+- Chipnet blocks are no longer lost as `bad-diffbits` at the
+  minimum-difficulty mark: a share's time must suit its job's nBits, and a
+  new template is fetched a second after the mark (#155).
 - The sim swarm's nodes connect again: since #142 they all read one node key
   from their shared run directory and refused to dial each other. Each now
   takes a new peer ID at every start and stays off Nostr.

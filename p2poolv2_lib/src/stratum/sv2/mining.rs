@@ -1250,7 +1250,11 @@ impl MiningChannels {
             .duration_since(SystemTime::UNIX_EPOCH)
             .map_err(|error| error.to_string())?
             .as_secs();
-        if submission.ntime < job.blocktemplate.curtime || u64::from(submission.ntime) > now + 7200
+        // A test network's minimum-difficulty rule also bounds the times the
+        // job's nBits allow (`BlockTemplate::allows_ntime`).
+        if submission.ntime < job.blocktemplate.curtime
+            || u64::from(submission.ntime) > now + 7200
+            || !job.blocktemplate.allows_ntime(submission.ntime)
         {
             return submit_error(&submission, "invalid-ntime");
         }
