@@ -225,9 +225,8 @@ changed:
 - a second of delay in relaying a found block costs ten times the BCH orphan
   risk.
 
-Tuning `K`, the cap and the share period for faster blocks is an open
-question in [bch-plan.md](bch-plan.md); the 10-second share period is kept
-for now (decision 11).
+`K` = 3, the 14-day cap and the 10-second share period stay with faster
+blocks ([bch-plan.md](bch-plan.md), decision 11).
 
 ## Network size
 
