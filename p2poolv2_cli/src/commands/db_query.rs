@@ -21,6 +21,7 @@ use serde::Serialize;
 use serde_json::Value;
 use std::error::Error;
 use std::str::FromStr;
+use time::macros::format_description;
 
 /// Open a RocksDB store in read-only mode.
 pub fn open_store(db_path: &str) -> Result<Store, Box<dyn Error>> {
@@ -365,8 +366,10 @@ fn short(s: &str, n: usize) -> &str {
 
 /// Format a unix timestamp as HH:MM:SS UTC.
 fn format_ts_hms(timestamp: u32) -> String {
-    let dt = chrono::DateTime::from_timestamp(timestamp as i64, 0).unwrap_or_default();
-    dt.format("%H:%M:%S").to_string()
+    time::OffsetDateTime::from_unix_timestamp(i64::from(timestamp))
+        .unwrap_or(time::OffsetDateTime::UNIX_EPOCH)
+        .format(format_description!("[hour]:[minute]:[second]"))
+        .unwrap_or_default()
 }
 
 /// Format compact target bits as an integer difficulty value.
@@ -763,6 +766,12 @@ mod tests {
         genesis_for_tests, make_test_share_program, parse_address_from_string,
         setup_test_chain_store_handle,
     };
+
+    #[test]
+    fn test_format_ts_hms_is_the_utc_time_of_day() {
+        assert_eq!(format_ts_hms(1_700_000_000), "22:13:20");
+        assert_eq!(format_ts_hms(0), "00:00:00");
+    }
 
     /// Helper: set up a store with genesis and return the Store reference and temp dir.
     /// The ChainStoreHandle populates the store; we then query it directly via Store.

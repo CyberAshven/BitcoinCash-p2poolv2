@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Two security advisories of 2026-11-17 are closed. `libz-sys` goes from
+1.1.31 to 1.1.33 for a heap buffer overflow in zlib's `gz_vacate`
+(RUSTSEC-2026-0544); RocksDB links it. `chrono` was declared unmaintained
+(RUSTSEC-2026-0543) and is replaced by `time`, which the node already
+carried through its log writer: dashboard and CLI timestamps, the
+`/pplns_shares` time filters and the tools' progress lines print as before.
+The CLI now sends those filters as `2025-10-17T19:40:00Z`, where it sent
+`+00:00`. The tools print the computer's own time where it can be read
+safely and UTC otherwise (a Unix process with several threads). The fuzz
+crate's lockfile also gains the Nostr client's packages, which had turned
+the fuzz check red.
+
+The header rules of the weak shares a share carries are checked on several
+cores, one fewer than the node's CPUs; the verdict is unchanged (#127).
+
 A restarted node remembers its peers. The outgoing peer target's book of
 known peers is saved to `p2p_peers.json` beside the store every ten
 minutes and when the node stops, and read on the next start; the peers it

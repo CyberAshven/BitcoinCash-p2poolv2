@@ -463,7 +463,7 @@ Miners can choose a bounded aux root per declared job; auxiliary-token and
 covenant proof verification remains unfinished.
 Final job size now includes the full PPLNS coinbase and transaction count.
 API payouts now use CashAddr text. Hydrapool CashAddr payout parsing and
-SV2 worker cleanup are fixed in the completion follow-up in `bch-plan.md`.
+SV2 worker cleanup were fixed in the same port (PR #1).
 BCH template proofs permit 25 Merkle-branch levels through storage and P2P,
 with smaller header batches to keep the 1 MiB message cap. Bitcoin proofs
 retain their 16-level limit. Boundary and codec tests cover these changes;
