@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+The sim swarm's nodes take a new peer ID on each start and stay off Nostr: since
+#142 they shared one key beside their stores and never connected.
+
 Two security advisories of 2026-11-17 are closed. `libz-sys` goes from
 1.1.31 to 1.1.33 for a heap buffer overflow in zlib's `gz_vacate`
 (RUSTSEC-2026-0544); RocksDB links it. `chrono` was declared unmaintained
