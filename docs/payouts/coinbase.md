@@ -75,23 +75,17 @@ There is no SegWit witness commitment on Bitcoin Cash.
 
 ## How many payouts
 
-A share whose merge-mining commitment is the exact empty one pays every
-payee directly: only Bitcoin Cash's
-1,000,000-byte transaction limit bounds its coinbase, about 29,400 P2PKH
-payouts. Pool-built jobs can merge-mine tokens using each miner's own
-leaves, and Job Declaration can carry a token commitment too. A share
-that merge-mines tokens keeps its coinbase within 3,072
-bytes (79 P2PKH payouts), so a token covenant can hash it. The payee whose
-output would pass the limit and every payee after it are paid through one
-payout tree output: keyless covenant transactions of up to 500 outputs each
-that anyone can broadcast once the coinbase is mature, paying each payee
-exactly, less its share of the fee at 1 to 3 sat/byte. Every P2Pool node
-broadcasts the trees of its found blocks at 1 sat/byte, and the API serves
-them (`/payout_trees`, `/payout_tree?coinbase_txid=`) so payees can broadcast
+A share that merge-mines no tokens pays every payee directly, up to Bitcoin
+Cash's 1,000,000-byte transaction limit: about 29,400 P2PKH payouts. A share
+that merge-mines tokens keeps its coinbase within 3,072 bytes (79 P2PKH
+payouts). Past the limit, the largest payees are paid through one payout
+tree output: keyless covenant transactions that every P2Pool node
+broadcasts once the coinbase is mature, paying each payee exactly, less its
+share of a fee of 1 to 3 sat/byte. The API serves them
+(`/payout_trees`, `/payout_tree?coinbase_txid=`), so a payee can broadcast
 them without P2Pool. Full rule:
-[Payout distribution](../architecture/payout-distribution.md) and
-[Hybrid payouts on Bitcoin Cash](../architecture/bch-hybrid-payouts.md); limits
-on [Pool size limits](../sharechain/pool-size.md#the-hybrid-payout).
+[Hybrid payouts on Bitcoin Cash](../architecture/bch-hybrid-payouts.md);
+limits on [Pool size limits](../sharechain/pool-size.md#the-hybrid-payout).
 
 ## Small payouts on Bitcoin Cash
 
@@ -106,50 +100,29 @@ a small miner can expect per block is worked out on
 
 ## Payout levels
 
-Since 2026-11-09 every Bitcoin Cash share carries its miner's payout level
-`k`, 1 to 7, the smallest payment the miner wants: `L_k = 546 * 2^k`
-satoshis, from 546 (the P2PKH dust limit) to 69,888
-([Miner options](../miner-options.md#payout-level)). A slice below its level
-is paid by a draw among the slices at the same level, within the same block,
-so nothing is held and nothing is owed
-([Share chain redesign](../sharechain/small-miners-design.md#4-payout-levels)).
-This is a share-chain rule (`levels-546x2`); Bitcoin Cash sees only fewer,
-larger coinbase outputs.
+Every Bitcoin Cash share carries its miner's payout level `k`, 1 to 7, the
+smallest payment the miner wants: `L_k = 546 * 2^k` satoshis, from 1,092 to
+69,888 ([Miner options](../miner-options.md#payout-level)). A payee's level
+is that of its newest credited entry in the window. A payee whose amount in
+a block is below its level is pooled with the others at that level, and the
+pot is paid by a draw among them, in parts of at least the level, within
+the same block, so nothing is held and nothing is owed. The donation key and
+fee addresses are never drawn, and a payee that wins nothing gets no output
+in that block. The draw is seeded from the paying share's parent hash, so
+every node draws the same way and the share that pays cannot change it. The
+exact steps are on
+[Share chain redesign](../sharechain/small-miners-design.md#4-payout-levels);
+the rule's tag is `levels-546x2-k1`. Bitcoin Cash sees only fewer, larger
+coinbase outputs.
 
-A payee's level is the level of its newest credited entry in the window:
-the newest share, uncle or weak share paying its locking script, a share
-counting as newer than the uncles and weak shares it carries and its uncles
-as newer than its weak shares. A weak share has its own header's level.
-After the window's weights, cuts and rounding have given each payee its
-amount `a` in satoshis:
+Each level's pot is paid exactly, and each payee's expected payment is its
+amount, up to a few satoshis. A miner at a high level is paid less often and
+more each time: at level 5 a miner earning 1,000 satoshis a block wins a
+17,472-satoshi payment about once in 17 blocks.
 
-1. Every payee whose amount is at least its level, the donation key and
-   every fee address (every recipient of a donation or fee cut in the
-   window) keep their amount.
-2. The others are grouped by level. Within a group at level `L`, payees are
-   ordered by locking script bytes, and `S` is the sum of their amounts.
-3. `n = S / L`, rounded down.
-4. The seed is the first 8 bytes, as a little-endian integer, of
-   `SHA-256("p2pool-payout-level" || parent share hash || k)`: the parent
-   share hash is the 32 bytes of the share's `prev_share_blockhash` as its
-   header serializes them, the anchor of its window, and `k` one byte.
-5. If `n` is 0, one point `p = seed mod S` picks the payee whose running
-   total of amounts first exceeds `p`. It gets `S`.
-6. Otherwise `D = S / n`, rounded down, and the points
-   `p_j = (seed mod D) + j * D` for `j = 0 .. n-1` each pay `D` to the payee
-   whose running total first exceeds it. The first point's payee also gets
-   `S - n * D`, less than `n` satoshis.
-7. Each payee's winnings replace its amount; a payee that wins nothing gets
-   no output in this block. The outputs are then ordered and split as
-   above, the payout tree included, in the same order of weight.
-
-The pot of each level is paid exactly, and each payee's expected payment is
-its amount, up to the at most `n` satoshis of step 6. Every node draws the
-same way, because the seed comes from the parent share, which every share
-built on it shares, and the share that pays cannot change it. A miner at a
-high level is paid less often and more each time: at level 5 a miner earning
-1,000 satoshis a block wins a 17,472-satoshi payment about once in 17
-blocks.
+For example, three payees at level 3 with 9,000 satoshis between them (`S`)
+share `n` = 2 payments of `D` = 4,500, placed by the seed along their
+running totals:
 
 ```text
 level 3 (4,368 sat), S = 9,000, n = 2, D = 4,500, seed mod D = 1,200
