@@ -56,14 +56,11 @@ use bitcoin::{BlockHash, CompactTarget, Target};
 /// headers travel with shares, and a share is paid only for work on the
 /// paying share's BCH chain or one block off it.
 ///
-/// `bch-prev-1off-ticks` since 2026-11-15: each known header carries its
-/// CHIP-2025-03 ticks and next interval, worked out from its own branch's
-/// median time past as BCHN does, and the nBits a header from a peer must
-/// carry and the nBits that size a payout window follow them. On
-/// `bch-prev-1off` a node learned one-minute blocks while running, from its
-/// own BCHN, so two nodes could require different nBits of one header and
-/// size one window differently. Nodes on the two do not accept the same
-/// shares: a flag day, with a fresh store.
+/// `-ticks`: each known header carries its CHIP-2025-03 ticks and next
+/// interval, worked out from its own branch's median time past as BCHN
+/// does, and the nBits a header from a peer must carry and the nBits that
+/// size a payout window follow them. `docs/sharechain/rule-history.md` lists
+/// the earlier segment.
 pub const BCH_CURRENT_CHAIN_RULE_TAG: &str = "bch-prev-1off-ticks";
 
 /// BCHN's `MAX_FUTURE_BLOCK_TIME`: a block may be dated at most two hours

@@ -56,7 +56,7 @@ use serde::{Deserialize, Serialize};
 pub const WEAK_RATIO_UNIT: u32 = 1024;
 
 /// `R_MAX`: without asks a weak share is at most 256 times easier than the
-/// minimum (4096 until 2026-11-12, study #85).
+/// minimum.
 pub const WEAK_RATIO_MAX_MULTIPLE: u32 = 256;
 
 /// The largest `weak_ratio` without asks, `R_MAX` in units of 1/1024.
@@ -71,7 +71,7 @@ pub const WEAK_RATIO_ASK_MAX: u32 = WEAK_RATIO_ASK_MAX_MULTIPLE * WEAK_RATIO_UNI
 
 /// The genesis share's ratio as a multiple of the minimum: where a chain
 /// whose shares carry [`WEAK_FILL`] weak shares settles in a pool at a
-/// tenth of today's Bitcoin Cash (`R_MAX`, 256, until 2026-11-16).
+/// tenth of today's Bitcoin Cash.
 pub const GENESIS_WEAK_RATIO_MULTIPLE: u32 = 32;
 
 /// The genesis share's `weak_ratio`, [`GENESIS_WEAK_RATIO_MULTIPLE`] in
@@ -86,8 +86,8 @@ pub const GENESIS_WEAK_RATIO: u32 = GENESIS_WEAK_RATIO_MULTIPLE * WEAK_RATIO_UNI
 pub const WEAK_RATIO_STEP_DIVISOR: u32 = 256;
 
 /// `WEAK_CAP`: the most weak shares one share may carry, twice
-/// [`WEAK_FILL_MAX`] (64 until 2026-11-15, twice [`WEAK_FILL`]), and more
-/// than [`WEAK_IDLE_CAP`] only while enough of them ask
+/// [`WEAK_FILL_MAX`], and more than [`WEAK_IDLE_CAP`] only while enough of
+/// them ask
 /// ([`weak_count_allowed`]).
 pub const WEAK_CAP: usize = 640;
 
@@ -108,19 +108,17 @@ pub const WEAK_FILL_MAX: u16 = 320;
 /// the weak shares it carried ask.
 pub const WEAK_ASK_DIVISOR: u32 = 64;
 
-/// `WEAK_BYTES`: the most bytes of weak shares one share may carry, 960 KiB
-/// (96 KiB until 2026-11-15, with [`WEAK_CAP`]).
+/// `WEAK_BYTES`: the most bytes of weak shares one share may carry, 960 KiB.
 pub const WEAK_BYTES: usize = 960 * 1024;
 
 /// `WEAK_DEPTH`: a carried weak share's parent is at most this many shares
-/// below the share that carries it, 8 minutes at
-/// 10-second shares (6 until 2026-11-12, study #85: deep enough that a
-/// coalition of most of the hashrate gains nothing by refusing to carry
-/// others' weak shares).
+/// below the share that carries it, 8 minutes at 10-second shares: deep
+/// enough that a coalition of most of the hashrate gains nothing by refusing
+/// to carry others' weak shares (study #85).
 pub const WEAK_DEPTH: u32 = 48;
 
 /// `INCLUDER_CUT`: the part of a weak share's credit the share carrying it
-/// earns, in basis points (1%; 5% until 2026-11-12, study #85).
+/// earns, in basis points (1%).
 pub const INCLUDER_CUT: u16 = 100;
 
 /// Basis points in one.
@@ -138,43 +136,16 @@ pub const MAX_WEAK_SCRIPT_SIG_BYTES: usize = 100;
 /// of [`WEAK_RATIO_ASK_MAX_MULTIPLE`] (4096), then a [`WEAK_IDLE_CAP`] of 64
 /// and a genesis ratio of [`GENESIS_WEAK_RATIO_MULTIPLE`] (32).
 ///
-/// `weak2` since 2026-11-12: a share's weak root commits each carried weak
-/// share's whole encoding ([`WeakShare::committed_hash`]), where `weak`
-/// committed only their proof-of-work hashes and left the rest of each weak
-/// share free for a relaying peer to change. The two compute different roots
-/// for every share carrying weak shares, so nodes on them must not peer: a
-/// flag day, with a fresh store.
-///
-/// `weak2-64-100-48-256` since 2026-11-12 (study #85): the cut fell from 500
-/// basis points, the depth rose from 6 and `R_MAX` fell from 4096, and the
-/// tag gained `R_MAX`. Every share's weak credit and every genesis share
-/// (its weak ratio is `R_MAX`) changed: a flag day, with a fresh store.
-///
-/// `weak3-64-100-48-256` since 2026-11-12: a weak share a share carries is
-/// held to its carrier's time, where `weak2` held it to each node's clock
-/// and so let two nodes disagree for good about one share. Nodes on the two
-/// do not accept the same shares: a flag day, with a fresh store.
-///
-/// `weak4-640-100-48-256-320-64-4096` since 2026-11-15 (part 6 of the design
-/// page): the weak ratio follows the weak shares that ask
-/// ([`next_weak_ratio`]). A share header counts the asking weak shares it
-/// carries as `weak_asking`, `wanted_bits` may be easier than `bits`, a
-/// share may carry 640 weak shares in 960 KiB where it carried 64 in 96 KiB,
-/// and the tag gained `WEAK_FILL_MAX`, `WEAK_ASK_DIVISOR` and `R_ASK_MAX`. A
-/// node on `weak3` cannot read the longer header and steps the weak ratio
-/// without the asks, and the header change gives the chain a new genesis: a
-/// flag day, with a fresh store. Before any node ran it, the tag gained
-/// `WEAK_IDLE_CAP` and the genesis ratio on 2026-11-16: a share may carry
-/// more than 64 weak shares only while more than one in 64 of them ask, and
-/// the genesis ratio is 32, where `R_MAX` let a young chain's shares carry
-/// 640 each (the payout simulator's `weak-asks-rules`, rule v4).
-///
-/// `-summary` since 2026-11-16, before any node ran `weak4`: the weak root
-/// also commits the summary the PPLNS window and the carried-once rule read
+/// `weak4` is the rule's fourth form: a share header counts the weak shares
+/// it carries that ask as `weak_asking` and the weak ratio follows them
+/// ([`next_weak_ratio`]), a carried weak share is held to its carrier's
+/// time, and the weak root commits each carried weak share's whole encoding
+/// ([`WeakShare::committed_hash`]). `-summary`: the weak root also commits
+/// the summary the PPLNS window and the carried-once rule read
 /// ([`weak_root`]), so a share whose whole weak shares a node has pruned can
 /// be served with that summary instead ([`PrunedWeakShares`]) and checked
-/// against its header. Every share carrying weak shares has a different root
-/// under the two: a flag day, with a fresh store.
+/// against its header. `docs/sharechain/rule-history.md` lists the earlier
+/// segments.
 pub const BCH_WEAK_SHARE_RULE_TAG: &str = "weak4-640-100-48-256-320-64-4096-64-32-summary";
 
 /// Whether a share may carry `weak_count` weak shares of which
@@ -469,10 +440,8 @@ impl Decodable for WeakShare {
 /// Every byte of a carried weak share is in its leaf, so a body whose weak
 /// shares differ in any field from the ones the miner carried fails the body
 /// check as a bad copy, and a weak share check that fails once the body is
-/// stored judges what the miner committed. Until 2026-11-12 the leaves were
-/// the weak shares' proof-of-work hashes, which left the rest of each weak
-/// share unbound: a peer could change one in an honest share's body and have
-/// the share marked invalid (`BCH_WEAK_SHARE_RULE_TAG`).
+/// stored judges what the miner committed: a relaying peer cannot change a
+/// weak share in an honest share's body and have the share marked invalid.
 ///
 /// The tree pairs the last leaf of an odd level with itself, so a repeated
 /// last weak share would keep the root (CVE-2012-2459); the body check

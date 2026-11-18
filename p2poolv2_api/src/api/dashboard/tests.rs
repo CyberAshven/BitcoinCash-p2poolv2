@@ -217,6 +217,98 @@ async fn the_miner_page_needs_an_address() {
 }
 
 #[tokio::test]
+async fn the_miner_page_hashrate_matches_the_miners_page_column() {
+    let (state, _store, _metrics) = build_state(None, None).await;
+    build_confirmed_test_chain(&state.chain_store_handle, 4).await;
+    let shares = newest_shares(&state, MINER_HASHRATE_SHARES);
+    let address = ShareInfoDisplay::from_share_info(
+        &shares[0],
+        Some(state.app_config.network),
+        state.app_config.cash_network,
+    )
+    .miner_bitcoin_address;
+    let detail = miner_hashrate(&state, &address);
+    let list = miner_hashrates(&state, &[address]);
+    let (rate, count, span) = detail.expect("the window holds the miner's shares");
+    assert_eq!(
+        list[0].expect("the column shows the same figure"),
+        rate,
+        "the miner page and the miners page column read one window"
+    );
+    assert_eq!(
+        (count, span),
+        (5, 4),
+        "all five shares are within the gap and span one second each"
+    );
+    // Every worked share contributes its work once over a span of four
+    // seconds, four shares over four seconds is one share's work per second.
+    assert!((rate - work_from_bits(shares[0].bits)).abs() < 1e-9);
+}
+
+#[tokio::test]
+async fn the_miner_hashrate_window_drops_shares_older_than_an_hour() {
+    let (state, _store, _metrics) = build_state(None, None).await;
+    let genesis_block = genesis_for_tests();
+    state
+        .chain_store_handle
+        .init_or_setup_genesis(genesis_block.clone())
+        .await
+        .unwrap();
+    let first = TestShareBlockBuilder::new()
+        .prev_share_blockhash(genesis_block.block_hash().to_string())
+        .time(1_700_000_100)
+        .build();
+    confirm_share(&state, &first).await;
+    let second = TestShareBlockBuilder::new()
+        .prev_share_blockhash(first.block_hash().to_string())
+        .time(1_700_004_100)
+        .build();
+    confirm_share(&state, &second).await;
+    let third = TestShareBlockBuilder::new()
+        .prev_share_blockhash(second.block_hash().to_string())
+        .time(1_700_004_200)
+        .build();
+    confirm_share(&state, &third).await;
+
+    let shares = newest_shares(&state, MINER_HASHRATE_SHARES);
+    let address = ShareInfoDisplay::from_share_info(
+        &shares[0],
+        Some(state.app_config.network),
+        state.app_config.cash_network,
+    )
+    .miner_bitcoin_address;
+    let detail = miner_hashrate(&state, &address);
+    let (rate, count, span) = detail.expect("the newest shares hold the miner's work");
+    assert_eq!(
+        (count, span),
+        (2, 100),
+        "genesis and the first share fall outside the hour before the newest"
+    );
+    let list = miner_hashrates(&state, &[address]);
+    assert_eq!(
+        list[0].expect("the column shows the same figure"),
+        rate,
+        "the miner page and the miners page column read one window"
+    );
+}
+
+#[tokio::test]
+async fn a_miner_without_shares_in_the_window_has_no_hashrate() {
+    let (state, _store, _metrics) = build_state(None, None).await;
+    build_confirmed_test_chain(&state.chain_store_handle, 4).await;
+    let stranger = "bchtest:qstrangerwithnoshareinthewindow";
+    assert!(
+        miner_hashrate(&state, stranger).is_none(),
+        "the miner page renders a dash, not 0.00 H/s"
+    );
+    assert_eq!(
+        miner_hashrates(&state, &[stranger.to_string()]),
+        vec![None],
+        "the miners page column dashes the same miner"
+    );
+}
+
+#[tokio::test]
 async fn a_first_visit_gets_a_bare_401() {
     let (state, _store, _metrics) = build_state(Some(("operator", "secret-token")), None).await;
     let (status, _, headers) = get(&state, "/dashboard").await;
