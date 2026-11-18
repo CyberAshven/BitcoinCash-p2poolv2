@@ -1,6 +1,6 @@
 use super::*;
 use crate::node::SwarmSend;
-use crate::node::messages::InventoryMessage;
+use crate::node::messages::{GetShareHeaders, InventoryMessage};
 use crate::node::p2p_message_handlers::receivers::block_receiver::{
     BlockReceiverEvent, create_block_receiver_channel,
 };
@@ -58,8 +58,8 @@ async fn test_handle_request_getheaders() {
     let response_headers = vec![block1.header.clone(), block2.header.clone()];
 
     chain_store_handle
-        .expect_get_headers_for_locator()
-        .returning(move |_, _, _| Ok(response_headers.clone()));
+        .expect_get_headers_after()
+        .returning(move |_, _, _, _| Ok(response_headers.clone()));
 
     chain_store_handle
         .expect_get_template_merkle_branches()
@@ -67,7 +67,11 @@ async fn test_handle_request_getheaders() {
 
     let ctx = RequestContext {
         peer: peer_id,
-        request: Message::GetShareHeaders(block_hashes, stop_block_hash),
+        request: Message::GetShareHeaders(GetShareHeaders::new(
+            block_hashes,
+            stop_block_hash,
+            None,
+        )),
         chain_store_handle,
         response_channel,
         swarm_tx,
@@ -208,8 +212,7 @@ async fn test_handle_request_inventory_for_blocks() {
         panic!("Expected SwarmSend::Response with Ack message");
     }
 
-    if let Some(SwarmSend::Request(sent_peer, Message::GetShareHeaders(_, _))) =
-        swarm_rx.recv().await
+    if let Some(SwarmSend::Request(sent_peer, Message::GetShareHeaders(_))) = swarm_rx.recv().await
     {
         assert_eq!(sent_peer, peer_id);
     } else {
@@ -640,7 +643,14 @@ async fn test_handle_request_share_block_missing_parent_sends_getheaders() {
 
     let getheaders_message = swarm_rx.recv().await.unwrap();
     match getheaders_message {
-        SwarmSend::Request(sent_peer, Message::GetShareHeaders(locator, stop_hash)) => {
+        SwarmSend::Request(
+            sent_peer,
+            Message::GetShareHeaders(GetShareHeaders {
+                locator,
+                stop: stop_hash,
+                ..
+            }),
+        ) => {
             assert_eq!(sent_peer, peer_id);
             assert_eq!(locator, vec![BlockHash::all_zeros()]);
             assert_eq!(stop_hash, BlockHash::all_zeros());

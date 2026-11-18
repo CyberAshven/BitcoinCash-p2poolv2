@@ -50,7 +50,7 @@ use crate::shares::chain::chain_store_handle::ChainStoreHandle;
 use crate::shares::share_block::ShareBlock;
 use crate::shares::transaction_pool::ShareTransactionPool;
 use crate::shares::validation::ShareValidator;
-use behaviour::request_response::protocol_string;
+use behaviour::request_response::network_prologue;
 use behaviour::{P2PoolBehaviour, P2PoolBehaviourEvent};
 use libp2p::PeerId;
 use libp2p::SwarmBuilder;
@@ -244,7 +244,7 @@ impl Node {
             .map_err(|error| -> Box<dyn Error> { error })?
             .block_hash();
         let network_protocol =
-            protocol_string(config.stratum.network, config.stratum.chain, genesis_hash);
+            network_prologue(config.stratum.network, config.stratum.chain, genesis_hash);
         let nostr_seeds =
             nostr_seeds::from_config(&config, &id_keys, &network_protocol)?.map(Arc::new);
 
