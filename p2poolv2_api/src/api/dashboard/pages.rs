@@ -23,6 +23,8 @@ use p2poolv2_lib::node::connection_tracker::{ConnectionDirection, PeerInfoRespon
 use p2poolv2_lib::shares::weak::WEAK_RATIO_UNIT;
 use p2poolv2_lib::store::found_block::EffortSnapshot;
 use serde::Serialize;
+use time::OffsetDateTime;
+use time::macros::format_description;
 
 /// Seconds between refreshes of the overview page while auto is on.
 pub(crate) const OVERVIEW_REFRESH_SECONDS: u32 = 30;
@@ -442,8 +444,14 @@ pub(crate) fn fmt_block_effort(effort: Option<EffortSnapshot>) -> String {
 pub(crate) fn fmt_utc(unix: u64) -> String {
     i64::try_from(unix)
         .ok()
-        .and_then(|seconds| chrono::DateTime::from_timestamp(seconds, 0))
-        .map(|time| time.format("%Y-%m-%d %H:%M UTC").to_string())
+        .and_then(|seconds| OffsetDateTime::from_unix_timestamp(seconds).ok())
+        .and_then(|date_time| {
+            date_time
+                .format(format_description!(
+                    "[year]-[month]-[day] [hour]:[minute] UTC"
+                ))
+                .ok()
+        })
         .unwrap_or_else(|| unix.to_string())
 }
 
@@ -451,8 +459,14 @@ pub(crate) fn fmt_utc(unix: u64) -> String {
 pub(crate) fn fmt_day_time(unix: u64) -> String {
     i64::try_from(unix)
         .ok()
-        .and_then(|seconds| chrono::DateTime::from_timestamp(seconds, 0))
-        .map(|time| time.format("%b %-d %H:%M UTC").to_string())
+        .and_then(|seconds| OffsetDateTime::from_unix_timestamp(seconds).ok())
+        .and_then(|date_time| {
+            date_time
+                .format(format_description!(
+                    "[month repr:short] [day padding:none] [hour]:[minute] UTC"
+                ))
+                .ok()
+        })
         .unwrap_or_else(|| unix.to_string())
 }
 
@@ -460,8 +474,12 @@ pub(crate) fn fmt_day_time(unix: u64) -> String {
 pub(crate) fn fmt_hour_edge(unix: u64) -> String {
     i64::try_from(unix)
         .ok()
-        .and_then(|seconds| chrono::DateTime::from_timestamp(seconds, 0))
-        .map(|time| time.format("%H:%M").to_string())
+        .and_then(|seconds| OffsetDateTime::from_unix_timestamp(seconds).ok())
+        .and_then(|date_time| {
+            date_time
+                .format(format_description!("[hour]:[minute]"))
+                .ok()
+        })
         .unwrap_or_else(|| unix.to_string())
 }
 
