@@ -54,6 +54,7 @@ use crate::sim_overrides;
 use crate::store::writer::StoreError;
 use crate::stratum::work::coinbase::check_bch_coinbase_limit;
 use crate::stratum::work::gbt::compute_merkle_root_from_branches;
+use crate::utils::parallel::try_map_in_parallel;
 use bitcoin::consensus::Encodable;
 use bitcoin::{
     BlockHash, OutPoint, Sequence, Target, Transaction, TxIn, Witness, absolute::LockTime,
@@ -806,18 +807,26 @@ impl DefaultShareValidator {
     /// Runs on a stored body, which passed [`check_weak_shares_match_header`]:
     /// the carrier's weak root fixes every weak share it reads, so a
     /// `Consensus` failure here is a verdict on what the miner carried.
+    ///
+    /// The weak shares' header rules read only the store, each for its own
+    /// weak share, so they run on several threads ([`try_map_in_parallel`]);
+    /// the verdict is the first failing weak share's, in carried order, as
+    /// checking them one by one gives.
     pub(crate) fn validate_carried_weak_headers(
         &self,
         share: &ShareBlock,
         chain_store_handle: &ChainStoreHandle,
     ) -> Result<(), ValidationError> {
-        let mut asking: usize = 0;
-        for weak_share in &share.weak_shares {
+        let weak_targets = try_map_in_parallel(&share.weak_shares, |weak_share| {
             check_carried_weak_time(weak_share.header.time, share.header.time)?;
-            let weak_target =
-                self.validate_weak_share_header_for_target(weak_share, chain_store_handle)?;
-            asking += usize::from(weak_share_asks(&weak_share.header, weak_target));
-        }
+            self.validate_weak_share_header_for_target(weak_share, chain_store_handle)
+        })?;
+        let asking = share
+            .weak_shares
+            .iter()
+            .zip(weak_targets)
+            .filter(|(weak_share, weak_target)| weak_share_asks(&weak_share.header, *weak_target))
+            .count();
         check_weak_asking_matches_header(&share.header, asking)?;
         self.validate_carried_weak_positions(share, chain_store_handle)
     }

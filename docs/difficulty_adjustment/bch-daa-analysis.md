@@ -64,7 +64,7 @@ network. Each table averages 20 seeded runs per rule and scenario.
 | 2. Keep ASERT rather than a window algorithm. The window algorithms recover faster from pauses and cap the bursts when a big miner arrives, but they fall slowly, and can stall for many hours, when hashrate really leaves; upstream's own scores still rank them below ASERT. | In force: share targets are ASERT. |
 | 3. Consider a 300-second half-life (30 share intervals) before mainnet. | Not taken: `HALFLIFE` is still 600 s. Open with item 5. |
 | 4. Do not cap the interval ASERT counts. | Followed: the rule counts the parent's whole interval. |
-| 5. Revisit the half-life with the share interval. | Open ([bch-plan.md, open questions](../bch-plan.md#open-questions)); the share interval is still 10 s. |
+| 5. Revisit the half-life with the share interval. | Open. The plan keeps 10-second shares under one-minute blocks ([decision 11](../bch-plan.md#decisions-so-far)). |
 
 **The 300-second half-life** halves every settling time measured here except
 after a large drop, where the wait for the first share dominates; it halves
@@ -85,7 +85,8 @@ recovery when hashrate really left (3.8 instead of 2.7 hours). A shorter
 half-life gets most of the first without the second
 ([table](#capping-the-interval-asert-counts)).
 
-**The share interval.** Farms switch on wall-clock schedules, so for
+**The share interval.** The plan keeps 10-second shares under
+CHIP-2025-03's one-minute blocks. Farms switch on wall-clock schedules, so for
 switching the half-life matters in seconds; for noise it matters in share
 intervals (`half-life / interval`).
 

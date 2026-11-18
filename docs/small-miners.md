@@ -215,8 +215,8 @@ level draw from about 5% of BCH instead of about 50%; a pool's coinbase holds
 a tenth of the payees, so only a pool under about 0.06% of BCH reaches the
 1 MB coinbase limit ([network simulation](simulation/network-sim.md)); and a
 second of delay in relaying a found block costs ten times the BCH orphan
-risk. The 10-second share period is kept (decision 11 in
-[bch-plan.md](bch-plan.md)).
+risk. `K` = 3, the 14-day cap and the 10-second share period stay with
+faster blocks ([bch-plan.md](bch-plan.md), decision 11).
 
 ## Network size
 

@@ -102,9 +102,9 @@ moves:
 | Up to three uncles, paid nine tenths, the nephew one tenth | `docs/architecture/payout-distribution.md`, `MAX_UNCLES` |
 | Donation 1% by default; window of three blocks' work, at most 120,960 shares, behind a 100-share maturity | `docs/architecture/payout-distribution.md`, `docs/bch-design.md` |
 | Every miner paid directly in the coinbase; a payout tree past 3,072 bytes for token shares | decision 14 in `docs/bch-plan.md` |
-| Share trading tested in-process, not yet through BCHN | `docs/bch-plan.md` |
+| Share trading tested in-process, not yet through BCHN | `docs/atomic-swap/bch-share-trading.md`, "Status and limits" |
 | Stratum ports 3333 and 3336, `p2p=`, share address prefixes | `config.sample.toml`, `docs/bch-quickstart.md` |
-| The dated chipnet and regtest results, and the "Not yet" list | `docs/bch-plan.md`, `docs/bch-design.md` |
+| The dated chipnet and regtest results, and the "Not yet" list | `docs/bch-design.md`, "Open" in `docs/bch-plan.md` |
 | The donation address and its token-aware form; a miner's own donation, 0 to 10%, with `donation=` | `BITCOIN_CASH_DONATION_ADDRESS` in `p2poolv2_config`, `docs/miner-options.md` (the tests check the addresses) |
 
 Keep "Measured" for things that ran, with their dates, and put everything
