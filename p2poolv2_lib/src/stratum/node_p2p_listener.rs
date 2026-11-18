@@ -20,10 +20,10 @@ use bitcoin::p2p::message::{MAX_MSG_SIZE, NetworkMessage, RawNetworkMessage};
 use bitcoin::p2p::message_blockdata::Inventory;
 use bitcoin::p2p::message_network::VersionMessage;
 use bitcoin::p2p::{Magic, ServiceFlags};
-use chrono::Utc;
 use std::io::ErrorKind;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::time::Duration;
+use time::OffsetDateTime;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
@@ -254,7 +254,7 @@ fn version_message() -> VersionMessage {
     VersionMessage {
         version: NODE_PROTOCOL_VERSION,
         services: ServiceFlags::NONE,
-        timestamp: Utc::now().timestamp(),
+        timestamp: OffsetDateTime::now_utc().unix_timestamp(),
         receiver: unspecified.clone(),
         sender: unspecified,
         // Only compared with the node's own nonces, to find a connection to

@@ -20,7 +20,8 @@ dist = false
 [dependencies]
 bitcoin = { workspace = true }
 bitcoindrpc = { workspace = true }
-chrono = { workspace = true }
+# local-offset: the tools print the computer's own time, as the scripts' date did.
+time = { workspace = true, features = ["local-offset"] }
 clap = { workspace = true }
 glob = "0.3"
 memchr = "2"

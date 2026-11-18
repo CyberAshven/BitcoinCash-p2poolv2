@@ -9,9 +9,10 @@
 //! compare timestamps with each other, so they are kept as microseconds
 //! since the Unix epoch.
 
-use chrono::NaiveDateTime;
 use regex::Regex;
 use std::sync::LazyLock;
+use time::PrimitiveDateTime;
+use time::macros::format_description;
 
 static TIMESTAMP: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+)").expect("valid regex")
@@ -21,7 +22,11 @@ static TIMESTAMP: LazyLock<Regex> = LazyLock::new(|| {
 /// timestamp without a zone. Digits past the sixth are dropped, not rounded.
 pub fn parse_micros(text: &str) -> Option<i64> {
     let (seconds_part, fraction) = text.split_once('.')?;
-    let whole = NaiveDateTime::parse_from_str(seconds_part, "%Y-%m-%dT%H:%M:%S").ok()?;
+    let whole = PrimitiveDateTime::parse(
+        seconds_part,
+        format_description!("[year]-[month]-[day]T[hour]:[minute]:[second]"),
+    )
+    .ok()?;
     if fraction.is_empty() || !fraction.bytes().all(|byte| byte.is_ascii_digit()) {
         return None;
     }
@@ -31,8 +36,8 @@ pub fn parse_micros(text: &str) -> Option<i64> {
         .take(6)
         .fold(0i64, |total, digit| total * 10 + i64::from(digit - b'0'));
     whole
-        .and_utc()
-        .timestamp()
+        .assume_utc()
+        .unix_timestamp()
         .checked_mul(1_000_000)?
         .checked_add(micros)
 }

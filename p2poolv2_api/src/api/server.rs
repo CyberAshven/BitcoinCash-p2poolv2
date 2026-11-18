@@ -15,7 +15,6 @@ use axum::{
     response::{Redirect, Response},
     routing::{delete, get, post},
 };
-use chrono::DateTime;
 use p2poolv2_lib::accounting::payout::sharechain_pplns::PplnsWindow;
 use p2poolv2_lib::accounting::stats::prom::escape_label_value;
 use p2poolv2_lib::address::bch_share::BchShareNetwork;
@@ -36,6 +35,8 @@ use std::path::PathBuf;
 use std::sync::RwLock;
 use std::time::Duration;
 use std::{net::SocketAddr, sync::Arc};
+use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
 use tokio::sync::oneshot;
 use tower_http::compression::CompressionLayer;
 use tower_http::cors::CorsLayer;
@@ -633,8 +634,8 @@ async fn pplns_shares(
 
     // Convert ISO 8601 strings to Unix timestamps
     let start_time = match query.start_time.as_ref() {
-        Some(s) => match DateTime::parse_from_rfc3339(s) {
-            Ok(dt) => dt.timestamp() as u64,
+        Some(s) => match OffsetDateTime::parse(s, &Rfc3339) {
+            Ok(dt) => dt.unix_timestamp() as u64,
             Err(_) => {
                 return Err(ApiError::BadRequest(
                     "Invalid start_time format, expected RFC 3339".into(),
@@ -645,8 +646,8 @@ async fn pplns_shares(
     };
 
     let end_time = match query.end_time.as_ref() {
-        Some(s) => match DateTime::parse_from_rfc3339(s) {
-            Ok(dt) => dt.timestamp() as u64,
+        Some(s) => match OffsetDateTime::parse(s, &Rfc3339) {
+            Ok(dt) => dt.unix_timestamp() as u64,
             Err(_) => {
                 return Err(ApiError::BadRequest(
                     "Invalid end_time format, expected RFC 3339".into(),
@@ -655,8 +656,8 @@ async fn pplns_shares(
         },
         None => {
             // Default to current time
-            let now = chrono::Utc::now();
-            now.timestamp() as u64
+            let now = OffsetDateTime::now_utc();
+            now.unix_timestamp() as u64
         }
     };
 
