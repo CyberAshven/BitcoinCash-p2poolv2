@@ -222,9 +222,7 @@ impl std::error::Error for BandError {}
 /// The target the share's node wanted, `wanted_bits`, is a signal only and
 /// makes no share invalid: harder than the cap allows it moves the next
 /// share's cap up, and easier than the share's own target it asks for an
-/// easier weak target (`shares::weak::weak_share_asks`). Until 2026-11-15 it
-/// had to be at least as hard as the share's own target
-/// (`BCH_WEAK_SHARE_RULE_TAG`).
+/// easier weak target (`shares::weak::weak_share_asks`).
 ///
 /// The share's weak ratio, the second state each Bitcoin Cash share carries
 /// from its parent's header, must likewise be one step from the parent's
