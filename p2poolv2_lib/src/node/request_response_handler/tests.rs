@@ -81,6 +81,7 @@ fn build_test_handler_parts(
         share_relay: Default::default(),
         share_transaction_pool: None,
         weak_share_tx: None,
+        coinbase_rebuilder: None,
     };
     (handler, response_worker_rx)
 }

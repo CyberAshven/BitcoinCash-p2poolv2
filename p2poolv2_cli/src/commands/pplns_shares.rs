@@ -3,9 +3,10 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 use crate::commands::api_client::ApiClient;
-use chrono::DateTime;
 use p2poolv2_lib::config::ApiConfig;
 use std::error::Error;
+use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
 
 /// Execute the pplns-shares command by querying the running node's API.
 pub async fn execute(
@@ -19,22 +20,30 @@ pub async fn execute(
     let mut path = format!("/pplns_shares?limit={limit}");
 
     if let Some(timestamp) = start_time {
-        let rfc3339 = DateTime::from_timestamp(timestamp as i64, 0)
-            .ok_or_else(|| format!("Invalid start_time timestamp: {timestamp}"))?
-            .to_rfc3339();
+        let rfc3339 = rfc3339(timestamp)
+            .ok_or_else(|| format!("Invalid start_time timestamp: {timestamp}"))?;
         path.push_str(&format!("&start_time={rfc3339}"));
     }
 
     if let Some(timestamp) = end_time {
-        let rfc3339 = DateTime::from_timestamp(timestamp as i64, 0)
-            .ok_or_else(|| format!("Invalid end_time timestamp: {timestamp}"))?
-            .to_rfc3339();
+        let rfc3339 =
+            rfc3339(timestamp).ok_or_else(|| format!("Invalid end_time timestamp: {timestamp}"))?;
         path.push_str(&format!("&end_time={rfc3339}"));
     }
 
     let response: serde_json::Value = api_client.get_json(&path).await?;
     println!("{}", serde_json::to_string_pretty(&response)?);
     Ok(())
+}
+
+/// `timestamp`, in Unix seconds, as an RFC 3339 time in UTC, such as
+/// `2025-10-17T19:40:00Z`. `None` when it is past the year 9999.
+fn rfc3339(timestamp: u64) -> Option<String> {
+    let seconds = i64::try_from(timestamp).ok()?;
+    OffsetDateTime::from_unix_timestamp(seconds)
+        .ok()?
+        .format(&Rfc3339)
+        .ok()
 }
 
 #[cfg(test)]
@@ -77,17 +86,29 @@ mod tests {
     async fn test_execute_with_start_and_end_time() {
         let mock_server = MockServer::start().await;
 
+        // The times reach the API as RFC 3339 in UTC, ending in `Z`.
         Mock::given(method("GET"))
             .and(path("/pplns_shares"))
+            .and(query_param("start_time", "2023-11-14T22:13:20Z"))
+            .and(query_param("end_time", "2023-11-16T02:00:00Z"))
             .respond_with(ResponseTemplate::new(200).set_body_raw(r#"[]"#, "application/json"))
             .expect(1)
             .mount(&mock_server)
             .await;
 
         let api_config = make_api_config(mock_server.address().port());
-        // 1700000000 -> 2023-11-14T22:13:20+00:00
         let result = execute(&api_config, 10, Some(1_700_000_000), Some(1_700_100_000)).await;
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_execute_refuses_a_time_past_the_year_9999() {
+        let api_config = make_api_config(19997);
+        let error = execute(&api_config, 10, Some(u64::MAX), None)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("Invalid start_time timestamp"), "{error}");
     }
 
     #[tokio::test]

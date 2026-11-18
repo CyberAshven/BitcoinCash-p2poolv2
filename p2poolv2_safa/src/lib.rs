@@ -29,14 +29,21 @@ pub const REWARD_DIVISOR: u64 = 420_000;
 pub const OUTPUT_SATS: u64 = 800;
 /// Split payouts below this AMM value remain with the miner.
 pub const MIN_SHARE_SATS: u64 = 1_000;
-pub const EASE_CAP: u32 = 288;
+/// A claim's target eases by at most this many ticks since the thread's
+/// state: 288 ten-minute blocks, two days (CHIP-2025-03 counts block time in
+/// ticks, 600 a ten-minute block and 60 a one-minute one).
+pub const EASE_CAP_TICKS: u64 = 288 * 600;
 /// The fewest threads a deployment may have. A thread takes at most one
-/// claim per block, so the blocks since its last claim are at least 1, and
-/// with one thread the easing factor `min(dh, 288) * 5000 / threads + 5000`
-/// is then at least 10000: the target could ease but never harden.
+/// claim per block, so on ten-minute blocks the ticks since its last claim
+/// are at least 600, and with one thread the easing factor
+/// `min(dt, 172800) * 5000 / (threads * 600) + 5000` is then at least 10000:
+/// the target could ease but never harden. (Claims a one-minute block apart
+/// harden it even with one thread, ×0.55; the minimum stays 2.)
 pub const MIN_THREADS: u32 = 2;
 pub const MAX_THREADS: u32 = 63;
-pub const FALLBACK_DELTA: u32 = 4_032;
+/// The fallback band applies from this many ticks after the state's block:
+/// 4,032 ten-minute blocks, four weeks.
+pub const FALLBACK_TICKS: u64 = 4_032 * 600;
 pub const MAX_PAYOUT_SCRIPT_BYTES: usize = 35;
 pub const MAX_TREE_HEIGHT: u8 = 16;
 pub const MAX_COINBASE_BRANCH: usize = 25;

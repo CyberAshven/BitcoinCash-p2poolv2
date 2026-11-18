@@ -5,6 +5,7 @@
 use bitcoin::absolute::Time;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
+use time::macros::format_description;
 
 /// Trait to get current system time, allowing for mocking in tests
 #[allow(dead_code)]
@@ -75,8 +76,16 @@ impl TimeProvider for TestTimeProvider {
 
 /// Formats a Unix timestamp into a human-readable string
 pub fn format_timestamp(timestamp: u64) -> String {
-    chrono::DateTime::from_timestamp(timestamp as i64, 0)
-        .map(|dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+    i64::try_from(timestamp)
+        .ok()
+        .and_then(|seconds| time::OffsetDateTime::from_unix_timestamp(seconds).ok())
+        .and_then(|date_time| {
+            date_time
+                .format(format_description!(
+                    "[year]-[month]-[day] [hour]:[minute]:[second] UTC"
+                ))
+                .ok()
+        })
         .unwrap_or_else(|| "Invalid timestamp".to_string())
 }
 
@@ -84,6 +93,13 @@ pub fn format_timestamp(timestamp: u64) -> String {
 mod test {
     use super::*;
     use std::time::{Duration, UNIX_EPOCH};
+
+    #[test]
+    fn test_format_timestamp_is_utc_to_the_second() {
+        assert_eq!(format_timestamp(1_700_000_000), "2023-11-14 22:13:20 UTC");
+        assert_eq!(format_timestamp(0), "1970-01-01 00:00:00 UTC");
+        assert_eq!(format_timestamp(u64::MAX), "Invalid timestamp");
+    }
 
     #[test]
     fn test_mock_time_provider() {

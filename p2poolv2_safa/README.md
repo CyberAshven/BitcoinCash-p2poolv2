@@ -5,7 +5,8 @@ a token whose threads are mined by any SHA-256 work that meets the token's
 target, proved with the merge-mining common format v2 that BCH P2Pool and
 Pickaxe agreed (Pickaxe PR #70, `docs/merge-mining.md`, and
 [`docs/bch-auxpow.md`](../docs/bch-auxpow.md)). It is a reference
-covenant, not the author's token; tSAFA is deployed on chipnet below. A focused
+covenant, not the author's token; tSAFA was deployed on chipnet below with
+an earlier covenant, from before chipnet's one-minute blocks. A focused
 independent review found the ASERT-band and thread-count issues fixed
 below; a complete independent review remains open.
 
@@ -24,25 +25,27 @@ cargo safa params deployment.json
 | File | What it is |
 |---|---|
 | `safa.cash` | The covenant in CashASM, with per-deployment placeholders |
-| `src/covenant.rs` | Network parameters; compiles a deployment and finds its fee constant K |
-| `src/targets.rs` | Token targets, BCHN's compact nBits and aserti3-2d, the bands and the DAA |
+| `src/covenant.rs` | Network parameters and pinned block-interval switch; compiles a deployment and finds its fee constant K |
+| `src/targets.rs` | Token targets, BCHN's compact nBits and aserti3-2d with CHIP-2025-03's ticks, the bands and the DAA |
 | `src/codec.rs` | Thread state, leaves, slots, trees, output 0, splits and `AuxProof` v2 |
 | `src/transaction.rs` | Leaves, claims and the genesis as transactions, and the VM check |
 | `src/cli.rs`, `src/main.rs` | The `safa` command line; it never signs |
 | `src/claimer/` | Operator-side chain following, win journal and verified claim broadcasts |
 | `tests/` | The tests, all in libauth-rs's standard BCH 2026 VM |
-| `test_data/` | The tSAFA fixtures and the recorded parity cases |
+| `test_data/` | The tSAFA fixtures, the recorded command cases, and the record and live wins of the 2026-10-29 chipnet deployment |
 
 ## Threads and their state
 
 A deployment has 2 to 63 `threads` vaults. Compilation and the genesis
 command reject 1, and 64 or more. A thread takes at most one claim per
-block, so with one thread the easing factor is never below 1 and the
+block, so on ten-minute blocks a claim is at least 600 ticks after the
+last, and with one thread the easing factor is then never below 1 and the
 target could never harden: a claim in the block after the last keeps it
-(×1), while 2 threads harden it ×0.75 and 4 threads ×0.625. With 288
-threads the capped easing factor never exceeds 1, so a hardened vault
-cannot recover; the stricter 63-thread maximum leaves room for recovery
-before the 288-block cap. Each vault is
+(×1), while 2 threads harden it ×0.75 and 4 threads ×0.625 (on one-minute
+blocks a claim in the next block hardens more: ×0.55, ×0.525 and
+×0.5125). With 288 threads the capped easing factor never exceeds 1, so a
+hardened vault cannot recover; the stricter 63-thread maximum leaves room
+for recovery before the cap of 288 ten-minute blocks' worth of ticks. Each vault is
 a P2SH32 output of the covenant holding fungible tokens, satoshis, and one
 mutable NFT of the token category whose 16-byte commitment is the thread's
 state:
@@ -69,14 +72,25 @@ cb_branch`, `h ≤ 16`, `d ≤ 25`, nothing trailing). The covenant:
 
 1. reads the BIP34 height `H` from the fixed-shape coinbase head (a minimal,
    positive push of 1 to 5 bytes), requires `H < 500,000,000` and runs
-   `<H> OP_CHECKLOCKTIMEVERIFY`, so the claim's lock time is a block height
-   at or above `H` and the coinbase cannot claim a height the chain has not
-   reached. It requires `state_height < H`, so a height is never reused;
-2. eases the state's target by the blocks since the last claim, the SAFA
-   draft's DAA with its age capped at 288 blocks:
-   `target × (⌊min(H − state_height, 288) × 5000 / threads⌋ + 5000) / 10000`,
+   `<L> OP_CHECKLOCKTIMEVERIFY` with `L` the lock height of block `H`, so
+   the coinbase cannot claim a height the chain has not reached. A Bitcoin
+   Cash lock height counts units of 600 ticks (CHIP-2025-03): a transaction
+   locked to `L` is final in the first block whose ticks pass `600 × L`.
+   `L` is block `H`'s ticks in those units, rounded up, by the pinned
+   switch: `H` itself up to the switch block, and one more unit for every
+   ten one-minute blocks after it. A claim is therefore never final in its
+   coinbase's own block or before it, and is final at most ten one-minute
+   blocks after it. It requires `state_height < H`, so a height is never
+   reused;
+2. eases the state's target by the chain time since the last claim, the
+   SAFA draft's DAA counted in ticks with its age capped at 288 ten-minute
+   blocks' worth: with `dt` the ticks from block `state_height` to block
+   `H` by the pinned switch,
+   `target × (⌊min(dt, 172,800) × 5000 / (threads × 600)⌋ + 5000) / 10000`,
    clamped to 1 and `0x7fffff << 232`, rounded down to canonical token
-   bits (`3 ≤ exp ≤ 32`, `0 < mantissa < 0x800000`). These bits are the
+   bits (`3 ≤ exp ≤ 32`, `0 < mantissa < 0x800000`). While blocks are ten
+   minutes `dt` is `600 × (H − state_height)` and this is the draft's
+   `⌊min(H − state_height, 288) × 5000 / threads⌋`. These bits are the
    claim's target and the next state's;
 3. rebuilds the 169-byte leaf from introspection: the category (wire
    order), `HASH256` of the vault's locking bytecode, `HASH256` of its
@@ -90,9 +104,20 @@ cb_branch`, `h ≤ 16`, `d ≤ 25`, nothing trailing). The covenant:
    `HASH256(header)`, read as an unsigned number, to be at most the claim's
    target. The header's own nBits never set the token's target;
 5. checks the header's nBits against BCH's aserti3-2d at `H`, as BCHN's
-   `CalculateASERT` computes it (a truncating division for the exponent, a
-   flooring shift for its integer part, BCHN's cubic, then the clamps), the
-   header's time standing in for its parent's:
+   `CalculateASERT` computes it with CHIP-2025-03's ticks (a truncating
+   division for the exponent, a flooring shift for its integer part, BCHN's
+   cubic, the ratio of the anchor block's 600-tick interval to the header's,
+   then the clamps), the header's time standing in for its parent's:
+   - the parent's ticks and the header's interval come from the network's
+     switch to shorter blocks, pinned to the block it follows as P2Pool's
+     header gate pins it (`TickSchedule` in `p2poolv2_lib`): a block has 600
+     ticks up to the switch block and the switch's interval after it, and a
+     header is one of the shorter blocks once its parent is the switch block
+     or a later one. Chipnet: after block 332,450, 60 ticks, so a one-minute
+     header's target is ten times easier. Mainnet switches at median time
+     past 1,810,382,400 (2027-05-15); its block is not known, so none is
+     pinned and every block counts 600 ticks
+     ([one-minute blocks](#one-minute-blocks-chip-2025-03) below);
    - mainnet: `computed / 2 ≤ target ≤ computed × 1.05`;
    - chipnet: `computed / 8 ≤ target ≤ computed × 8`, or nBits exactly
      the proof-of-work limit's `0x1d00ffff`;
@@ -101,13 +126,13 @@ cb_branch`, `h ≤ 16`, `d ≤ 25`, nothing trailing). The covenant:
      / 1,605,451,779 / 3,600 s. Chipnet needs the wider easy side because
      the header's timestamp may precede its parent's by hours; two hours
      span two chipnet half-lives. Mainnet keeps its original band;
-   - the DAA-change fallback: once `H − state_height ≥ 4,032`, a header
-     that fails the band is also accepted when
-     `ref >> 4 ≤ target ≤ ref × 1.1`, `ref` being the state's `ref_bits`:
-     four doublings on the hard side and ×1.1 on the easy side, as
-     `docs/merge-mining.md` says. Its `min(⌊Δh / 288⌋, 4)` is always 4 from
-     `Δh = 4,032` (where `⌊Δh / 288⌋` is already 14), so the covenant shifts
-     by a constant 4;
+   - the DAA-change fallback: once `dt ≥ 2,419,200` ticks (4,032
+     ten-minute blocks' worth, four weeks), a header that fails the band is
+     also accepted when `ref >> 4 ≤ target ≤ ref × 1.1`, `ref` being the
+     state's `ref_bits`: four doublings on the hard side and ×1.1 on the
+     easy side, as `docs/merge-mining.md` says. Its `min(⌊Δh / 288⌋, 4)` is
+     always 4 from `Δh = 4,032` (where `⌊Δh / 288⌋` is already 14), so the
+     covenant shifts by a constant 4;
 6. writes the next state: the same thread, `H`, the claim's target bits and
    the header's nBits;
 7. pays the reward `R = ⌊vault tokens / 420,000⌋` (above 0); the vault
@@ -146,24 +171,26 @@ mined for that state still claims afterwards.
 
 ## Measured size and cost
 
-Measured by `tests/claims.rs` in the standard VM (chipnet, 4 threads); the
-Node tool measured the same values with JavaScript Libauth, and the tests
-pin them:
+Measured by `tests/claims.rs` in the standard VM (chipnet, 4 threads), and
+the tests pin them. Counting ticks, in the band, the lock height, the
+easing and the fallback, added 73 bytes to the redeem script and about
+8,500 to a claim's operation cost; the Node tool had measured the values
+before that with JavaScript Libauth, and the Rust VM gave the same:
 
 | Claim | Unlocking bytes | Op-cost / limit | Hash iterations / limit |
 |---|---|---|---|
-| `h` 0, `d` 0, no split | 1,595 | 121,745 / 1,308,800 | 40 / 818 |
-| `h` 1, `d` 1, split | 1,729 | 136,035 / 1,416,000 | 53 / 885 |
-| `h` 16, `d` 25, split | 2,977 | 257,638 / 2,414,400 | 153 / 1,509 |
-| `h` 16, `d` 25, split, fallback band | 2,977 | 267,247 / 2,414,400 | 153 / 1,509 |
-| `h` 16, `d` 25, split, 10,000-byte unlock | 10,000 | 370,058 / 8,032,800 | 263 / 5,020 |
+| `h` 0, `d` 0, no split | 1,668 | 130,270 / 1,367,200 | 41 / 854 |
+| `h` 1, `d` 1, split | 1,802 | 144,561 / 1,474,400 | 54 / 921 |
+| `h` 16, `d` 25, split | 3,050 | 266,164 / 2,472,800 | 154 / 1,545 |
+| `h` 16, `d` 25, split, fallback band | 3,050 | 275,774 / 2,472,800 | 154 / 1,545 |
+| `h` 16, `d` 25, split, 10,000-byte unlock | 10,000 | 377,444 / 8,032,800 | 263 / 5,020 |
 
-The redeem script is 1,364 bytes on chipnet and 1,363 on mainnet (with 4
-threads and 84,000,000,000 virtual satoshis; it varies by a few bytes with
-the constants), so K is 1,944 and 1,943. The worst case uses 11.1% of the
-operation-cost limit and 10.1% of the hashing limit. The largest coinbase a
+The redeem script is 1,437 bytes on chipnet and on mainnet (with 4 threads
+and 84,000,000,000 virtual satoshis; it varies by a few bytes with the
+constants), so K is 2,017. The worst case uses 11.2% of the
+operation-cost limit and 10.0% of the hashing limit. The largest coinbase a
 claim can carry is the 10,000-byte unlocking limit less the redeem script,
-the other pushes and the proof's other parts: 7,173 bytes at the deepest
+the other pushes and the proof's other parts: 7,100 bytes at the deepest
 branches (`h` 16, `d` 25), measured. P2Pool's token shares keep the
 coinbase within 3,072 bytes.
 
@@ -182,7 +209,23 @@ coinbase within 3,072 bytes.
   real header pairs, chipnet block 329,001's nBits with a timestamp two
   hours before its parent, the exact x8 and x8 + 1 boundaries, unchanged
   mainnet edges, invalid nBits, heights below the anchor, Bitcoin nBits
-  and the fallback band.
+  and the fallback band. For one-minute blocks: CHIP-2025-03's 45 ASERT
+  vectors and 10 end-to-end rows (vendored in `p2poolv2_lib`), the real
+  chipnet blocks 332,439 to 332,460 around the activation (each passes the
+  band at its own time and carries the nBits Function 6 computes from its
+  parent), the band's edges on a one-minute block, a mainnet covenant with
+  a switch pinned, and the covenant deployed on 2026-10-29 run on the same
+  blocks: it refuses every one after 332,451 that is not a
+  minimum-difficulty block.
+- **Against P2Pool's header gate** (`p2poolv2_lib`,
+  `shares/bch_asert/tests.rs`): the compiled Function 7 in the VM, the Rust
+  model and `BchAsert::check_header_bits` without a known parent give one
+  verdict around both edges of both networks' bands, on those 22 chipnet
+  blocks dated from two hours before to two hours after their own time, and
+  on a mainnet with a switch pinned in both; and the covenant's parameters
+  are the gate's, pinned switch included. The covenant's lock heights, run
+  in the VM, are checked against the schedule's own rule for when a lock
+  height is final.
 - **Claims and attacks** (`tests/claims.rs`): whole claims with and without
   a split, a whole donation, a dropped donation, the deepest proof and a
   10,000-byte unlock, on chipnet and mainnet. Refused: redirected payouts
@@ -193,12 +236,30 @@ coinbase within 3,072 bytes.
   domain, a time-domain coinbase height, fee overpay above `3S` or under
   `S`, a vault left under 800 satoshis, a 36-byte payout script, a wrong
   next state, an easier target in the leaf, and a fallback claim one block
-  early or just harder than `ref >> 4`; and the VM cost above.
+  early or just harder than `ref >> 4`; and the VM cost above. Whole claims
+  on chipnet's blocks 332,450, 332,452 and 332,460 pass; the covenant
+  deployed on 2026-10-29 takes the first and refuses the other two. A
+  claim on block 332,460 locks to 332,451, passes with a later lock and is
+  refused one unit early; block 332,461 needs 332,452. After the switch the
+  target eases by ticks: one, ten and forty one-minute blocks after the
+  state, across the switch, at the 172,800-tick cap and far past it, and a
+  leaf eased by blocks instead is refused; the fallback opens 40,320
+  one-minute blocks after the state and not one block sooner, nor after
+  4,032 of them.
+- **Lock heights** (`tests/lock.rs`): Function 21 and the Rust model on
+  heights around chipnet's switch and far past it: the block's ticks in
+  600-tick units, rounded up; final after the coinbase's block and within
+  ten blocks of it, with every wait from one to ten occurring; the block
+  height itself on mainnet; what locking to the block height cost (the
+  table below); and the highest coinbase height the claimer may try at a
+  tip.
 - **Command line** (`tests/cli.rs`, `tests/fixture.rs`): every command,
-  the recorded parity cases (`test_data/parity/cases.json`, what the Node
-  tool printed; `params-two-threads-zero` was regenerated by the Rust CLI,
-  as its note says), thread-count refusals and byte-for-byte fixture
-  reproduction. The printed claim and both four-thread and 63-thread
+  the recorded cases (`test_data/parity/cases.json`), thread-count refusals
+  and byte-for-byte fixture reproduction. The cases were what the Node tool
+  printed; they carry the covenant's bytes, so the Rust CLI regenerated
+  them when the covenant began to count ticks, as their notes say, and they
+  now hold the tool to its own recorded output
+  ([fixtures](#fixtures-and-the-covenants-bytes)). The printed claim and both four-thread and 63-thread
   genesis transactions are decoded and checked in the standard VM. Genesis
   uses an `OP_1` funding-script stand-in for the owner's signed input.
 - **Against P2Pool's Rust side**, checked once by hand on 2026-10-24: for a
@@ -231,11 +292,14 @@ cargo safa claimer claimer.json               # follow a vault and claim pool wi
 `split` is optional: `{"donation_bps","donation_script","fee_bps","fee_script"}`.
 Its `token` object is the JSON that `p2poolv2_cli bch-auxpow build` and
 `verify` read. The target eases with the height, so a miner asks for the
-leaf of the height it mines.
+leaf of the height it mines; `height_delta` and `tick_delta` are the
+blocks and the ticks since the state that it eased by.
 
 `claim` takes `{"outpoint":{"txid","vout"},"vault":{"value_sats","token_amount","commitment"},"payout_script","split","proof","fee_rate","locktime"}`
 (`fee_rate` 1 to 3, default 1; `locktime` defaults to the coinbase
-height). It refuses a claim the covenant would refuse. The transaction needs
+block's lock height, which is the lowest the covenant takes: the block
+height while blocks are ten minutes, see
+[one-minute blocks](#one-minute-blocks-chip-2025-03)). It refuses a claim the covenant would refuse. The transaction needs
 no signature; whoever broadcasts it decides when.
 
 ## Claimer
@@ -309,8 +373,11 @@ outpoint without changing the commitment. An unseen spender is polled
 again. The mempool and block scan is practical for chipnet; scanning the
 larger mainnet mempool and blocks costs more.
 
-Only proof coinbase heights `H` above the current state height and at or
-below the chain tip are considered, oldest height first. The leaf binds
+Only proof coinbase heights `H` above the current state height whose
+claim is final in the next block are considered, oldest height first: at or
+below the chain tip while blocks are ten minutes, and up to nine blocks
+below it on one-minute blocks, where a claim's lock height opens one to ten
+blocks after its coinbase's block. The leaf binds
 `HASH256` of the exact 16-byte commitment. A proof for another state fails
 the builder or VM and is journaled as dropped, never retried. Wins made
 obsolete by a newer state are dropped too. A win's random delay is chosen
@@ -360,13 +427,144 @@ Mainnet uses the same command and code. Supply a mainnet `deployment.json`
 and corresponding vault, token file, recipients, node and fresh journal
 in the config; no chipnet deployment or outpoint is built into the claimer.
 The unchanged public live-win fixture `test_data/tsafa-live-win.jsonl`
-is exercised offline against the deployed tSAFA parameters in nextest.
+is exercised offline in nextest against the covenant deployed on chipnet on
+2026-10-29, read back from its recorded redeem script
+([fixtures](#fixtures-and-the-covenants-bytes)).
+
+## One-minute blocks (CHIP-2025-03)
+
+Bitcoin Cash counts block time in ticks: a block's ticks are the sum of the
+target intervals of the blocks up to it, 600 a block until a network
+switches to shorter blocks. ASERT reads the parent's ticks less the
+anchor's and the new block's interval, and makes a one-minute block's
+target ten times easier. Chipnet switched after block 332,450 (2026-11-15);
+mainnet switches at median time past 1,810,382,400 (2027-05-15 12:00 UTC).
+
+A covenant sees one header, so it cannot work out a median time past. It
+is compiled with the switch pinned to its block, the same pin P2Pool's
+header gate uses for a header whose parent it does not know, and its band
+is the gate's, number for number (`p2poolv2_lib` compares them in the VM).
+A token share P2Pool accepts therefore passes the covenant's band.
+
+What follows from compiling the pin in:
+
+- **A deployed covenant keeps the pins it was compiled with.** A switch
+  that happens after a deployment is not in it: from that block its ASERT
+  target is ten times too hard, mainnet's band (×1.05 on the easy side)
+  refuses every real header, and the fallback band (`ref × 1.1`) does not
+  admit a tenfold easier target either. A covenant has to be deployed
+  after the network's switch block is known and pinned.
+- **Mainnet has no pin yet**, here or in P2Pool's gate, because its switch
+  block does not exist yet. A mainnet covenant compiled today counts every
+  block as ten minutes and stops accepting claims at the switch. `genesis`
+  refuses mainnet. Pinning the block is a share-chain rule change in
+  P2Pool (a new protocol segment) and a new covenant here, in one change;
+  a test fails if one side pins a switch the other does not.
+- **The 2026-10-29 chipnet deployment** has the covenant from before:
+  every block ten minutes. It accepts chipnet's real blocks up to 332,451
+  and, after that, only minimum-difficulty blocks (nBits `1d00ffff`):
+
+  | Chipnet block | nBits | Its ASERT at the block's own time | | This covenant's | |
+  |---|---|---|---|---|---|
+  | 332,450 | `1a1a55f5` | `1a1a7bb5` | accepts | `1a1a7bb5` | accepts |
+  | 332,451 | `1d00ffff` | `1a185477` | accepts (limit) | `1b00f34c` | accepts |
+  | 332,452 | `1b00f080` | `1a15f05a` | refuses | `1b00f370` | accepts |
+  | 332,453 | `1b00f0a4` | `1a13b68c` | refuses | `1b00f2b0` | accepts |
+  | 332,455 | `1b00f2e0` | `1a0fc310` | refuses | `1b00eee2` | accepts |
+  | 332,460 | `1b00ebf4` | `1a095266` | refuses | `1b00ed99` | accepts |
+
+  Its target falls behind by 540 seconds a block, a factor of two every
+  6.7 blocks on chipnet's one-hour half-life. `cargo safa` now compiles
+  another covenant for the same parameters (another address), so it no
+  longer serves those vaults; chipnet needs a new deployment.
+
+**The lock time** counts ticks too. CHIP-2025-03 makes a transaction with
+lock height `L` final in the first block whose ticks pass `600 × L`. The
+claim used to run `<H> OP_CHECKLOCKTIMEVERIFY` with the coinbase's block
+height. After a switch, block heights run ahead of ticks / 600, so such a
+claim on a coinbase at height `H` above the switch block `S` is not final
+before block `S + 10 × (H − S) + 1`: nine more blocks of waiting for every
+block past the switch, without bound. The claim now locks to block `H`'s
+ticks in 600-tick units, rounded up (Function 21), from the same pin:
+
+| Coinbase at chipnet block | Locked to its height: lock, first block it is final in | | Locked to its ticks: lock, first block | |
+|---|---|---|---|---|
+| 332,450 | 332,450 | 332,451 | 332,450 | 332,451 |
+| 332,451 | 332,451 | 332,461 | 332,451 | 332,461 |
+| 332,452 | 332,452 | 332,471 | 332,451 | 332,461 |
+| 332,460 | 332,460 | 332,551 | 332,451 | 332,461 |
+| 332,461 | 332,461 | 332,561 | 332,452 | 332,471 |
+| 333,800 | 333,800 | 345,951 | 332,585 | 333,801 |
+| 340,000 | 340,000 | 407,951 | 333,205 | 340,001 |
+
+Rounding up keeps a claim out of its coinbase's own block and every block
+before it; the wait is one to ten one-minute blocks, depending on where the
+block falls in its 600-tick unit (rounding down would let a claim in up to
+nine blocks before its coinbase's block). The builder sets this lock
+height, and the claimer tries a win once that lock is final in the next
+block, by the same pin. P2Pool's tests check the covenant's lock heights
+against its own rule for when a lock height is final
+(`TickSchedule::first_block_after_lock_height`).
+
+**The easing and the fallback** count ticks as well. The SAFA draft eased
+the target by the blocks since the last claim, capped at 288, and opened
+the fallback band after 4,032 blocks. Counted in blocks, a one-minute
+block would ease the target as much as a ten-minute one, so claims, and the
+token's emission, would run ten times faster in wall time, and the fallback
+would open after under three days instead of four weeks. Both now count
+the ticks from the state's block to the coinbase's, by the same pin:
+
+| | Ten-minute blocks | One-minute blocks, counted in blocks (before) | One-minute blocks, counted in ticks (now) |
+|---|---|---|---|
+| Ease of a claim one block after the last, 4 threads | ×0.625 | ×0.625 | ×0.5125 |
+| Target holds still at one claim per thread every | 4 blocks, 40 minutes | 4 blocks, 4 minutes | 40 blocks, 40 minutes |
+| Ease reaches its cap after | 288 blocks, 2 days | 288 blocks, 4.8 hours | 2,880 blocks, 2 days |
+| Fallback band opens after | 4,032 blocks, 28 days | 4,032 blocks, 2.8 days | 40,320 blocks, 28 days |
+
+While blocks are ten minutes a block is 600 ticks and every target is
+the draft's, integer for integer: the regenerated fixtures before
+chipnet's switch keep their targets. P2Pool's token jobs ease the leaf
+target the same way, counting by the network's pins
+(`stratum::work::merge_tokens`).
+
+A thread still takes one claim per block: a height is never claimed
+twice. That rule is what stops a proof being replayed; the rate of claims
+is the easing's to set, and it now hardens a claim one minute after the
+last more than one ten minutes after it.
+
+## Fixtures and the covenant's bytes
+
+Every change to `safa.cash` or to a network's parameters changes the
+redeem script, and with it the address, `lock_hash`, every leaf and every
+proof. Three kinds of fixture pin those bytes:
+
+| Fixture | What it is | When the covenant changes |
+|---|---|---|
+| `tsafa-chipnet-fixture.json`, `tsafa-chipnet-claim.json`, `tsafa-chipnet-claim-result.json`, `parity/cases.json` | Synthetic: a placeholder category, a proof mined in the test at an easy token target, and what the commands print | Regenerated offline: `cargo test -p p2poolv2_safa --test fixture -- --ignored regenerate_recorded_fixtures`, then review the difference |
+| `tsafa-chipnet-deployed-2026-10-29.json` | The record of the deployment made on chipnet that day: its parameters and redeem script | Never: it is history. The tests read the deployed covenant back from it |
+| `tsafa-live-win.jsonl`, `tsafa-live-win-second.jsonl` | Two wins the live pool mined for that deployment at height 330,015, at the real token difficulty | Cannot be regenerated: they need a pool mining a deployed token |
+
+The tests that replay the live wins (`tests/claimer_win.rs`, the claimer's
+runtime tests) check the deployed covenant, not the one `safa.cash`
+compiles to now; one test shows the same win cannot claim a vault of the
+current covenant. On a new chipnet deployment, record its deployment file
+beside the old one and new live wins from its pool, with the constants the
+tests keep beside them (category, genesis txid, the claimed vault's state
+and the claim's txid), and point those tests at the new record. Until then
+no test replays a real win against the current covenant; whole claims on
+real chipnet blocks are covered with proofs mined in the tests.
+
+The synthetic fixtures were what the retired Node tool printed, byte for
+byte. They now record what the Rust CLI prints; parity with the Node tool
+ended with the covenant it compiled.
 
 ## Chipnet tSAFA deployment
 
-Deployed on 2026-10-29 with the owner's approval. `genesis` still refuses
-mainnet until the covenant has an independent review and the owner's
-approval.
+Deployed on 2026-10-29 with the owner's approval, with the covenant as it
+was then, which counts every block as ten minutes
+([one-minute blocks](#one-minute-blocks-chip-2025-03)). `genesis` still
+refuses mainnet until the covenant has an independent review and the
+owner's approval.
 
 | | |
 |---|---|
@@ -381,7 +579,8 @@ approval.
 {"network":"chipnet","threads":4,"virtual_sats":"84000000000","category":"1e642d4ed9a0a44b3153a3f1fda841906eb1c9a2ce9daa2f85641ddd3e8700fe"}
 ```
 
-The covenant is the regenerated fixture's, byte for byte (1,364-byte redeem
+Its covenant is recorded in
+`test_data/tsafa-chipnet-deployed-2026-10-29.json` (1,364-byte redeem
 script, K 1,944). The genesis was built with `cargo safa genesis`, signed by
 the owner's chipnet BCHN wallet and accepted by its `testmempoolaccept`
 before broadcast. The owner kept PHOTON's emission: each claim pays
@@ -395,7 +594,8 @@ thread (21,000,000 tSAFA at 8 decimals in all), so the first reward is
 first reward is worth about 200,000 satoshis at the AMM price and a 1%
 donation or fee (about 2,000 satoshis) clears the 1,000-satoshi minimum;
 2,000,000 satoshis seeded per thread; initial target bits `1d00ffff`
-(difficulty 1; the DAA hardens it by up to a factor of 0.625 per claim).
+(difficulty 1; the DAA hardens it by up to a factor of 0.625 per claim on
+ten-minute blocks, and 0.5125 for claims a one-minute block apart).
 
 `test_data/tsafa-chipnet-fixture.json` holds what `cargo safa params`
 prints for these parameters, with a placeholder funding outpoint (txid
@@ -404,15 +604,17 @@ redeem script, K, locking bytecode and `lock_hash` before any funding; the
 tests check it reproduces byte for byte. The covenant does not depend on
 the category, so the real funding txid changes only the leaves.
 
-The corrected ASERT band changed the chipnet redeem script, locking
-bytecode, `lock_hash` and address. Use the regenerated fixture before any
-genesis: a deployed covenant cannot be replaced. Proofs built for the old
-`lock_hash` must be rebuilt and mined again, because the leaf, root,
-coinbase and header commitment all change.
+Counting ticks changed the chipnet redeem script (1,437 bytes, K 2,017),
+locking bytecode, `lock_hash` and address
+(`bchtest:rwzt9yfhrsqhxa776t6mlkvh9kxwkf8q0ptv8wmfqr0k56dc6lwdg7g5lwenm`
+for these parameters). Use the regenerated fixture before any genesis: a
+deployed covenant cannot be replaced. Proofs built for another `lock_hash`
+must be rebuilt and mined again, because the leaf, root, coinbase and
+header commitment all change.
 
 The supplied Pickaxe synthetic claim was rebuilt for this `lock_hash`,
 preserving its deployment, outpoint, vault, split, branches and coinbase
-head and tail. Its original proof fails the corrected covenant. The
+head and tail. Its original proof fails the covenant. The
 rebuilt input is [`test_data/tsafa-chipnet-claim.json`](test_data/tsafa-chipnet-claim.json);
 [`test_data/tsafa-chipnet-claim-result.json`](test_data/tsafa-chipnet-claim-result.json)
 records the original proof and rebuilt leaf, root and transaction. Copy
@@ -423,8 +625,8 @@ cargo safa claim deployment.json p2poolv2_safa/test_data/tsafa-chipnet-claim.jso
 ```
 
 The command verifies the complete transaction in the standard BCH 2026 VM:
-txid `89771ec35e517ee27478de8a4639c8847dffbcff5a44db0c5156d180e1274c09`,
-2,105 bytes, a 2,200-satoshi fee within a 2,200-byte size bound, height
+txid `20992340748327e5cbb84d68a5134c93a66c34454997d8aae322231533109565`,
+2,178 bytes, a 2,273-satoshi fee within a 2,273-byte size bound, height
 329,001 and target `2001bffe`. Its 1,250,000,000-unit reward pays
 1,225,125,000 to the miner, 12,500,000 to the donation and 12,375,000 to
 the fee recipient. This is an offline VM check; it was not broadcast or
@@ -435,7 +637,7 @@ at least 8,001,155 satoshis: 4 × 2,000,000 for the vaults, a 609-satoshi
 genesis fee at 1 sat/byte (609 bytes, estimated with the largest P2PKH
 signature, a 73-byte ECDSA one, and its key) and 546 satoshis of change.
 0.081 tBCH (8,100,000 satoshis) leaves 99,391 in change. Its txid becomes
-the token category. Each claim then costs its vault `S` (1,944 plus the
+the token category. Each claim then costs its vault `S` (2,017 plus the
 proof, so about 5,300 satoshis for a 3,000-byte coinbase) plus 800
 satoshis per token output: about 250 claims per thread before the seed
 runs out, estimated, unless buyers add cash through the market.
@@ -492,6 +694,10 @@ binds the time, and the vault pays its own fee.
 
 ## Open
 
+- A covenant cannot follow a switch it was not compiled with, so a token
+  deployed on mainnet before its 2027-05-15 switch block is pinned stops at
+  that block. Whether a covenant should carry a rule for a switch that has
+  not happened is undecided.
 - An independent review of the covenant, and a run against BCHN (regtest
   or chipnet) with a real P2Pool coinbase.
 - The economic parameters: the virtual reserve, the seed, the supply and

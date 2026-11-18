@@ -58,6 +58,11 @@ the unlocking bytes decoded from Node's claim, and `verify` accepts that
 same VM-checked claim. The rebuilt Pickaxe claim's transaction identifier is
 `89771ec35e517ee27478de8a4639c8847dffbcff5a44db0c5156d180e1274c09`.
 The checked cases remain in `p2poolv2_safa/test_data/parity/cases.json`.
+They carry the covenant's bytes, so since the covenant counts
+CHIP-2025-03's ticks (2026-11-17) the Rust CLI has regenerated them for
+the new redeem script, and the identifier above is the earlier covenant's.
+They now hold the tool to its own recorded output
+(`p2poolv2_safa/README.md`, "Fixtures and the covenant's bytes").
 
 P2Pool's payout tree and payout covenant tests also evaluate each tested
 input in libauth-rs's standard BCH 2026 VM, requiring agreement with the

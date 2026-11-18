@@ -20,17 +20,20 @@ use crate::node::dns_seeds;
 use crate::node::emission_worker::EmissionWorker;
 use crate::node::found_block_verifier::FoundBlockVerifier;
 use crate::node::messages::{InventoryMessage, Message};
+use crate::node::nostr_seeds;
 use crate::node::organise_worker::{OrganiseWorker, create_organise_channel};
 use crate::node::p2p_health::P2pHealth;
 use crate::node::p2p_message_handlers::receivers::block_receiver::{
     BlockReceiver, create_block_receiver_channel,
 };
+use crate::node::p2p_message_handlers::receivers::share_without_payouts::CoinbaseRebuilder;
 use crate::node::p2p_message_handlers::senders::build_getheaders_message;
 use crate::node::p2p_message_handlers::senders::send_share_block_broadcast;
 use crate::node::p2p_message_handlers::senders::share_block::weak_shares_to_prefill;
 use crate::node::payout_tree_executor::{
     PayoutTreeExecutor, PayoutTreeSender, payout_tree_channel,
 };
+use crate::node::peer_book;
 use crate::node::request_response_handler::block_fetcher::{
     BlockFetcher, create_block_fetcher_channel,
 };
@@ -856,9 +859,16 @@ impl NodeActor {
             .id();
         worker_names.insert(emission_worker_id, "Emission worker");
 
+        // Bitcoin Cash: rebuild the coinbases of the shares peers relay
+        // without their payouts from the window validation reads.
+        let mut node = node;
+        if chain == Chain::BitcoinCash {
+            node.request_response_handler
+                .set_coinbase_rebuilder(CoinbaseRebuilder::new(pplns_window.clone()));
+        }
+
         // Bitcoin Cash P2Pool: check weak shares from stratum and peers, pool
         // the ones that pass and relay them (`node::weak_share_worker`).
-        let mut node = node;
         let weak_share_relay = weak_shares.map(|network| {
             node.request_response_handler
                 .set_weak_share_sender(network.events_tx);
@@ -933,6 +943,24 @@ impl NodeActor {
         tokio::pin!(dns_seed_timer);
         let mut dns_seed_pending = self.node.dns_seeds.is_some();
 
+        // Nostr: announce this node, and look peers up while short of them,
+        // first when DNS seeds would be asked, then every few minutes.
+        self.node.start_nostr_announcer();
+        let mut nostr_lookup_interval = tokio::time::interval_at(
+            tokio::time::Instant::now()
+                + dns_seeds::dns_seed_delay(self.node.peer_reconnector.has_peers()),
+            nostr_seeds::LOOKUP_EVERY,
+        );
+        nostr_lookup_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let nostr_lookups = self.node.nostr_seeds.is_some();
+
+        // Save the book of known peers now and then, so a crash loses little.
+        let mut peer_book_interval = tokio::time::interval_at(
+            tokio::time::Instant::now() + peer_book::SAVE_EVERY,
+            peer_book::SAVE_EVERY,
+        );
+        peer_book_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
         let stop_reason = loop {
             tokio::select! {
                 buf = self.node.swarm_rx.recv() => {
@@ -990,6 +1018,12 @@ impl NodeActor {
                     dns_seed_pending = false;
                     self.node.query_dns_seeds_if_isolated();
                 }
+                _ = nostr_lookup_interval.tick(), if nostr_lookups => {
+                    self.node.look_up_nostr_peers_if_short();
+                }
+                _ = peer_book_interval.tick() => {
+                    self.node.save_peer_book();
+                }
                 relay = next_relay_transaction(&mut self.share_transaction_relay),
                     if self.share_transaction_relay.is_some() => {
                     match relay {
@@ -1021,6 +1055,9 @@ impl NodeActor {
     /// go through the store writer's atomic batches, so nothing is left half
     /// written, and in-memory state is rebuilt on the next start.
     async fn shut_down(mut self, reason: StopReason) {
+        // Keep the peers this node knows, and the ones it holds now as
+        // anchors, for its next start.
+        self.node.save_peer_book();
         self.workers.shutdown().await;
         match reason {
             StopReason::Requested(reply) => {

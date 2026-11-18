@@ -177,7 +177,7 @@ fn spaced(indexes: &[usize]) -> String {
 }
 
 fn time_of_day() -> String {
-    chrono::Local::now().format("%H:%M:%S").to_string()
+    crate::wall_clock::time_of_day()
 }
 
 /// Append `line` to the log at `path`. The markers written into node logs

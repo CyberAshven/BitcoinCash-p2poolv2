@@ -3,8 +3,9 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 //! Shares relayed with their weak shares listed by hash
-//! (`Message::ShareWithWeakHashes`) that wait for the weak shares this
-//! node's weak pool lacked.
+//! (`Message::ShareWithWeakHashes`, or `Message::ShareWithoutPayouts` once
+//! its coinbase is rebuilt) that wait for the weak shares this node's weak
+//! pool lacked.
 //!
 //! The receiver asks the peer that relayed the share for them
 //! (`Message::GetCarriedWeakShares`), and the answer

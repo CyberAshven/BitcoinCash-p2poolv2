@@ -3,14 +3,16 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 //! Public pool win parsing and offline tSAFA claim verification.
+mod test_utils;
 
 use libauth::decode_transaction_bch;
 use p2poolv2_safa::claimer::config::VaultPoint;
 use p2poolv2_safa::claimer::wins::{
     ClaimError, build_win_claim, candidates, parse_win, resolve_script, resolve_split,
 };
-use p2poolv2_safa::{SplitCommitment, Vault, hash256, split_preimage};
+use p2poolv2_safa::{SplitCommitment, Vault, create_covenant, hash256, split_preimage};
 use serde_json::{Value, json};
+use test_utils::deployed_covenant;
 
 const LIVE_WIN: &[u8] = include_bytes!("../test_data/tsafa-live-win.jsonl");
 const CATEGORY_WIRE: &str = "fe00873edd1d64852faa9dcea2c9b16e9041a8fdf1a353314ba4a0d94e2d641e";
@@ -205,6 +207,7 @@ fn real_pool_win_builds_and_verifies_against_deployed_tsafa_vault() {
         commitment: hex::decode("0300000011090500ffff001dba7d451a").unwrap(),
     };
     let claim = build_win_claim(
+        &deployed_covenant(),
         &deployment,
         &win,
         &VaultPoint {
@@ -250,6 +253,42 @@ fn real_pool_win_builds_and_verifies_against_deployed_tsafa_vault() {
     );
 }
 
+/// The live win commits to the deployed covenant's `lock_hash`. The covenant
+/// `safa.cash` compiles to now has another, so the same win cannot claim a
+/// vault of it: a new deployment needs wins mined for it.
+#[test]
+fn real_win_cannot_claim_a_vault_of_the_current_covenant() {
+    let win = parse_win(LIVE_WIN, CATEGORY_WIRE).unwrap().unwrap();
+    let deployment = json!({
+        "network": "chipnet", "threads": 4, "virtual_sats": "84000000000",
+        "category": CATEGORY_DISPLAY,
+    });
+    let current = create_covenant("chipnet", 4, 84_000_000_000).unwrap();
+    assert_ne!(current.lock_hash, deployed_covenant().lock_hash);
+    let vault = Vault {
+        category: hex::decode(CATEGORY_DISPLAY).unwrap(),
+        value: 2_000_000,
+        token_amount: 525_000_000_000_000,
+        commitment: hex::decode("0300000011090500ffff001dba7d451a").unwrap(),
+    };
+    assert!(matches!(
+        build_win_claim(
+            &current,
+            &deployment,
+            &win,
+            &VaultPoint {
+                txid: GENESIS_TXID.into(),
+                vout: 3,
+            },
+            &vault,
+            &[PAYOUT_SCRIPT.into()],
+            &[DONATION_SCRIPT.into()],
+            1,
+        ),
+        Err(ClaimError::Invalid(_))
+    ));
+}
+
 #[test]
 fn real_win_against_another_thread_state_is_invalid() {
     let win = parse_win(LIVE_WIN, CATEGORY_WIRE).unwrap().unwrap();
@@ -265,6 +304,7 @@ fn real_win_against_another_thread_state_is_invalid() {
     };
     assert!(matches!(
         build_win_claim(
+            &deployed_covenant(),
             &deployment,
             &win,
             &VaultPoint {
@@ -295,6 +335,7 @@ fn real_win_against_another_state_of_the_same_thread_is_invalid() {
     };
     assert!(matches!(
         build_win_claim(
+            &deployed_covenant(),
             &deployment,
             &win,
             &VaultPoint {
@@ -324,6 +365,7 @@ fn real_win_can_claim_an_amm_moved_vault_with_the_same_commitment() {
         commitment: hex::decode("0300000011090500ffff001dba7d451a").unwrap(),
     };
     let claim = build_win_claim(
+        &deployed_covenant(),
         &deployment,
         &win,
         &VaultPoint {
@@ -364,6 +406,7 @@ fn underfunded_vault_still_drops_a_win_committed_to_another_state() {
         commitment: hex::decode("0300000012090500ffff001dba7d451a").unwrap(),
     };
     let error = build_win_claim(
+        &deployed_covenant(),
         &deployment,
         &win,
         &VaultPoint {
@@ -393,6 +436,7 @@ fn depleted_token_reserve_still_drops_a_win_committed_to_another_state() {
         commitment: hex::decode("0300000012090500ffff001dba7d451a").unwrap(),
     };
     let error = build_win_claim(
+        &deployed_covenant(),
         &deployment,
         &win,
         &VaultPoint {

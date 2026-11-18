@@ -361,6 +361,7 @@ fn test_message_discriminants_unique() {
         SHARE_WITH_WEAK_HASHES,
         GET_CARRIED_WEAK_SHARES,
         CARRIED_WEAK_SHARES,
+        SHARE_WITHOUT_PAYOUTS,
     ];
 
     // Check all discriminants are unique
@@ -679,65 +680,159 @@ fn test_share_with_weak_hashes_round_trips_and_lists_weak_shares_by_hash() {
     assert_eq!(relayed.with_weak_shares(share.weak_shares.clone()), share);
 }
 
-/// Malformed shares with weak hashes are refused at decode: one carrying
-/// weak shares whole besides its hashes, and one listing more hashes than a
-/// share may carry.
+/// A share relayed without payouts round-trips, with and without carried
+/// Bitcoin Cash headers. It lists its weak shares by proof-of-work hash in
+/// the order carried, 32 bytes each instead of the whole weak share, and
+/// keeps its coinbase's input and the outputs' total but no output. With
+/// its coinbase and weak shares put back it is the share again.
 #[test]
-fn test_share_with_weak_hashes_decode_refuses_whole_weak_shares_and_too_many_hashes() {
+fn test_share_without_payouts_round_trips_and_leaves_out_outputs_and_weak_shares() {
     use message_discriminants::*;
-    let whole = share_carrying_weak_shares(1);
-    let mut bytes = vec![SHARE_WITH_WEAK_HASHES, 0];
-    bytes.extend(encode::serialize(&whole));
+    let share = share_carrying_weak_shares(3);
+    let outputs = &share.bitcoin_coinbase.output;
+    assert!(!outputs.is_empty());
+    let output_total: u64 = outputs.iter().map(|output| output.value.to_sat()).sum();
+    let relayed = ShareWithoutPayouts::new(ShareWithWeakHashes::new(share.clone()));
+    assert_eq!(relayed.coinbase_value(), output_total);
+    let sent_coinbase = &relayed.share_block().bitcoin_coinbase;
+    assert!(sent_coinbase.output.is_empty());
+    assert_eq!(sent_coinbase.input, share.bitcoin_coinbase.input);
+    assert!(relayed.share_block().weak_shares.is_empty());
+
+    for bch_headers in [Vec::new(), carried()] {
+        let message = Message::ShareWithoutPayouts(relayed.clone(), bch_headers.clone());
+        let bytes = encode::serialize(&message);
+        assert_eq!(bytes[0], SHARE_WITHOUT_PAYOUTS);
+        assert_eq!(bytes.len(), message.encoded_size());
+        let decoded: Message = encode::deserialize(&bytes).unwrap();
+        assert_eq!(decoded, message);
+
+        //* Besides the hashes, the message keeps the share's empty weak list,
+        //* the byte saying its weak shares are left out and an empty
+        //* prefilled list (a byte each) and the outputs' total (8 bytes), and
+        //* always writes the header count, which a whole share without
+        //* carried headers leaves out (one more).
+        let overhead = if bch_headers.is_empty() { 12 } else { 11 };
+        let whole = Message::ShareBlock(share.clone(), bch_headers);
+        let weak_bytes: usize = share.weak_shares.iter().map(WeakShare::encoded_size).sum();
+        let output_bytes: usize = outputs
+            .iter()
+            .map(|output| encode::serialize(output).len())
+            .sum();
+        assert_eq!(
+            whole.encoded_size() - message.encoded_size(),
+            weak_bytes - 3 * 32 + output_bytes - overhead,
+            "the message is smaller by the outputs and the weak shares less their hashes"
+        );
+    }
+    let filled = relayed
+        .with_coinbase(share.bitcoin_coinbase.clone())
+        .with_weak_shares(share.weak_shares.clone());
+    assert_eq!(filled, share);
+}
+
+/// Malformed shares without payouts are refused at decode: one carrying
+/// weak shares whole besides its hashes, one listing more hashes or
+/// prefilling more weak shares than a share may carry, one whose coinbase
+/// still carries outputs, which no sender leaves in, and a Bitcoin share.
+#[test]
+fn test_share_without_payouts_decode_refuses_malformed_shares() {
+    use message_discriminants::*;
+    let value = encode::serialize(&625_000_000u64);
+    let without_outputs = |mut share: ShareBlock| {
+        share.bitcoin_coinbase.output.clear();
+        share
+    };
+    let mut bytes = vec![SHARE_WITHOUT_PAYOUTS, 0];
+    bytes.extend(encode::serialize(&without_outputs(
+        share_carrying_weak_shares(1),
+    )));
     bytes.extend(encode::serialize(&VarInt::from(0usize)));
+    bytes.extend(encode::serialize(&VarInt::from(0usize)));
+    bytes.extend(&value);
     assert!(encode::deserialize::<Message>(&bytes).is_err());
 
-    let mut bytes = vec![SHARE_WITH_WEAK_HASHES, 0];
-    bytes.extend(encode::serialize(&share_carrying_weak_shares(0)));
+    let mut bytes = vec![SHARE_WITHOUT_PAYOUTS, 0];
+    bytes.extend(encode::serialize(&without_outputs(
+        share_carrying_weak_shares(0),
+    )));
     bytes.extend(encode::serialize(&VarInt::from(WEAK_CAP + 1)));
     bytes.extend(vec![0u8; 32 * (WEAK_CAP + 1)]);
     assert!(encode::deserialize::<Message>(&bytes).is_err());
 
     //* More prefilled weak shares than a share may carry are refused
     //* before any is read.
-    let mut bytes = vec![SHARE_WITH_WEAK_HASHES, 0];
-    bytes.extend(encode::serialize(&share_carrying_weak_shares(0)));
+    let mut bytes = vec![SHARE_WITHOUT_PAYOUTS, 0];
+    bytes.extend(encode::serialize(&without_outputs(
+        share_carrying_weak_shares(0),
+    )));
     bytes.extend(encode::serialize(&VarInt::from(0usize)));
     bytes.extend(encode::serialize(&VarInt::from(WEAK_CAP + 1)));
     assert!(matches!(
         encode::deserialize::<Message>(&bytes),
         Err(encode::Error::ParseFailed(_))
     ));
+
+    //* The same share decodes once its coinbase outputs are left out.
+    let encode_with_coinbase = |share: ShareBlock| {
+        let mut bytes = vec![SHARE_WITHOUT_PAYOUTS, 0];
+        bytes.extend(encode::serialize(&share));
+        bytes.extend(encode::serialize(&VarInt::from(0usize)));
+        bytes.extend(encode::serialize(&VarInt::from(0usize)));
+        bytes.extend(&value);
+        bytes
+    };
+    let with_outputs = share_carrying_weak_shares(0);
+    assert!(matches!(
+        encode::deserialize::<Message>(&encode_with_coinbase(with_outputs.clone())),
+        Err(encode::Error::ParseFailed(_))
+    ));
+    assert!(
+        encode::deserialize::<Message>(&encode_with_coinbase(without_outputs(with_outputs)))
+            .is_ok()
+    );
+
+    let bitcoin_share = without_outputs(TestShareBlockBuilder::new().build());
+    assert!(matches!(
+        encode::deserialize::<Message>(&encode_with_coinbase(bitcoin_share)),
+        Err(encode::Error::ParseFailed(_))
+    ));
 }
 
-/// A share with weak hashes round-trips with prefilled weak shares, which
+/// A share without payouts round-trips with prefilled weak shares, which
 /// go whole beside the full list in the order carried; filled, it is the
 /// share again.
 #[test]
-fn test_share_with_weak_hashes_round_trips_with_prefilled_weak_shares() {
+fn test_share_without_payouts_round_trips_with_prefilled_weak_shares() {
     let share = share_carrying_weak_shares(3);
     let young = [
         share.weak_shares[0].pow_hash(),
         share.weak_shares[2].pow_hash(),
     ];
-    let relayed = ShareWithWeakHashes::prefilling(share.clone(), |weak_share| {
-        young.contains(&weak_share.pow_hash())
-    });
-    assert_eq!(relayed.weak_hashes().len(), 3);
+    let relayed = ShareWithoutPayouts::new(ShareWithWeakHashes::prefilling(
+        share.clone(),
+        |weak_share| young.contains(&weak_share.pow_hash()),
+    ));
     assert_eq!(
         relayed.prefilled(),
         [share.weak_shares[0].clone(), share.weak_shares[2].clone()]
     );
 
-    let message = Message::ShareWithWeakHashes(relayed.clone(), Vec::new());
+    let message = Message::ShareWithoutPayouts(relayed.clone(), Vec::new());
     let decoded: Message = encode::deserialize(&encode::serialize(&message)).unwrap();
     assert_eq!(decoded, message);
-    let listed_only =
-        Message::ShareWithWeakHashes(ShareWithWeakHashes::new(share.clone()), Vec::new());
+    let listed_only = Message::ShareWithoutPayouts(
+        ShareWithoutPayouts::new(ShareWithWeakHashes::new(share.clone())),
+        Vec::new(),
+    );
     assert_eq!(
         message.encoded_size() - listed_only.encoded_size(),
         share.weak_shares[0].encoded_size() + share.weak_shares[2].encoded_size()
     );
-    assert_eq!(relayed.with_weak_shares(share.weak_shares.clone()), share);
+    let filled = relayed
+        .with_coinbase(share.bitcoin_coinbase.clone())
+        .with_weak_shares(share.weak_shares.clone());
+    assert_eq!(filled, share);
 }
 
 /// The request for carried weak shares and its answer round-trip through

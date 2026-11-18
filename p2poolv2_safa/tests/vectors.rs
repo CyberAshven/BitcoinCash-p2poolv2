@@ -662,4 +662,20 @@ fn vectors_match_p2pool_rust_test_sources() {
             "pair at {height}"
         );
     }
+    // The chipnet blocks around the one-minute activation, as the rows of
+    // p2poolv2_lib's `CHIPNET_AROUND_ACTIVATION` without digit separators.
+    let rows: String = asert
+        .split_once("const CHIPNET_AROUND_ACTIVATION")
+        .and_then(|(_, rest)| rest.split_once("];"))
+        .map(|(rows, _)| rows.chars().filter(|c| *c != '_' && !c.is_whitespace()))
+        .unwrap()
+        .collect();
+    let copied = test_utils::headers::CHIPNET_AROUND_ACTIVATION;
+    assert_eq!(rows.matches("),").count(), copied.len());
+    for (height, time, bits) in copied {
+        assert!(
+            rows.contains(&format!("({height},{time},{bits:#010x}),")),
+            "block {height}"
+        );
+    }
 }

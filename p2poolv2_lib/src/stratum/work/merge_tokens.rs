@@ -26,7 +26,7 @@ use crate::shares::auxpow::{
     AuxError, AuxProof, AuxiliaryTree, DisclosedLeaf, Disclosure, MAX_TOKEN_TARGET_BITS,
     TokenBranch, TokenLeaf, TokenSplit, TreeLayout, encode_token_target, expand_token_target,
 };
-use crate::shares::bch_asert::{BchAsert, TickInfo, U256};
+use crate::shares::bch_asert::{BCH_BLOCK_SPACING, BchAsert, TickInfo, TickSchedule, U256};
 use crate::shares::merge_mining::{
     MAX_MERGE_MINING_TREE_HEIGHT, MERGE_MINING_OUTPUT_LENGTH, MergeMiningCommitment,
 };
@@ -76,9 +76,9 @@ pub struct MergeMinedToken {
 /// `p2poolv2_safa`).
 pub const SAFA_MAX_THREADS: u32 = 63;
 
-/// A claim's target eases by at most this many blocks since the thread's
-/// state (`EASE_CAP`).
-pub const SAFA_EASE_CAP: u32 = 288;
+/// A claim's target eases by at most this many ticks since the thread's
+/// state (`EASE_CAP_TICKS`): 288 ten-minute blocks.
+pub const SAFA_EASE_CAP_TICKS: u64 = 288 * BCH_BLOCK_SPACING as u64;
 
 /// One SAFA vault the node merge-mines: its deployment's thread count and
 /// the thread's 16-byte state, the vault's NFT commitment (`thread u32le,
@@ -106,27 +106,42 @@ impl SafaThread {
     }
 
     /// The target a claim of a coinbase at `height` must meet, as the
-    /// covenant rebuilds the leaf: the state's target eased by
-    /// `min(height - state height, 288) / threads`. `None` when `height` is
-    /// not above the state's.
-    pub fn claim_target_bits(&self, height: u32) -> Option<u32> {
-        let height_delta = height.checked_sub(self.state_height()).filter(|&d| d > 0)?;
-        safa_claim_target_bits(self.state_target_bits(), height_delta, self.threads)
+    /// covenant rebuilds the leaf: the state's target eased by the ticks
+    /// from the state's block to the coinbase's, counted by `schedule`'s
+    /// pins as the covenant counts them with its own (the same pins; the
+    /// ASERT tests compare them). `None` when `height` is not above the
+    /// state's.
+    pub fn claim_target_bits(&self, height: u32, schedule: &TickSchedule) -> Option<u32> {
+        let state_height = self.state_height();
+        if height <= state_height {
+            return None;
+        }
+        let tick_delta = schedule.ticks(height) - schedule.ticks(state_height);
+        safa_claim_target_bits(
+            self.state_target_bits(),
+            u64::try_from(tick_delta).ok()?,
+            self.threads,
+        )
     }
 }
 
 /// `claim_target_bits` of `p2poolv2_safa` (the SAFA tool), integer for integer:
-/// `target * (min(dh, 288) * 5000 / threads + 5000) / 10000`, each division
-/// floored, clamped to 1 and to the easiest token target, encoded as
-/// canonical token bits. `None` for bits that are not a canonical token
-/// target or a thread count outside 1 to 63.
-pub fn safa_claim_target_bits(state_bits: u32, height_delta: u32, threads: u32) -> Option<u32> {
+/// `target * (min(dt, 288 * 600) * 5000 / (threads * 600) + 5000) / 10000`,
+/// `dt` the ticks since the state's block, each division floored, clamped to
+/// 1 and to the easiest token target, encoded as canonical token bits. While
+/// blocks are ten minutes `dt` is 600 a block and this is the SAFA draft's
+/// `min(dh, 288) * 5000 / threads`. `None` for bits that are not a
+/// canonical token target or a thread count outside 1 to 63.
+pub fn safa_claim_target_bits(state_bits: u32, tick_delta: u64, threads: u32) -> Option<u32> {
     if !(1..=SAFA_MAX_THREADS).contains(&threads) {
         return None;
     }
     let target = U256::from_little_endian(&expand_token_target(state_bits)?);
-    let factor =
-        U256::from(u64::from(height_delta.min(SAFA_EASE_CAP)) * 5_000 / u64::from(threads) + 5_000);
+    let factor = U256::from(
+        tick_delta.min(SAFA_EASE_CAP_TICKS) * 5_000
+            / (u64::from(threads) * BCH_BLOCK_SPACING as u64)
+            + 5_000,
+    );
     let maximum = U256::from_little_endian(&expand_token_target(MAX_TOKEN_TARGET_BITS)?);
     let denominator = U256::from(10_000);
     // target * factor / 10000 without overflowing 256 bits: the quotient
@@ -319,12 +334,16 @@ impl TokenSet {
     }
 
     /// The set as a job whose coinbase is at `height` mines it: each SAFA
-    /// token's target eased by the blocks since its thread's state, as the
-    /// covenant rebuilds the leaf it checks (`claim_leaf` in
-    /// `p2poolv2_safa`). Other tokens, and a set without SAFA
-    /// tokens, are unchanged. An error when a SAFA thread's state is not
-    /// below `height`: no claim of that coinbase could succeed.
-    pub fn at_height(self: &Arc<Self>, height: u32) -> Result<Arc<Self>, String> {
+    /// token's target eased by the ticks since its thread's state, counted
+    /// by the network's `schedule`, as the covenant rebuilds the leaf it
+    /// checks (`claim_leaf` in `p2poolv2_safa`). Other tokens, and a set
+    /// without SAFA tokens, are unchanged. An error when a SAFA thread's
+    /// state is not below `height`: no claim of that coinbase could succeed.
+    pub fn at_height(
+        self: &Arc<Self>,
+        height: u32,
+        schedule: &TickSchedule,
+    ) -> Result<Arc<Self>, String> {
         if self.tokens.iter().all(|token| token.safa.is_none()) {
             return Ok(Arc::clone(self));
         }
@@ -332,7 +351,7 @@ impl TokenSet {
         let mut targets = self.targets.clone();
         for (token, target) in tokens.iter_mut().zip(targets.iter_mut()) {
             if let Some(thread) = token.safa {
-                token.target_bits = thread.claim_target_bits(height).ok_or_else(|| {
+                token.target_bits = thread.claim_target_bits(height, schedule).ok_or_else(|| {
                     format!(
                         "SAFA token {}'s thread state is at height {}, not below the coinbase's {height}",
                         hex::encode(token.category),
