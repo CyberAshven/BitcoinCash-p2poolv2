@@ -227,6 +227,9 @@ format and genesis re-pin.
 
 ### Changed
 
+- At a chipnet minimum-difficulty mark P2Pool switches its jobs to the
+  limit's nBits itself, also with a Template Provider, without waiting for a
+  new template; mainnet and regtest are unchanged (#156).
 - The header rules of the weak shares a share carries are checked on several
   cores, one fewer than the node's CPUs; the verdict is unchanged (#127).
 - A new share with 50,000 bytes or more of coinbase outputs is relayed
