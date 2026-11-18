@@ -1666,6 +1666,17 @@ pub(crate) fn build_notify_with_job_id(
     Ok((notify_json, job_id))
 }
 
+/// Set `clean_jobs` on `notify_json`, a notify built from prepared params,
+/// whether or not the params were published with it. The flag is the
+/// notify's last param ([`build_json_template`]).
+pub(crate) fn set_clean_jobs(notify_json: &mut String) {
+    const NOT_CLEAN: &str = ",false]}";
+    if notify_json.ends_with(NOT_CLEAN) {
+        notify_json.truncate(notify_json.len() - NOT_CLEAN.len());
+        notify_json.push_str(",true]}");
+    }
+}
+
 #[cfg(test)]
 mod tests;
 
