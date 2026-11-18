@@ -16,7 +16,7 @@ computed with BCH's fixed-point exponent, cubic approximation of `2^x` and
 512-bit intermediate, then clamped so it is never easier than the chain's
 ceiling: `MAX_POOL_TARGET` (`0x1b384bd7`, difficulty about 1,160) on Bitcoin
 and `0x1c384bd7` (difficulty about 4) on Bitcoin Cash, the former mini
-chain's (the main and mini chains merged on 2026-11-09).
+chain's ([One share chain](../sharechain/small-miners-design.md#1-one-share-chain)).
 
 Every caller passes the parent of the share being validated or mined as an
 `AsertParent`: its height, time and bits, and the time of its own parent
@@ -46,8 +46,8 @@ along the chain: two steps of the parent rule are one step of the genesis
 rule over both intervals. They differ only at the ceiling.
 
 The parent's minimum is its `asert_bits`, the target ASERT gave it, which
-equals its bits unless it was mined heavier inside the difficulty band
-(2026-11-09, [Share validation](../sharechain/validation.md#the-difficulty-band-bitcoin-cash)).
+equals its bits unless it was mined heavier inside the
+[difficulty band](../sharechain/validation.md#the-difficulty-band-bitcoin-cash).
 Anchoring at a heavier parent's bits would make the next minimum as heavy
 as that parent; anchoring at its minimum keeps the minimum the pool's own,
 so when big miners mine fewer, heavier shares the minimum falls for everyone
@@ -63,16 +63,15 @@ is a share at the floor difficulty.
 
 The Bitcoin Cash genesis (`bch_genesis::build`) takes its timestamp from
 the regtest genesis data, 1776855600 (2026-04-22 11:00 UTC), on every
-network. The chipnet mini chain restarted on 2026-10-19 13:24 UTC on a
-fresh store, 180 days later: about 1.55 million shares behind schedule.
-With the ASIC's submissions arriving every 3 seconds, each share made up 7
-seconds, so the chain would have stayed at the ceiling for roughly two and
-a half months. Every share had difficulty 4 at the mini ceiling, where a 4
-TH/s ASIC should hold about 9,300 at the 10-second target. Shares that all
-weigh the same make PPLNS pay by submission count, not work: a CPU miner
-got 2.4% of chipnet block 328,554 and 31% of a block on 2026-10-18 beside
-the ASIC. And the Bitcoin Cash PPLNS window, sized by work, always hit its
-120,960-share cap.
+network. The chipnet mini chain, restarted 180 days later on a fresh store,
+began about 1.55 million shares behind schedule. With the ASIC's
+submissions arriving every 3 seconds, each share made up 7 seconds, so the
+chain would have stayed at the ceiling for roughly two and a half months.
+Every share had difficulty 4 at the mini ceiling, where a 4 TH/s ASIC
+should hold about 9,300 at the 10-second target. Shares that all weigh the
+same make PPLNS pay by submission count, not work: a CPU miner got 2.4% of
+chipnet block 328,554 beside the ASIC, and the window, sized by work, always
+hit its 120,960-share cap.
 
 The same happens after any outage. Two days without shares leave the chain
 two days behind schedule, which at 3-second submissions is about 21 hours
@@ -82,29 +81,22 @@ than BCH's own chain, so this is a property of the rule, not of one start.
 The parent anchor measures each step from the parent alone. When a long
 interval drives a target to the ceiling, the next share starts from the
 ceiling instead of from a schedule the chain has fallen behind, and ASERT
-climbs from there at its normal rate.
+climbs from there at its normal rate. It costs one more header read per
+target.
 
-### Options weighed
-
-- **Re-anchor genesis at a later time.** Fixes one start and changes the
-  genesis hash (`shares/genesis/` and its definitions are not to be touched
-  without the maintainer's decision). Any later start or outage repeats the
-  debt.
-- **Anchor at the first share, as BCH anchors at its activation block.**
-  Fixes the late start, not outages. The anchor would be the parent's
-  ancestor at height 1, which a fork at height 1 makes ambiguous (shares at
-  height 1 are cheap: they are mined at the ceiling), and finding it costs
-  an ancestry walk or a new store index.
-- **Anchor at the parent (chosen).** Local and constant cost: one more
-  header read per target. Forgets debt only at the ceiling, and otherwise
-  gives the genesis rule's targets.
+Rejected ([decision 12](../bch-plan.md#decisions-so-far)): a later genesis
+time fixes one start, changes the genesis hash, and every later start or
+outage repeats the debt; anchoring at the first share, as BCH anchors at its
+activation block, fixes the start but not outages, a fork at height 1
+(cheap at the ceiling) makes that anchor ambiguous, and finding it costs an
+ancestry walk or a new store index.
 
 ## Properties
 
 - **Deterministic.** Integer arithmetic only, and every input comes from
   the parent's header, its metadata and its own parent's header. Headers
-  are never pruned (`pruning.md`), so every node reads the same values at
-  any depth.
+  are never pruned ([pruning](../architecture/pruning.md)), so every node
+  reads the same values at any depth.
 - **Timestamps.** A share's time sets only the next target, as on the
   genesis anchor, and the median-time-past (11 shares) and 120-second
   future limits bound it. The parent anchor forgets only at the easy
@@ -135,34 +127,30 @@ expected interval rounds to 10 seconds.
 
 ## Activation
 
-The parent anchor is a consensus rule: a node on the genesis anchor
+The parent anchor is a share-chain rule: a node on the genesis anchor
 computes another target for every share once the chain has been behind
-schedule, and rejects the other's shares. It ships as a flag day, as the
-PPLNS window did (`docs/bch-plan.md`, decision 11): every chipnet and
-regtest node upgrades in one release and starts from a new store path.
-Bitcoin Cash protocol strings carry the rule as `asert-parent` after the
-payout rule (`/p2pool/test/<genesis tag>/pplns-k3-m100/asert-parent/1.0.0`,
-`BCH_ASERT_ANCHOR_TAG`; since the share-trading rules, followed by
-`trade-htlc`, then `payout-holder`, then the hybrid payout
-`payout-hybrid-t3072-f500-r1to3-z8-cov1`, which replaced `payout-cap11`,
-then `uncle-once` and the segments of the 2026-10-24 rule batch; see
-`share_chain_rule_tag`), so nodes on the old rule fail the handshake
-instead of trading shares the other rejects. Mainnet starts with the rule
-from its first share.
+schedule, and rejects the other's shares. It shipped as a flag day, as the
+PPLNS window did ([decision 11](../bch-plan.md#decisions-so-far)): chipnet
+and regtest nodes upgraded in one release and started from a new store path.
+Bitcoin Cash protocol strings carry the rule as `asert-parent`
+(`BCH_ASERT_ANCHOR_TAG`) right after the payout window's segment
+(`/p2pool/test/<genesis tag>/pplns-k3-m100/asert-parent/...`; the later
+segments are listed in `share_chain_rule_tag`), so nodes on the old rule
+fail the handshake instead of trading shares the other rejects. Mainnet
+starts with the rule from its first share.
 
 ## Simulation
 
 `sim_overrides::genesis_timestamp` and `anchor_target` still anchor genesis
 at the sim's launch time and at the steady difficulty of its network
-hashrate. On Bitcoin nothing changes. On Bitcoin Cash the genesis time now
-sets only the interval the second share is measured from, so anchoring at
-launch still starts the chain regulated, and a run whose genesis time is far
-in the past starts from the ceiling instead of from a debt.
+hashrate. On Bitcoin nothing changes. On Bitcoin Cash the genesis time sets
+only the interval the second share is measured from, so anchoring at launch
+still starts the chain regulated, and a run whose genesis time is far in the
+past starts from the ceiling instead of from a debt.
 
-[bch-daa-analysis.md](bch-daa-analysis.md) compares both anchors, other
-half-lives and upstream's window algorithms over BTC/BCH switching, growth
-from one BitAxe to exahashes and quiet periods, with this code
-(`p2poolv2_daa`, `cargo daa-sim`).
+The study behind the anchor and the half-life, with both anchors, other
+half-lives and upstream's window algorithms, is
+[bch-daa-analysis.md](bch-daa-analysis.md).
 
 ## Bitcoin
 
