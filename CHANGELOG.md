@@ -409,6 +409,11 @@ format and genesis re-pin.
 
 ### Security
 
+- `libz-sys` 1.1.33 closes RUSTSEC-2026-0544, a heap overflow in zlib's
+  `gz_vacate` that RocksDB links. `chrono`, declared unmaintained
+  (RUSTSEC-2026-0543), is replaced by `time`; timestamps print as before,
+  and the CLI now sends `/pplns_shares` time filters as
+  `2025-10-17T19:40:00Z` instead of `+00:00` (#145).
 - `/metrics` escapes its label values, so a worker name or payout address
   can no longer break the scrape or add samples (#78).
 - The Docker stack's chipnet and mainnet BCHN make a random RPC password on

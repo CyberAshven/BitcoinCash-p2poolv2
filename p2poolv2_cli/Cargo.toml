@@ -35,7 +35,7 @@ sha2 = { workspace = true }
 rpassword = "7.3"
 reqwest = { workspace = true, features = ["json"] }
 serde_json = { workspace = true }
-chrono = { workspace = true }
+time = { workspace = true }
 
 [dev-dependencies]
 wiremock = { workspace = true }

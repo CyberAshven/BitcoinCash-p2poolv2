@@ -33,11 +33,11 @@ const STRATUM_PORT: u16 = 3333;
 
 /// `[HH:MM:SS] message`.
 pub fn log(message: &str) {
-    println!("[{}] {message}", chrono::Local::now().format("%H:%M:%S"));
+    println!("[{}] {message}", crate::wall_clock::time_of_day());
 }
 
 fn timestamp() -> String {
-    chrono::Local::now().format("%Y%m%d-%H%M%S").to_string()
+    crate::wall_clock::file_stamp()
 }
 
 fn on_path(name: &str) -> bool {
