@@ -373,7 +373,7 @@ format and genesis re-pin.
   `p2p_peers.json`: a node holds `p2p_node_key.lock` and `p2p_peers.json.lock`
   while it runs, and a second node on either file stops at start with what to
   set. Since #142 and #144 a swarm or a host with two nodes in one directory
-  mined separate chains without a word.
+  mined separate chains without a word (#157).
 - Templates from a node without long polling, such as Knuth, parse again: a
   missing `longpollid` reads as empty (#123).
 - Requests to the Bitcoin Cash node time out after 30 seconds without data,
