@@ -58,16 +58,13 @@ or no-ops in production builds (zero overhead). Key overrides:
   be overridden for time-compressed runs.
 - **Genesis anchoring**: `sim_overrides::genesis_timestamp()` and
   `anchor_target()` anchor ASERT at launch time and steady-state difficulty.
-  On Bitcoin Cash, where ASERT is anchored at each share's parent, the
-  genesis time sets only the interval the second share is measured from,
-  so a launch-time anchor still starts the chain regulated
+  On Bitcoin Cash ASERT is anchored at each share's parent, so the genesis
+  time sets only the second share's interval
   (`docs/difficulty_adjustment/asert.md`).
-- **PPLNS window**: the swarm runs Bitcoin Cash, whose window is sized by
-  the paying header's difficulty. Every regtest header is at the
-  proof-of-work limit, which falls back to the cap of `PPLNS_WINDOW_SHARES`
-  shares (80 in the sim build, below), so the swarm pays a fixed 80-share
-  window. The offline `pplns_compare` binary below exercises the sized
-  window with production depths.
+- **PPLNS window**: Bitcoin Cash sizes the window by the paying header's
+  difficulty; every regtest header is at the proof-of-work limit, which
+  falls back to the cap, so the swarm pays a fixed 80-share window. The
+  offline `pplns_compare` binary below exercises the sized window.
 - **Short depths**: the sim build compiles shorter consensus depths under
   `cfg(feature = "sim")` in `pplns_window.rs`, so the fast sim chain exercises
   payout maturity, output expiry, the full-validation boundary and block body
@@ -98,18 +95,13 @@ or no-ops in production builds (zero overhead). Key overrides:
   a production-size PPLNS window; `cargo bench --bench pplns_window` covers
   its compute cost.
 
-  These replace the old `[sim] coinbase_maturity` option. Bitcoin Cash's
-  maturity, `BCH_COINBASE_MATURITY` (100), is not shortened: it is a
-  share-chain rule, which the sim build does not change, and the Bitcoin
-  Cash protocol strings carry it. The swarm runs Bitcoin Cash, so a share
-  is paid only 100 shares deep, and a payout walk reaches 100 + 80 shares
-  below the paying share, plus at most 3 for an uncle: the sim
-  `BCH_PAYOUT_DEPTH`, 183, from which Bitcoin Cash's output expiry,
-  full-validation zone, reorg limit and prune depth (414) follow, as in
-  production (since the share-chain rule batch of 2026-10-24; before it the
-  Bitcoin Cash sim used Bitcoin's 100 and 200). The node logs the depths it
+  Bitcoin Cash's maturity, `BCH_COINBASE_MATURITY` (100), is not
+  shortened: it is a share-chain rule, which the Bitcoin Cash protocol
+  strings carry. A payout walk reaches 100 + 80 shares below the paying
+  share, plus at most 3 for an uncle: the sim `BCH_PAYOUT_DEPTH`, 183, from
+  which output expiry, the full-validation zone, the reorg limit and the
+  prune depth (414) follow, as in production. The node logs the depths it
   uses (`Sim depths: ...`), and the prune scenarios read them from there.
-  The `late-miner` scenario waits for twice the maturity, a 200-share tip.
 - **Propagation delay**: `sim_overrides::spawn_delayed_broadcast()` models
   network latency with per-broadcast jitter.
 - **Auto-submit**: disabled under sim (a header meets the regtest target
@@ -159,8 +151,8 @@ seed = 1                        # per-node; differ per node in multi-node runs
 ```
 
 `p2poolv2_sim` reads both addresses with the node's own parsers for the
-configured chain. A Bitcoin config (no `chain`) still runs, with a Bitcoin
-payout address and a taproot share address, but nothing tests it.
+configured chain. A Bitcoin config (no `chain`) still runs, but nothing
+tests it.
 
 ```sh
 cargo build -p p2poolv2_sim --features sim
@@ -209,21 +201,17 @@ the frontier propagates). Run release; always `stop-swarm` before relaunching
 ### Offline PPLNS window comparison
 
 `pplns_compare` is a second binary in `p2poolv2_sim` that needs no node,
-store or bitcoind. For four pool sizes (0.05%, 1%, 10% and 30% of BCH's
-hashrate) and several seeds it draws a share chain at the 10 s target with a
-steady 10% miner, a small 0.1% miner, a 5% miner who mines from day 20 to
-day 40, and the rest of the pool, plus a Bernoulli block find per share. It
-pays every block found after the fixed window has filled through the real
-`PplnsWindow`, under four rules: the fixed `PPLNS_WINDOW_SHARES` window, the
-Bitcoin Cash window at `K` = 2 and at `K` = 3 (the code's value, P2Pool v1's
-`SPREAD`), and `K` = 3 with P2Pool v1's 0.5% finder bonus. It prints window
-length, the work-to-pay delay (maturity skip plus half the window), the
-joining miner's first payout and how long it is paid after leaving, and the
-coefficient of variation (CV) of the miners' daily and weekly income,
-averaged over the seeds. `--maturity` overrides the maturity skip for every
-rule, to measure a shorter one. Uncles are not modelled. It is built with
-its own `pplns-compare` feature, not `sim`, so it pays production-size
-windows.
+store or bitcoind. For pools of 0.05%, 1%, 10% and 30% of BCH's hashrate it
+draws a share chain at the 10 s target (a steady 10% miner, a 0.1% miner, a
+5% miner who mines from day 20 to day 40, and the rest) with a block find
+per share, and pays each block through the real `PplnsWindow` under four
+rules: the fixed `PPLNS_WINDOW_SHARES` window, the Bitcoin Cash window at
+`K` = 2 and at `K` = 3 (the code's value, P2Pool v1's `SPREAD`), and `K` = 3
+with P2Pool v1's 0.5% finder bonus. It prints window length, the
+work-to-pay delay, a joining and a leaving miner's payouts, and the
+coefficient of variation (CV) of daily and weekly income. `--maturity`
+overrides the maturity skip. Uncles are not modelled. Its own
+`pplns-compare` feature, not `sim`, keeps production-size windows.
 
 ```sh
 cargo run --release -p p2poolv2_sim --features pplns-compare --bin pplns_compare -- --seeds 5
@@ -248,7 +236,7 @@ failure mode that caused it.
 | `late-miner` | payout maturity: node `LATE_MINER` starts with its emitter off and starts mining once the chain is two maturity depths deep (a 200-share tip: Bitcoin Cash keeps its 100-share maturity in the sim build); `maturity-check` checks against the BCHN regtest coinbases that it is paid only once its shares are mature. Needs `LATE_MINER`; not part of `all` (RUNBOOK Test G) |
 | `pruned-join` | block body pruning: once the swarm is past the sim prune target and every node has pruned, one node's store is wiped and it rejoins as a fresh node. It must catch up, agree with node 0 on confirmed hashes below and above its prune height, never get a not-found reply (it never asks for a body its peers deleted), and never fail to store a block. Runs time-compressed; not part of `all` (RUNBOOK Test H) |
 | `deep-fork-refused` | reorg depth limit: the swarm is launched split (`FORK_GROUP_FROM`), so the chain forks at genesis. Once every node has pruned, the first minority node reconnects to node 0. The majority chain has more work, but its fork point is more than `MAX_REORG_DEPTH` (the sim `BCH_PAYOUT_DEPTH`, 183 shares) below the minority's confirmed tip, and below its prune target, so the node must log the refusal, keep its confirmed chain and keep confirming, while the majority keeps advancing. The nightly convergence check is skipped: two chains are the expected outcome. Not part of `all` (RUNBOOK Test I) |
-| `shallow-fork-reorged` | control for `deep-fork-refused`: the same split, but the reconnect happens at height 60, before any node prunes and within the 100-share reorg floor, and the minority must reorg onto the majority (the convergence check applies). Not part of `all` (RUNBOOK Test I) |
+| `shallow-fork-reorged` | control for `deep-fork-refused`: the same split, but the reconnect happens at height 60, before any node prunes and within the reorg floor (183 shares), and the minority must reorg onto the majority (the convergence check applies). Not part of `all` (RUNBOOK Test I) |
 | `all` | the three failure scenarios in sequence (local use) |
 
 Tunables: `FAILURE_SEED` (target selection; targets are printed so a failing
