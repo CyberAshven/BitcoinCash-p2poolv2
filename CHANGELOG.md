@@ -227,6 +227,9 @@ format and genesis re-pin.
 
 ### Changed
 
+- Connections Kademlia opens for a lookup close once no query needs them, so
+  `target_outgoing_peers` and its /16 rule set a node's outgoing peers; the
+  peer stays in the routing table (#154).
 - The header rules of the weak shares a share carries are checked on several
   cores, one fewer than the node's CPUs; the verdict is unchanged (#127).
 - A new share with 50,000 bytes or more of coinbase outputs is relayed
