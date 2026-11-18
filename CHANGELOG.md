@@ -366,6 +366,9 @@ format and genesis re-pin.
 
 ### Fixed
 
+- The sim swarm's nodes connect again: since #142 they all read one node key
+  from their shared run directory and refused to dial each other. Each now
+  takes a new peer ID at every start and stays off Nostr.
 - Templates from a node without long polling, such as Knuth, parse again: a
   missing `longpollid` reads as empty (#123).
 - Requests to the Bitcoin Cash node time out after 30 seconds without data,

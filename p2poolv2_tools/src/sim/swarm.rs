@@ -317,6 +317,13 @@ fn toml_basic_string(value: &str) -> String {
 }
 
 /// The config of one node.
+///
+/// Every node takes a new peer ID on each start (`ephemeral_node_key`): the
+/// stores share one run directory, and a kept key lives beside the store, so
+/// the nodes would all read one key and refuse to dial each other as
+/// themselves. A node with a new identity also keeps no peer list there.
+/// Nostr stays off (`nostr_relays = []`): a regtest swarm finds its peers in
+/// `dial_peers`.
 pub fn node_config(settings: &SwarmSettings, node: &NodeIdentity<'_>) -> String {
     let index = node.index;
     let p2p_port = settings.base_p2p + index as u32;
@@ -332,6 +339,8 @@ pub fn node_config(settings: &SwarmSettings, node: &NodeIdentity<'_>) -> String 
         r#"[network]
 listen_address = "/ip4/127.0.0.1/tcp/{p2p_port}"
 dial_peers = [{dial}]
+ephemeral_node_key = true
+nostr_relays = []
 max_pending_incoming = 10
 max_pending_outgoing = 10
 max_established_incoming = 50
