@@ -373,9 +373,9 @@ pub const PRUNE_DEPTH: usize = ChainDepths::BITCOIN.prune_depth();
 /// 2x `BCH_PAYOUT_DEPTH` and `WEAK_DEPTH`: 242,174 shares, about 28 days at
 /// 10 s, against Bitcoin's 254,016. The 48 shares of `WEAK_DEPTH` hold the
 /// summaries a payout for a weak share carried at the bottom of the
-/// full-validation zone reads (`ChainDepths::weak_anchor_depth`); until
-/// 2026-11-16 a syncing node did not fetch them, credited those shares
-/// without their weak shares and could mark an honest share invalid.
+/// full-validation zone reads (`ChainDepths::weak_anchor_depth`); without
+/// them a syncing node would credit those shares without their weak shares
+/// and could mark an honest share invalid.
 pub const BCH_PRUNE_DEPTH: usize = ChainDepths::BITCOIN_CASH.prune_depth();
 
 /// The gap between the prune height and the prune target, and the size of
@@ -430,6 +430,11 @@ struct ConfirmedEntry {
     /// The weak shares the share carries, one entry per credit group
     /// (`weak_credit`). Empty on Bitcoin.
     weak_entries: Vec<WeakEntry>,
+    /// Weak shares this share's own header says it carries
+    /// (`ShareHeader::weak_count`). Report-only: the paid weak shares are
+    /// `weak_entries`, read from the summaries. 0 where the header is not
+    /// known (the benchmark filler, a caller without a header).
+    weak_count: u16,
     /// Txid of the share's coinbase, which carries its payout right. Set on
     /// Bitcoin Cash, where the payout rights index needs it to evict the
     /// share; all zeros on Bitcoin.
@@ -681,6 +686,9 @@ struct Credit {
     /// How many weak shares earned this weight; 0 for a share or an uncle.
     /// A weak credit names the carrying share as `blockhash` and `nephew`.
     weak_shares: u32,
+    /// Weak shares the earning share's own header says it carries; 0 for an
+    /// uncle and for a weak credit (only a window share carries weak shares).
+    weak_count: u16,
     /// Payout level of the share or uncle that earned it.
     payout_level: u8,
     /// Where in its window share the entry sits: 0 for the share itself,
@@ -865,6 +873,9 @@ pub struct WindowCredit {
     /// How many weak shares the window share `blockhash` carries earned this
     /// weight; 0 for a share or an uncle.
     pub weak_shares: u32,
+    /// Weak shares the earning window share's own header says it carries
+    /// (`ShareHeader::weak_count`); 0 for an uncle and for a weak credit.
+    pub weak_count: u16,
 }
 
 /// What one miner earns in a payout window.
@@ -914,6 +925,7 @@ impl MinerCredits {
                 weight: credit.weight,
                 payout_address: payout_address.clone(),
                 weak_shares: credit.weak_shares,
+                weak_count: credit.weak_count,
             });
         }
     }
@@ -1953,6 +1965,7 @@ impl PplnsWindow {
                 entry.cuts = self.share_cuts(header);
                 entry.bch_prev = header.bitcoin_header.prev_blockhash;
                 entry.payout_level = header.payout_level;
+                entry.weak_count = header.weak_count;
                 entry.weak_entries =
                     self.weak_entries(summaries.get(blockhash), &parent_weak_works);
                 entry
@@ -2102,6 +2115,7 @@ impl PplnsWindow {
                 difficulty: uncle_entry.difficulty,
                 weight: uncle_entry.difficulty.saturating_mul(UNCLE_SCALED_WEIGHT),
                 weak_shares: 0,
+                weak_count: 0,
                 payout_level: uncle_entry.payout_level,
                 place_in_share: 1 + uncle_index,
             });
@@ -2128,6 +2142,7 @@ impl PplnsWindow {
                 .saturating_add(nephew_bonus)
                 .saturating_add(includer_bonus),
             weak_shares: 0,
+            weak_count: entry.weak_count,
             payout_level: entry.payout_level,
             place_in_share: 0,
         });
@@ -2525,6 +2540,7 @@ impl PplnsWindow {
             entry.cuts = cuts;
             entry.bch_prev = header.bitcoin_header.prev_blockhash;
             entry.payout_level = header.payout_level;
+            entry.weak_count = header.weak_count;
             entry.weak_entries = weak_entries;
             self.confirmed_entries.push_front(entry);
         }
@@ -2570,7 +2586,8 @@ impl PplnsWindow {
     }
 
     /// Build a ConfirmedEntry, resolving the miner address and the share
-    /// owner to internal keys.
+    /// owner to internal keys. The carried weak share count starts at 0;
+    /// callers that hold a header assign it as they do `payout_level`.
     fn build_confirmed_entry(
         &mut self,
         blockhash: BlockHash,
@@ -2595,6 +2612,7 @@ impl PplnsWindow {
             bch_prev: BlockHash::all_zeros(),
             payout_level: 0,
             weak_entries: Vec::new(),
+            weak_count: 0,
         }
     }
 
@@ -2957,6 +2975,7 @@ mod tests {
         entry.cuts = window.share_cuts(header);
         entry.bch_prev = header.bitcoin_header.prev_blockhash;
         entry.payout_level = header.payout_level;
+        entry.weak_count = header.weak_count;
         entry
     }
 
@@ -2978,6 +2997,7 @@ mod tests {
         entry.cuts = window.share_cuts(header);
         entry.bch_prev = header.bitcoin_header.prev_blockhash;
         entry.payout_level = header.payout_level;
+        entry.weak_count = header.weak_count;
         entry
     }
 
@@ -5046,6 +5066,7 @@ mod tests {
                 weight: distribution[nephew_miner],
                 payout_address: nephew_miner.clone(),
                 weak_shares: 0,
+                weak_count: 0,
             }]
         );
     }
@@ -5096,8 +5117,67 @@ mod tests {
                 weight: uncle_difficulty * UNCLE_SCALED_WEIGHT,
                 payout_address: uncle_header.miner_bitcoin_address.clone(),
                 weak_shares: 0,
+                weak_count: 0,
             }]
         );
+    }
+
+    //* A window share reports the weak shares its header says it carries,
+    //* and its weak credit reports the weak shares credited to it: the two
+    //* counts are separate and land on different rows of the same miner.
+    #[test]
+    fn test_window_credits_report_carried_and_credited_weak_shares() {
+        let genesis_hash = BlockHash::all_zeros();
+        let header_one = build_test_header(&genesis_hash.to_string(), PUBKEY_2G, 2);
+        let carrier_miner = header_one.miner_bitcoin_address.clone();
+
+        let mut window = PplnsWindow::new(TEST_NETWORK);
+        let mut carrier = entry_from_header(&mut window, &header_one, 0);
+        carrier.weak_count = 3;
+        carrier.weak_entries = vec![weak_entry_of(&mut window, carrier_miner.clone(), 2)];
+        window.confirmed_entries.push_back(carrier);
+
+        let window_credits = window
+            .get_window_credits_from_start_hash(
+                header_one.block_hash(),
+                BITCOIN_BLOCK_DIFFICULTY.into(),
+                &MockChainStoreHandle::default(),
+                10,
+            )
+            .unwrap();
+
+        let miner_credits = &window_credits.by_payout_address[&carrier_miner];
+        assert_eq!(miner_credits.share_count, 1);
+        assert_eq!(miner_credits.weak_share_count, 2);
+        assert_eq!(miner_credits.credits.len(), 2);
+        let share_credit = miner_credits
+            .credits
+            .iter()
+            .find(|credit| credit.nephew.is_none())
+            .expect("the carrier's own share credit");
+        assert_eq!(share_credit.weak_count, 3);
+        assert_eq!(share_credit.weak_shares, 0);
+        let weak_credit = miner_credits
+            .credits
+            .iter()
+            .find(|credit| credit.weak_shares > 0)
+            .expect("the carrier's weak credit");
+        assert_eq!(weak_credit.weak_shares, 2);
+        assert_eq!(weak_credit.weak_count, 0);
+    }
+
+    /// A weak credit group of `count` weak shares mined by `miner`, built as
+    /// the window builds one from a carried weak share's summary.
+    fn weak_entry_of(window: &mut PplnsWindow, miner: PayoutAddress, count: u32) -> WeakEntry {
+        WeakEntry {
+            cuts: ShareCuts::default(),
+            internal_key: window.address_keys.key_for(miner),
+            owner_key: window.owner_keys.key_for(ShareOwner::CashP2pkh([0x44; 20])),
+            bch_prev: BlockHash::all_zeros(),
+            payout_level: 0,
+            count,
+            work: 2 * u128::from(count),
+        }
     }
 
     //* Two shares pay the same payout address but name different share

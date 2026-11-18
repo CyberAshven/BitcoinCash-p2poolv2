@@ -44,11 +44,9 @@ pub const PAYOUT_LEVEL_FLOOR: u64 = 546;
 /// block. A node without it pays every payee its exact slice and builds
 /// another coinbase whenever a payee is below its level.
 ///
-/// From 2026-11-12 the segment is `levels-546x2-k1`. Level 0 is not valid:
-/// it paid 546 satoshis, which is below dust once the payout tree's fee is
-/// taken, so a level 0 win that landed in the tree went to the tree's
-/// largest payee. A node on `levels-546x2` still accepts that level, so the
-/// two cannot share a chain.
+/// `-k1`: the lowest valid level is 1 ([`MIN_PAYOUT_LEVEL`]). Level 0 would
+/// pay 546 satoshis, below dust once the payout tree's fee is taken.
+/// `docs/sharechain/rule-history.md` lists the earlier segment.
 pub const BCH_PAYOUT_LEVELS_RULE_TAG: &str = "levels-546x2-k1";
 
 /// The genesis share's payout level: the lowest a share may carry. Genesis
