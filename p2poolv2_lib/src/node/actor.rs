@@ -157,7 +157,10 @@ impl NodeHandle {
             relay_rx,
             weak_shares,
         )
-        .unwrap();
+        // Returned, not unwrapped as upstream does: a node that may not start
+        // (another node on its key or peer book, a file that holds no key)
+        // says why and exits, where it panicked.
+        .map_err(|error| -> Box<dyn Error + Send + Sync> { error.to_string().into() })?;
 
         tokio::spawn(async move {
             node_actor.run().await;
