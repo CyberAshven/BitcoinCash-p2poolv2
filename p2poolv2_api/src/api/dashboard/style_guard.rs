@@ -395,6 +395,7 @@ fn worker(active: bool) -> WorkerRow {
         accepted_work: 10,
         best_share: 5,
         last_share_at: 900,
+        hashrate: None,
     }
 }
 
@@ -505,6 +506,8 @@ fn miner_report(shares: Vec<MinerShare>) -> MinerResponse {
         expected_payments_a_month: Some(4.5),
         expected_income_a_month: Some(78_624.0),
         monthly_swing: Some(0.25),
+        hashrate: None,
+        recent_window: None,
         shares,
     }
 }
