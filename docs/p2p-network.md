@@ -158,16 +158,17 @@ prefilled weak shares are there to take that round trip out.
 ## Outgoing peers
 
 A node keeps at least `[network] target_outgoing_peers` outgoing peers, 16
-by default. An outgoing peer is a connected peer this node dialed: a
-`dial_peers` entry, a peer Kademlia reached in a query, or one dialed for
-the target. While the node has fewer, it dials one more peer a second
-(`p2poolv2_lib/src/node/outgoing_peer_target.rs`):
+by default. An outgoing peer is a connected peer this node dialed and
+keeps: a `dial_peers` entry, one dialed for the target, or one a DNS or
+Nostr seed returned. While the node has fewer, it dials one more peer a
+second (`p2poolv2_lib/src/node/outgoing_peer_target.rs`):
 
 - **Peers it has heard of.** The node keeps a book of up to 1,000 peers and
   their addresses, from Kademlia's routing updates and the listen addresses
   each peer reports through Identify. A peer reached through a DNS seed
   (Bitcoin only) enters it the same way once connected. Kademlia's own
-  table cannot serve: the node removes a peer from it on disconnect. Only
+  table cannot serve: the node removes a peer from it on disconnect, unless
+  the node closed that peer's lookup connection itself. Only
   globally routable IPv4 and IPv6 addresses with a TCP port are kept, never
   a `/dns` name, a loopback or a private address, so nodes on a LAN or on
   one machine find each other through `dial_peers`. A peer the node has
@@ -176,10 +177,23 @@ the target. While the node has fewer, it dials one more peer a second
 - **Spread over network groups.** The target picks a network group at
   random among those with a candidate, then a peer in it. It never dials a
   peer in an IPv4 /16 or IPv6 /32 where the node already has an outgoing
-  connection, as Bitcoin Cash Node does for its automatic peers
+  peer, as Bitcoin Cash Node does for its automatic peers
   (`CConnman::ThreadOpenConnections` and `CNetAddr::GetGroup`). Connections
   to `dial_peers` hold no group, and the target leaves those peers to the
   reconnector.
+- **Kademlia's lookups close.** Kademlia dials each peer a lookup asks that
+  is not connected, and share relay would keep that connection busy for
+  good: on 24 nodes every pair was connected within 30 seconds, and in a
+  large network lookups, not the target, would pick each node's peers. An
+  outgoing connection none of the node's own dials opened is Kademlia's. It
+  holds no group, does not count toward the target, and closes once it has
+  been open 10 seconds while no Kademlia query runs, or after 60 seconds,
+  the longest a query runs. The peer stays in Kademlia's routing table and
+  in the book. Bitcoin Cash Node closes its feeler connections the same way
+  once they have answered. A connection Kademlia opens to an anchor is the
+  target's own while the anchor's group is free. Inbound connections are
+  never closed this way, and with `target_outgoing_peers = 0` lookups stay
+  open, as before.
 - **Within the limits.** Outgoing dials in flight count toward the target,
   and no dial takes the node past `max_established_outgoing`. The target's
   own dials in flight stay below half of `max_pending_outgoing`, so
