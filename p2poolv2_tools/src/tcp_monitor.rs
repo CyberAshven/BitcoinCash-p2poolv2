@@ -352,11 +352,7 @@ pub fn screen(sample: &Sample, pool_port: u16, threshold: i64, runtime: Duration
     text.push_str("\x1b[H\x1b[2J\x1b[3J");
     let _ = writeln!(text, "==========================================");
     let _ = writeln!(text, "TCP Connection Monitor - Mining Pool");
-    let _ = writeln!(
-        text,
-        "Time: {}",
-        chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
-    );
+    let _ = writeln!(text, "Time: {}", crate::wall_clock::date_and_time());
     let _ = writeln!(
         text,
         "Runtime: {:02}:{:02}:{:02}",
@@ -474,7 +470,7 @@ pub fn log_sample(log_file: &Path, sample: &Sample) -> ToolResult<()> {
         .append(true)
         .open(log_file)
         .map_err(|error| ToolError::io("open", log_file, error))?;
-    let timestamp = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
+    let timestamp = crate::wall_clock::iso_seconds();
     let mut text = String::with_capacity(512);
     if new_file {
         text.push_str(CSV_HEADER);

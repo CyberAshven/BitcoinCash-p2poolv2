@@ -323,7 +323,7 @@ fn query_store(cli: &Path, store: &Path, arguments: &[&str]) -> String {
             if !output.status.success() {
                 eprintln!(
                     "[{}]   p2poolv2_cli {} failed on {} (exit {}):",
-                    chrono::Local::now().format("%H:%M:%S"),
+                    crate::wall_clock::time_of_day(),
                     arguments.join(" "),
                     store.display(),
                     output
@@ -401,7 +401,7 @@ fn check_chain_converged(cli: &Path, run_dir: &RunDir, node_count: usize) -> Con
     else {
         eprintln!(
             "[{}]   no confirmed tip readable from any store in {} (see the p2poolv2_cli errors above)",
-            chrono::Local::now().format("%H:%M:%S"),
+            crate::wall_clock::time_of_day(),
             run_dir.path().display()
         );
         return Convergence {
