@@ -26,6 +26,9 @@ use std::time::Duration;
 /// Interval between ping probes sent to each connected peer
 const PING_INTERVAL_SECS: u64 = 30;
 
+/// The longest a Kademlia query runs.
+pub(crate) const KADEMLIA_QUERY_TIMEOUT_SECS: u64 = 60;
+
 // Combine the behaviors we want to use
 //
 // `limits` comes first: the derive asks each behaviour in field order to take
@@ -73,7 +76,9 @@ impl P2PoolBehaviour {
         let mut kad_config = kad::Config::new(libp2p::StreamProtocol::try_from_owned(
             kad_protocol_string(config.stratum.network, config.stratum.chain, genesis_hash),
         )?);
-        kad_config.set_query_timeout(tokio::time::Duration::from_secs(60));
+        kad_config.set_query_timeout(tokio::time::Duration::from_secs(
+            KADEMLIA_QUERY_TIMEOUT_SECS,
+        ));
 
         let mut kademlia_behaviour =
             kad::Behaviour::with_config(local_key.public().to_peer_id(), store, kad_config);

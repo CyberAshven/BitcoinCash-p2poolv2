@@ -497,6 +497,16 @@ impl Node {
         self.swarm.connected_peers().cloned().collect()
     }
 
+    /// Connected peers that share-chain traffic goes to: each sent a
+    /// handshake and is not connected only through this node's lookup.
+    pub fn share_chain_peers(&self) -> Vec<libp2p::PeerId> {
+        self.swarm
+            .connected_peers()
+            .filter(|peer_id| self.request_response_handler.is_share_chain_peer(peer_id))
+            .cloned()
+            .collect()
+    }
+
     /// Save the outgoing peer target's book (`peer_book`), unless the node
     /// keeps none. A failure is logged; the node goes on.
     pub(crate) fn save_peer_book(&self) {
@@ -615,6 +625,44 @@ impl Node {
         }
     }
 
+    /// Close the connections Kademlia opened for lookups once no query needs
+    /// them (see outgoing_peer_target), unless target_outgoing_peers is 0.
+    /// Called on the outgoing target timer and when a Kademlia query ends.
+    fn close_finished_lookups(&mut self) {
+        if !self.outgoing_peer_target.has_target() {
+            return;
+        }
+        let queries_running = self
+            .swarm
+            .behaviour()
+            .kademlia
+            .iter_queries()
+            .next()
+            .is_some();
+        for connection_id in self.outgoing_peer_target.finished_lookups(queries_running) {
+            if self.swarm.close_connection(connection_id) {
+                debug!("Closing connection {connection_id}, which Kademlia opened for a lookup");
+                self.outgoing_peer_target
+                    .record_lookup_closing(connection_id);
+            }
+        }
+    }
+
+    /// Dial an address a DNS or Nostr seed returned, once, without reconnect
+    /// tracking. The connection is the node's own, not a lookup to close.
+    fn dial_seed(&mut self, address: Multiaddr) {
+        let dial_opts = DialOpts::unknown_peer_id().address(address.clone()).build();
+        let connection_id = dial_opts.connection_id();
+        match self.swarm.dial(dial_opts) {
+            Ok(()) => {
+                info!("Dialed {address}");
+                self.outgoing_peer_target
+                    .record_seed_dial_started(connection_id);
+            }
+            Err(error) => debug!("Failed to dial {address}: {error}"),
+        }
+    }
+
     /// Send a message to a specific peer
     pub fn send_to_peer(
         &mut self,
@@ -673,11 +721,14 @@ impl Node {
             } => {
                 self.peer_reconnector
                     .record_connection_established(connection_id);
-                self.outgoing_peer_target.record_connection_established(
+                // A lookup only discovers addresses: with the target on, this
+                // node sends no handshake on it, so it carries no share-chain
+                // traffic and closing it cuts nothing.
+                let lookup = self.outgoing_peer_target.record_connection_established(
                     peer_id,
                     connection_id,
                     &endpoint,
-                );
+                ) && self.outgoing_peer_target.has_target();
 
                 match self
                     .connection_tracker
@@ -695,7 +746,27 @@ impl Node {
                             "{:?} connection {} to already connected peer {} ({} open)",
                             peer_info.direction, connection_id, peer_id, num_established
                         );
+                        // A connection that is not a lookup, to a peer this
+                        // node reached only through one, makes the peer a
+                        // share-chain peer.
+                        if !lookup && self.request_response_handler.clear_lookup_only(&peer_id) {
+                            info!(
+                                "Connection {connection_id} to lookup-only peer {peer_id} is not a lookup, sending the handshake"
+                            );
+                            if let Ok(handshake_message) =
+                                build_handshake_message(&self.chain_store_handle)
+                            {
+                                self.swarm.send_request(&peer_id, handshake_message);
+                            }
+                        }
                         return Ok(());
+                    }
+                    ConnectionAction::Accept(ref peer_info) if lookup => {
+                        self.request_response_handler.set_lookup_only(peer_id);
+                        debug!(
+                            "{:?} connection {} to {} is a Kademlia lookup, no handshake",
+                            peer_info.direction, connection_id, peer_id
+                        );
                     }
                     ConnectionAction::Accept(ref peer_info) => {
                         match build_handshake_message(&self.chain_store_handle) {
@@ -734,7 +805,8 @@ impl Node {
                 self.connection_tracker.clear_ping_failures(connection_id);
                 self.connection_tracker
                     .handle_closed(&peer_id, num_established);
-                self.outgoing_peer_target
+                let closed_lookup = self
+                    .outgoing_peer_target
                     .record_connection_closed(connection_id);
                 if num_established > 0 {
                     info!(
@@ -743,7 +815,11 @@ impl Node {
                     return Ok(());
                 }
                 info!("Disconnected from peer: {peer_id} on connection {connection_id}");
-                self.swarm.behaviour_mut().remove_peer(&peer_id);
+                // A peer whose lookup connection this node closed is still up:
+                // Kademlia keeps it in its routing table, as disconnected.
+                if !closed_lookup {
+                    self.swarm.behaviour_mut().remove_peer(&peer_id);
+                }
                 self.request_response_handler.remove_peer(&peer_id);
                 let _ = self
                     .monitoring_event_sender
@@ -765,6 +841,26 @@ impl Node {
                     .record_connection_failure(connection_id);
                 self.outgoing_peer_target
                     .record_connection_failure(connection_id);
+                // Kademlia keeps a peer whose lookup connection this node
+                // closed, and keeps an unreachable peer at its last address,
+                // so a peer that has gone, or comes back under another ID,
+                // would stay in the routing table, be handed to other nodes'
+                // lookups and be dialed again by all of them. A peer the node
+                // failed to reach, and has no connection to, is forgotten; a
+                // live one is learned again from the next lookup that finds
+                // it. A dial the node itself declined says nothing of the peer.
+                if let Some(peer_id) = peer_id
+                    && !self.swarm.is_connected(&peer_id)
+                    && matches!(
+                        error,
+                        DialError::WrongPeerId { .. }
+                            | DialError::Transport(_)
+                            | DialError::NoAddresses
+                    )
+                {
+                    debug!("Removing unreachable peer {peer_id} from the routing table");
+                    self.swarm.behaviour_mut().remove_peer(&peer_id);
+                }
                 Ok(())
             }
             SwarmEvent::Behaviour(event) => match event {
@@ -927,15 +1023,20 @@ impl Node {
                 self.outgoing_peer_target
                     .learn_addresses(peer, addresses.iter());
             }
-            KademliaEvent::OutboundQueryProgressed { result, .. } => match result {
-                QueryResult::GetClosestPeers(Ok(ok)) => {
-                    debug!("Got closest peers: {:?}", ok.peers);
+            KademliaEvent::OutboundQueryProgressed { result, step, .. } => {
+                match result {
+                    QueryResult::GetClosestPeers(Ok(ok)) => {
+                        debug!("Got closest peers: {:?}", ok.peers);
+                    }
+                    QueryResult::GetClosestPeers(Err(err)) => {
+                        error!("Failed to get closest peers: {err}");
+                    }
+                    _ => debug!("Other query result: {:?}", result),
                 }
-                QueryResult::GetClosestPeers(Err(err)) => {
-                    error!("Failed to get closest peers: {err}");
+                if step.last {
+                    self.close_finished_lookups();
                 }
-                _ => debug!("Other query result: {:?}", result),
-            },
+            }
             _ => debug!("Other Kademlia event: {:?}", event),
         }
     }
@@ -970,7 +1071,9 @@ impl Node {
 mod tests {
     use super::ChainStoreHandle;
     use super::P2PoolBehaviourEvent;
+    use super::connection_tracker::BlockedIps;
     use super::dns_or_tcp_transport;
+    use super::outgoing_peer_target::OutgoingPeerTarget;
     use crate::config::{
         ApiConfig, BitcoinCashNetwork, Chain, Config, ElectrumConfig, LoggingConfig, NetworkConfig,
         StoreConfig, StratumConfig,
@@ -1277,6 +1380,116 @@ mod tests {
         assert!(found.is_ok(), "node B never connected to node A");
         node_a.shutdown().unwrap();
         assert!(node_a.nostr_announcer.is_none());
+    }
+
+    /// End to end on loopback: node A dials B, B dials C, and A's Kademlia
+    /// lookup through B dials C. Once no query runs, A closes that lookup
+    /// connection, keeps its dial_peer B, and keeps C in its routing table.
+    #[tokio::test]
+    async fn a_lookup_connection_closes_and_its_peer_stays_in_the_routing_table() {
+        let listener_b = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let listener_c = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address_b = format!(
+            "/ip4/127.0.0.1/tcp/{}",
+            listener_b.local_addr().unwrap().port()
+        );
+        let address_c = format!(
+            "/ip4/127.0.0.1/tcp/{}",
+            listener_c.local_addr().unwrap().port()
+        );
+        drop((listener_b, listener_c));
+        let mut node_c = build_test_node(build_test_config(&address_c, None));
+        let mut config_b = build_test_config(&address_b, None);
+        config_b.network.dial_peers = vec![address_c];
+        let mut node_b = build_test_node(config_b);
+        let mut config_a = build_test_config("/ip4/127.0.0.1/tcp/0", None);
+        config_a.network.dial_peers = vec![address_b];
+        let mut node_a = build_test_node(config_a.clone());
+        node_a.outgoing_peer_target =
+            OutgoingPeerTarget::new(&config_a.network, BlockedIps::default())
+                .with_lookup_settle(Duration::from_millis(300));
+        node_a
+            .chain_store_handle
+            .expect_get_tip_height()
+            .returning(|| Ok(None));
+        node_a
+            .chain_store_handle
+            .expect_get_chain_tip()
+            .returning(|| Ok(BlockHash::all_zeros()));
+        let peer_a = *node_a.swarm.local_peer_id();
+        let peer_b = *node_b.swarm.local_peer_id();
+        let peer_c = *node_c.swarm.local_peer_id();
+
+        let mut tick = tokio::time::interval(Duration::from_millis(100));
+        let mut lookup_opened = false;
+        let mut lookup_was_share_chain_peer = false;
+        let mut c_got_a_request = false;
+        let closed = tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                tokio::select! {
+                    event = node_a.swarm.select_next_some() => {
+                        let mut lookup_closed = false;
+                        match &event {
+                            SwarmEvent::ConnectionEstablished { peer_id, endpoint, .. }
+                                if *peer_id == peer_c =>
+                            {
+                                assert!(endpoint.is_dialer(), "A dials C for its lookup");
+                                lookup_opened = true;
+                            }
+                            SwarmEvent::ConnectionClosed { peer_id, .. } if *peer_id == peer_c => {
+                                lookup_closed = lookup_opened;
+                            }
+                            _ => {}
+                        }
+                        node_a.handle_swarm_event(event).unwrap();
+                        lookup_was_share_chain_peer |=
+                            node_a.share_chain_peers().contains(&peer_c);
+                        if lookup_closed {
+                            return;
+                        }
+                    }
+                    _ = node_b.swarm.select_next_some() => {}
+                    event = node_c.swarm.select_next_some() => {
+                        // A sends nothing of the share chain on its lookup.
+                        if let SwarmEvent::Behaviour(P2PoolBehaviourEvent::RequestResponse(
+                            libp2p::request_response::Event::Message {
+                                peer,
+                                message: libp2p::request_response::Message::Request { .. },
+                                ..
+                            },
+                        )) = &event
+                        {
+                            c_got_a_request |= *peer == peer_a;
+                        }
+                    }
+                    _ = tick.tick() => node_a.close_finished_lookups(),
+                }
+            }
+        })
+        .await;
+        assert!(
+            !c_got_a_request,
+            "A sends no handshake or request on its lookup"
+        );
+        assert!(
+            !lookup_was_share_chain_peer,
+            "share-chain traffic never goes to a lookup-only peer"
+        );
+
+        assert!(closed.is_ok(), "A never closed its lookup connection to C");
+        assert!(node_a.swarm.is_connected(&peer_b), "the dial_peer stays");
+        assert!(!node_a.swarm.is_connected(&peer_c));
+        let routing_table_has_c = node_a
+            .swarm
+            .behaviour_mut()
+            .kademlia
+            .kbuckets()
+            .any(|bucket| {
+                bucket
+                    .iter()
+                    .any(|entry| *entry.node.key.preimage() == peer_c)
+            });
+        assert!(routing_table_has_c, "C stays in A's routing table");
     }
 
     /// End to end on loopback, one connection allowed per peer: B dials A,
@@ -1653,6 +1866,60 @@ mod tests {
         assert_eq!(
             node.peer_reconnector.addresses_to_reconnect(&[]),
             vec![address]
+        );
+    }
+
+    /// A peer the node failed to reach and has no connection to leaves
+    /// Kademlia's routing table, so a node that has gone, or came back under
+    /// another ID, is not handed to lookups and dialed again; a dial the node
+    /// itself declined keeps the peer.
+    #[tokio::test]
+    async fn an_unreachable_peer_leaves_the_routing_table() {
+        let mut node = build_test_node(build_test_config("", None));
+        let address: Multiaddr = "/ip4/11.6.0.1/tcp/7005".parse().unwrap();
+        let in_routing_table = |node: &mut Node, peer_id: PeerId| {
+            node.swarm
+                .behaviour_mut()
+                .kademlia
+                .kbuckets()
+                .any(|bucket| {
+                    bucket
+                        .iter()
+                        .any(|entry| *entry.node.key.preimage() == peer_id)
+                })
+        };
+        let gone = PeerId::random();
+        let declined = PeerId::random();
+        for peer_id in [gone, declined] {
+            node.swarm
+                .behaviour_mut()
+                .add_address(peer_id, address.clone());
+            assert!(in_routing_table(&mut node, peer_id));
+        }
+
+        node.handle_swarm_event(SwarmEvent::OutgoingConnectionError {
+            connection_id: ConnectionId::new_unchecked(1),
+            peer_id: Some(gone),
+            error: DialError::WrongPeerId {
+                obtained: PeerId::random(),
+                address: address.clone(),
+            },
+        })
+        .unwrap();
+        node.handle_swarm_event(SwarmEvent::OutgoingConnectionError {
+            connection_id: ConnectionId::new_unchecked(2),
+            peer_id: Some(declined),
+            error: DialError::Aborted,
+        })
+        .unwrap();
+
+        assert!(
+            !in_routing_table(&mut node, gone),
+            "the gone peer is forgotten"
+        );
+        assert!(
+            in_routing_table(&mut node, declined),
+            "a declined dial keeps it"
         );
     }
 

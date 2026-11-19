@@ -227,6 +227,12 @@ format and genesis re-pin.
 
 ### Changed
 
+- Connections Kademlia opens for a lookup close once no query needs them, so
+  `target_outgoing_peers` and its /16 rule set a node's outgoing peers; the
+  peer stays in the routing table. A lookup only discovers addresses: no
+  handshake, no sync, and share-chain traffic goes only to peers that sent a
+  handshake. A peer the node fails to dial and has no connection to leaves
+  the routing table (#154).
 - At a chipnet minimum-difficulty mark P2Pool switches its jobs to the
   limit's nBits itself, also with a Template Provider, without waiting for a
   new template; mainnet and regtest are unchanged (#156).

@@ -1415,7 +1415,8 @@ pub struct NetworkConfig {
     /// learned of through Kademlia or Identify at a public IP address, one a
     /// second, never past `max_established_outgoing` and never in an IPv4
     /// /16 or IPv6 /32 where it already has an outgoing peer (`dial_peers`
-    /// do not count). 0 turns this off.
+    /// do not count). Connections Kademlia opens for a lookup close once no
+    /// lookup needs them. 0 turns both off.
     #[serde(default = "default_target_outgoing_peers")]
     pub target_outgoing_peers: u32,
 }
