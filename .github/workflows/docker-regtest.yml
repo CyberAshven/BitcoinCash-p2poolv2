@@ -92,14 +92,17 @@ jobs:
 
       # Chipnet and mainnet ship no RPC password: BCHN makes a random one on
       # first start, keeps it across restarts and never logs it. -connect=0
-      # keeps this throwaway node off the chipnet network.
+      # keeps this throwaway node off the chipnet network. -expire=0 keeps its
+      # RPC on: BCHN 29.2.0 turns RPC off on chipnet since the 2027 upgrade
+      # activated there (2026-11-15), and this checks the password, not the
+      # chain.
       - name: Chipnet BCHN makes and keeps a random RPC password
         run: |
           set -eu
           volume=bchn-rpc-check
           start() {
             docker run -d --name bchn-chipnet-check -e NETWORK=chipnet \
-              -v "$volume":/run/bchn-rpc p2poolv2/bchn:29.2.0 -connect=0 > /dev/null
+              -v "$volume":/run/bchn-rpc p2poolv2/bchn:29.2.0 -connect=0 -expire=0 > /dev/null
             for attempt in $(seq 1 30); do
               if docker exec bchn-chipnet-check bcli getblockchaininfo > /dev/null 2>&1; then
                 return 0
