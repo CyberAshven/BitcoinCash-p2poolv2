@@ -104,6 +104,14 @@ pub struct MinerResponse {
     /// each of the pool's blocks a month. Null without a template or a pool
     /// hashrate.
     pub expected_income_a_month: Option<f64>,
+    /// The miner's hashrate from its accepted stratum submissions in the
+    /// trailing ten minutes on this node, in hashes per second. Null before
+    /// its first one or for a miner not mining here (rendered as a dash,
+    /// like the miner page's), and on a node that predates the field.
+    pub hashrate: Option<f64>,
+    /// The window `hashrate` was taken from: how many submissions it holds,
+    /// over how many seconds. Null with `hashrate`.
+    pub recent_window: Option<(usize, u64)>,
     /// An estimate of how far a month's income strays from its mean, as a
     /// fraction of it: `sqrt(1 / credits a month + 1 / pool blocks a month)`,
     /// with `1 / payments a month` added under the root when its slice of a
@@ -372,7 +380,7 @@ pub(crate) async fn miner_report(
     let pool_blocks = pool_blocks(state, window_credits.anchor_height);
     let window_span_seconds = window_span_seconds(&state.chain_store_handle, &window_credits);
 
-    Ok(build_response(
+    let mut response = build_response(
         &miner,
         anchor,
         &window_credits,
@@ -380,7 +388,19 @@ pub(crate) async fn miner_report(
         &state.app_config,
         pool_blocks,
         window_span_seconds,
-    ))
+    );
+    // The stratum-session window the dashboards' Hashrate figures read, so
+    // this endpoint, the miner page and the miners page column all carry
+    // the same number.
+    let rate = state
+        .metrics_handle
+        .node_rates()
+        .miners
+        .get(&response.address)
+        .copied();
+    response.hashrate = rate.map(|stat| stat.hashrate);
+    response.recent_window = rate.map(|stat| (stat.count, stat.span_secs));
+    Ok(response)
 }
 
 /// The seconds between the oldest and the newest share of the window, from
@@ -592,6 +612,8 @@ fn build_response(
         expected_payments_a_month,
         expected_income_a_month,
         monthly_swing,
+        hashrate: None,
+        recent_window: None,
         shares,
     }
 }

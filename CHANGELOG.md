@@ -230,6 +230,9 @@ format and genesis re-pin.
 - Connections Kademlia opens for a lookup close once no query needs them, so
   `target_outgoing_peers` and its /16 rule set a node's outgoing peers; the
   peer stays in the routing table (#154).
+- At a chipnet minimum-difficulty mark P2Pool switches its jobs to the
+  limit's nBits itself, also with a Template Provider, without waiting for a
+  new template; mainnet and regtest are unchanged (#156).
 - The header rules of the weak shares a share carries are checked on several
   cores, one fewer than the node's CPUs; the verdict is unchanged (#127).
 - A new share with 50,000 bytes or more of coinbase outputs is relayed
@@ -298,6 +301,9 @@ format and genesis re-pin.
   `block_interval_secs` (#136).
 - A new store learns its BCH tip region first, in chunks of 2,000 headers,
   and a walk that stops is finished in later rounds (#136).
+- Synced with upstream P2Poolv2 through `75c4d7ea`: header sync serves every
+  share at a height and pages inside one, in place of #74's order (message
+  segment `headers-resume`, nodes restart together; testnet5 left out, #152).
 - Synced with upstream P2Poolv2 through `fdbf85df` (v0.18.0 and the
   Whatsminer change): host names in `dial_peers`, and a `d=` or `th=`
   difficulty that `mining.suggest_difficulty` no longer overrides; testnet5
@@ -374,6 +380,12 @@ format and genesis re-pin.
 - The sim swarm's nodes connect again: since #142 they all read one node key
   from their shared run directory and refused to dial each other. Each now
   takes a new peer ID at every start and stays off Nostr (#151).
+- Two nodes whose stores share a directory no longer take one peer ID from the
+  shared `p2p_node_key` and never connect, or load each other's peers from
+  `p2p_peers.json`: a node holds `p2p_node_key.lock` and `p2p_peers.json.lock`
+  while it runs, and a second node on either file stops at start with what to
+  set. Since #142 and #144 a swarm or a host with two nodes in one directory
+  mined separate chains without a word (#157).
 - Templates from a node without long polling, such as Knuth, parse again: a
   missing `longpollid` reads as empty (#123).
 - Requests to the Bitcoin Cash node time out after 30 seconds without data,

@@ -183,10 +183,95 @@ fn window_hashrate(window: &VecDeque<WorkDatum>, now: u64) -> Option<f64> {
     Some(work / span as f64)
 }
 
+/// The stat published for a window at `now` over the caller's `span_secs`
+/// instead of the window's own span: the rate, how many submissions the
+/// window holds, and the span it divided by. A miner's workers are each
+/// divided by their miner's span, so they add up to the miner's figure
+/// exactly whatever span each worker's own window covers. `None` where the
+/// window holds no submission in the trailing [`SUBMISSION_WINDOW_SECS`]
+/// seconds, or where `span_secs` is zero (no time to divide by).
+fn window_stat_over(window: &VecDeque<WorkDatum>, now: u64, span_secs: u64) -> Option<RateStat> {
+    if span_secs == 0 {
+        return None;
+    }
+    let cutoff = now.saturating_sub(SUBMISSION_WINDOW_SECS);
+    let mut work = 0.0;
+    let mut count = 0;
+    for datum in window.iter().filter(|datum| datum.at >= cutoff) {
+        work += datum.work;
+        count += 1;
+    }
+    if count == 0 {
+        return None;
+    }
+    Some(RateStat {
+        hashrate: work / span_secs as f64,
+        count,
+        span_secs,
+    })
+}
+
+/// The seconds `window` covers for [`window_stat`]: the full
+/// [`SUBMISSION_WINDOW_SECS`] once the window is that old, else the time
+/// since its oldest submission within the window.
+fn window_span_secs(window: &VecDeque<WorkDatum>, now: u64) -> u64 {
+    let cutoff = now.saturating_sub(SUBMISSION_WINDOW_SECS);
+    window
+        .iter()
+        .filter(|datum| datum.at >= cutoff)
+        .map(|datum| datum.at)
+        .min()
+        .map_or(0, |first| {
+            now.saturating_sub(first).min(SUBMISSION_WINDOW_SECS)
+        })
+}
+
+/// The stat published for the node and for each miner: the rate over the
+/// window's own span, how many submissions the window holds, and how many
+/// seconds it covers. `None` where `window_hashrate` is `None`. Workers are
+/// published through [`window_stat_over`] on their miner's span instead, so
+/// the workers of a miner add up to its figure.
+fn window_stat(window: &VecDeque<WorkDatum>, now: u64) -> Option<RateStat> {
+    let span_secs = window_span_secs(window, now);
+    window_stat_over(window, now, span_secs)
+}
+
+/// One published hashrate: the rate itself over its trailing window, with
+/// how many submissions the window holds and how many seconds it covers, as
+/// the dashboards subtitle it.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq)]
+pub struct RateStat {
+    /// The hashrate over the window, in hashes per second.
+    pub hashrate: f64,
+    /// Accepted submissions the window holds.
+    pub count: usize,
+    /// Seconds the window covers: the full [`SUBMISSION_WINDOW_SECS`] once
+    /// the window is that old, else the time since its oldest submission.
+    pub span_secs: u64,
+}
+
 /// Each miner's hashrate, in hashes per second, by the payout address it
 /// authorized with: what the job builders size heavier Bitcoin Cash shares
 /// by (`stratum::work::band_policy`).
 pub type MinerHashrates = Arc<HashMap<String, f64>>;
+
+/// This node's miners' and workers' hashrates from accepted stratum
+/// submissions in the trailing [`SUBMISSION_WINDOW_SECS`] seconds, published
+/// by the metrics actor for the dashboards. Runtime only.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct NodeRates {
+    /// The whole node's hashrate over the window.
+    pub stat: Option<RateStat>,
+    /// Each miner's hashrate, by the payout address it authorized with.
+    pub miners: HashMap<String, RateStat>,
+    /// Each worker's hashrate, by the `(payout address, worker name)` it
+    /// authorized with.
+    pub workers: HashMap<(String, String), RateStat>,
+}
+
+/// The latest [`NodeRates`] snapshot, shared between the actor and its
+/// handle.
+pub type NodeRatesSnapshot = Arc<NodeRates>;
 
 /// How often the actor publishes each miner's hashrate to the job builders.
 /// The ten-minute window moves on every accepted submission; a slow tick
@@ -264,9 +349,19 @@ pub struct MetricsActor {
     /// seconds per miner, by the payout address it authorized with. Runtime
     /// only, pruned on the same cutoff as the pool-wide window.
     miner_windows: HashMap<String, VecDeque<WorkDatum>>,
+    /// Accepted submissions in the trailing [`SUBMISSION_WINDOW_SECS`]
+    /// seconds per worker, by the `(payout address, worker name)` it
+    /// authorized with. Runtime only, pruned on the same cutoff as the
+    /// pool-wide window.
+    worker_windows: HashMap<(String, String), VecDeque<WorkDatum>>,
     /// Publishes each miner's hashrate to the job builders, which read it
     /// through [`MetricsHandle::miner_hashrate`].
     miner_hashrates_tx: watch::Sender<MinerHashrates>,
+    /// Publishes the node's, each miner's and each worker's hashrate to the
+    /// dashboards, which read it through [`MetricsHandle::node_rates`].
+    /// Separate from `miner_hashrates_tx` so the job builders' channel is
+    /// untouched.
+    node_rates_tx: watch::Sender<NodeRatesSnapshot>,
 }
 
 impl MetricsActor {
@@ -287,12 +382,15 @@ impl MetricsActor {
     fn with_metrics(metrics: PoolMetrics, receiver: mpsc::Receiver<MetricsMessage>) -> Self {
         let (miner_hashrates_tx, _miner_hashrates_rx) =
             watch::channel(Arc::new(HashMap::with_capacity(INITIAL_USER_MAP_CAPACITY)));
+        let (node_rates_tx, _node_rates_rx) = watch::channel(Arc::new(NodeRates::default()));
         Self {
             metrics,
             receiver,
             worker_connections: HashMap::with_capacity(INITIAL_USER_MAP_CAPACITY),
             miner_windows: HashMap::with_capacity(INITIAL_USER_MAP_CAPACITY),
+            worker_windows: HashMap::with_capacity(INITIAL_USER_MAP_CAPACITY),
             miner_hashrates_tx,
+            node_rates_tx,
         }
     }
 
@@ -302,8 +400,15 @@ impl MetricsActor {
         self.miner_hashrates_tx.subscribe()
     }
 
+    /// The node, miner and worker rates this actor publishes once it runs,
+    /// for its handle.
+    fn subscribe_node_rates(&self) -> watch::Receiver<NodeRatesSnapshot> {
+        self.node_rates_tx.subscribe()
+    }
+
     /// Start the actor's message handling loop, publishing each miner's
-    /// hashrate every [`MINER_HASHRATE_PUBLISH_INTERVAL`] beside it.
+    /// hashrate every [`MINER_HASHRATE_PUBLISH_INTERVAL`] beside it, and the
+    /// dashboards' node, miner and worker rates on the same tick.
     pub async fn run(mut self) {
         let mut publish_interval = tokio::time::interval(MINER_HASHRATE_PUBLISH_INTERVAL);
         let mut running = true;
@@ -313,7 +418,11 @@ impl MetricsActor {
                     Some(message) => self.handle_message(message).await,
                     None => running = false,
                 },
-                _ = publish_interval.tick() => self.publish_miner_hashrates(unix_seconds()),
+                _ = publish_interval.tick() => {
+                    let now = unix_seconds();
+                    self.publish_miner_hashrates(now);
+                    self.publish_node_rates(now);
+                }
             }
         }
     }
@@ -335,6 +444,42 @@ impl MetricsActor {
             }
         }
         self.miner_hashrates_tx.send_replace(Arc::new(hashrates));
+    }
+
+    /// Publish the node's, each miner's and each worker's hashrate at `now`,
+    /// dropping the windows that hold no submission any more.
+    fn publish_node_rates(&mut self, now: u64) {
+        let cutoff = now.saturating_sub(SUBMISSION_WINDOW_SECS);
+        self.worker_windows.retain(|_, window| {
+            while window.front().is_some_and(|datum| datum.at < cutoff) {
+                window.pop_front();
+            }
+            !window.is_empty()
+        });
+        let mut rates = NodeRates {
+            stat: window_stat(&self.metrics.submission_window, now),
+            miners: HashMap::with_capacity(self.miner_windows.len()),
+            workers: HashMap::with_capacity(self.worker_windows.len()),
+        };
+        for (address, window) in &self.miner_windows {
+            if let Some(stat) = window_stat(window, now) {
+                rates.miners.insert(address.clone(), stat);
+            }
+        }
+        for (identity, window) in &self.worker_windows {
+            // Each worker over its miner's span, so its figure and its
+            // miner's share one denominator: the workers add up to the
+            // miner exactly, whatever span of their own they cover. A
+            // worker whose miner is gone keeps its own span's figure.
+            let span_secs = rates
+                .miners
+                .get(&identity.0)
+                .map_or_else(|| window_span_secs(window, now), |miner| miner.span_secs);
+            if let Some(stat) = window_stat_over(window, now, span_secs) {
+                rates.workers.insert(identity.clone(), stat);
+            }
+        }
+        self.node_rates_tx.send_replace(Arc::new(rates));
     }
 
     async fn handle_message(&mut self, msg: MetricsMessage) {
@@ -473,6 +618,14 @@ impl MetricsActor {
             miner_window.pop_front();
         }
         miner_window.push_back(datum);
+        let worker_window = self
+            .worker_windows
+            .entry((btcaddress.clone(), workername.clone()))
+            .or_default();
+        while worker_window.front().is_some_and(|datum| datum.at < cutoff) {
+            worker_window.pop_front();
+        }
+        worker_window.push_back(datum);
         if let Some(user) = self.metrics.users.get_mut(&btcaddress) {
             user.record_share(&workername, difficulty, truediff, current_unix_timestamp);
         }
@@ -570,18 +723,25 @@ pub struct MetricsHandle {
     /// The actor's latest snapshot of each miner's hashrate, read
     /// synchronously by the job builders.
     miner_hashrates: watch::Receiver<MinerHashrates>,
+    /// The actor's latest snapshot of this node's, its miners' and its
+    /// workers' hashrates from stratum submissions, read synchronously by
+    /// the dashboards.
+    node_rates: watch::Receiver<NodeRatesSnapshot>,
 }
 
 impl MetricsHandle {
     /// A handle on the actor behind `sender`, reading the hashrates it
-    /// publishes through `miner_hashrates`.
+    /// publishes through `miner_hashrates` and the rates it publishes
+    /// through `node_rates`.
     fn new(
         sender: mpsc::Sender<MetricsMessage>,
         miner_hashrates: watch::Receiver<MinerHashrates>,
+        node_rates: watch::Receiver<NodeRatesSnapshot>,
     ) -> Self {
         Self {
             sender,
             miner_hashrates,
+            node_rates,
         }
     }
 
@@ -591,6 +751,14 @@ impl MetricsHandle {
     /// latest snapshot without waiting on the actor.
     pub fn miner_hashrate(&self, btcaddress: &str) -> Option<f64> {
         self.miner_hashrates.borrow().get(btcaddress).copied()
+    }
+
+    /// The node's, its miners' and its workers' hashrates from accepted
+    /// stratum submissions in the trailing ten minutes, as last published;
+    /// empty until the actor's first tick. Reads the latest snapshot without
+    /// waiting on the actor.
+    pub fn node_rates(&self) -> NodeRatesSnapshot {
+        Arc::clone(&self.node_rates.borrow())
     }
 
     /// Record an accepted share with the given difficulty
@@ -792,10 +960,11 @@ pub(crate) fn spawn_test_metrics_handle() -> MetricsHandle {
     let (sender, receiver) = mpsc::channel(METRICS_MESSAGE_BUFFER_SIZE);
     let actor = MetricsActor::new(receiver);
     let miner_hashrates = actor.subscribe_miner_hashrates();
+    let node_rates = actor.subscribe_node_rates();
     tokio::spawn(async move {
         actor.run().await;
     });
-    MetricsHandle::new(sender, miner_hashrates)
+    MetricsHandle::new(sender, miner_hashrates, node_rates)
 }
 
 /// The block effort numerator recomputed from the store: the summed
@@ -891,10 +1060,11 @@ pub async fn start_metrics_with_effort_seed(
     let mut actor = MetricsActor::with_existing_metrics(&log_dir, receiver)?;
     actor.metrics.work_since_last_block = work_since_last_block;
     let miner_hashrates = actor.subscribe_miner_hashrates();
+    let node_rates = actor.subscribe_node_rates();
     tokio::spawn(async move {
         actor.run().await;
     });
-    let handle = MetricsHandle::new(sender, miner_hashrates);
+    let handle = MetricsHandle::new(sender, miner_hashrates, node_rates);
     match pool_local_stats::start_stats_saver(
         handle.clone(),
         METRICS_SAVE_INTERVAL,
@@ -1043,7 +1213,11 @@ mod tests {
     fn each_miner_hashrate_is_published_by_its_address() {
         let (_sender, receiver) = mpsc::channel(8);
         let mut actor = MetricsActor::new(receiver);
-        let handle = MetricsHandle::new(mpsc::channel(1).0, actor.subscribe_miner_hashrates());
+        let handle = MetricsHandle::new(
+            mpsc::channel(1).0,
+            actor.subscribe_miner_hashrates(),
+            actor.subscribe_node_rates(),
+        );
         actor.record_share_accepted("big".into(), "worker".into(), 10, 10);
         actor.record_share_accepted("small".into(), "worker".into(), 1, 1);
         let now = actor.metrics.submission_window[0].at + 10;
@@ -1070,7 +1244,11 @@ mod tests {
     fn a_miner_without_recent_submissions_is_dropped() {
         let (_sender, receiver) = mpsc::channel(8);
         let mut actor = MetricsActor::new(receiver);
-        let handle = MetricsHandle::new(mpsc::channel(1).0, actor.subscribe_miner_hashrates());
+        let handle = MetricsHandle::new(
+            mpsc::channel(1).0,
+            actor.subscribe_miner_hashrates(),
+            actor.subscribe_node_rates(),
+        );
         actor.record_share_accepted("gone".into(), "worker".into(), 10, 10);
         let now = actor.metrics.submission_window[0].at + SUBMISSION_WINDOW_SECS + 1;
 
@@ -1078,6 +1256,147 @@ mod tests {
 
         assert_eq!(handle.miner_hashrate("gone"), None);
         assert!(actor.miner_windows.is_empty());
+    }
+
+    /// Each worker's hashrate is published from its own submissions, under
+    /// the address and worker name it authorized with, over its miner's span
+    /// so the workers add up to the miner's figure, and the node's figure
+    /// covers all of them in the pool-wide window.
+    #[test]
+    fn each_worker_hashrate_is_published_by_its_identity() {
+        let (_sender, receiver) = mpsc::channel(8);
+        let mut actor = MetricsActor::new(receiver);
+        let handle = MetricsHandle::new(
+            mpsc::channel(1).0,
+            actor.subscribe_miner_hashrates(),
+            actor.subscribe_node_rates(),
+        );
+        actor.record_share_accepted("m".into(), "rig1".into(), 10, 10);
+        actor.record_share_accepted("m".into(), "rig2".into(), 1, 1);
+        actor.record_share_accepted("m".into(), "rig1".into(), 4, 4);
+        let now = actor.metrics.submission_window[0].at + 10;
+
+        actor.publish_node_rates(now);
+
+        let rates = handle.node_rates();
+        let miner = rates.miners["m"];
+        // rig1 submitted first, so its window starts where the miner's does
+        // and its span is the miner's span either way.
+        let rig1_span = now - actor.worker_windows[&("m".into(), "rig1".into())][0].at;
+        assert_eq!(rig1_span, miner.span_secs);
+        let rig1 = rates.workers[&("m".to_string(), "rig1".to_string())];
+        assert!(
+            (rig1.hashrate - 14.0 * HASHES_PER_DIFFICULTY / rig1_span as f64).abs() < 1.0,
+            "{}",
+            rig1.hashrate
+        );
+        assert_eq!(rig1.count, 2, "rig1's two submissions");
+        assert_eq!(rig1.span_secs, miner.span_secs);
+        let rig2 = rates.workers[&("m".to_string(), "rig2".to_string())];
+        assert!(
+            (rig2.hashrate - HASHES_PER_DIFFICULTY / miner.span_secs as f64).abs() < 1.0,
+            "{}",
+            rig2.hashrate
+        );
+        assert_eq!(rig2.count, 1);
+        assert_eq!(rig2.span_secs, miner.span_secs);
+        assert!(
+            !rates
+                .workers
+                .contains_key(&("m".to_string(), "absent".to_string()))
+        );
+        // The miner's figure is the sum of its workers' submissions over the
+        // shared span, and the node's covers the same window over all its
+        // miners.
+        assert!(
+            (miner.hashrate - (rig1.hashrate + rig2.hashrate)).abs() < 1.0,
+            "{} vs {} + {}",
+            miner.hashrate,
+            rig1.hashrate,
+            rig2.hashrate
+        );
+        assert_eq!(miner.count, 3);
+        let stat = rates.stat.expect("the node's window holds the shares");
+        assert_eq!(stat.hashrate, miner.hashrate);
+        assert_eq!(stat.count, 3);
+        assert_eq!(stat.span_secs, miner.span_secs);
+    }
+
+    /// A worker whose own window starts later than its miner's is still
+    /// divided by the miner's span, so the workers add up to the miner's
+    /// figure exactly: each worker window holds its miner's submissions
+    /// partitioned by worker, and the shared denominator makes the partition
+    /// sum back to the whole whatever span each part covers.
+    #[test]
+    fn a_worker_that_joined_later_adds_up_to_its_miner() {
+        let (_sender, receiver) = mpsc::channel(8);
+        let mut actor = MetricsActor::new(receiver);
+        let handle = MetricsHandle::new(
+            mpsc::channel(1).0,
+            actor.subscribe_miner_hashrates(),
+            actor.subscribe_node_rates(),
+        );
+        let now = 1_000_000;
+        let early = WorkDatum {
+            at: now - 100,
+            work: 10.0 * HASHES_PER_DIFFICULTY,
+        };
+        let late = WorkDatum {
+            at: now - 10,
+            work: 4.0 * HASHES_PER_DIFFICULTY,
+        };
+        actor.miner_windows.insert("m".into(), [early, late].into());
+        actor
+            .worker_windows
+            .insert(("m".into(), "rig-early".into()), [early].into());
+        actor
+            .worker_windows
+            .insert(("m".into(), "rig-late".into()), [late].into());
+
+        actor.publish_node_rates(now);
+
+        let rates = handle.node_rates();
+        let miner = rates.miners["m"];
+        assert_eq!(miner.span_secs, 100, "the span since the miner's first");
+        let early_rate = rates.workers[&("m".to_string(), "rig-early".to_string())];
+        let late_rate = rates.workers[&("m".to_string(), "rig-late".to_string())];
+        assert_eq!(
+            late_rate.span_secs, miner.span_secs,
+            "the late worker measures over its miner's span, not its own"
+        );
+        assert!(
+            (late_rate.hashrate - 4.0 * HASHES_PER_DIFFICULTY / 100.0).abs() < 1.0,
+            "{}",
+            late_rate.hashrate
+        );
+        assert!(
+            (miner.hashrate - (early_rate.hashrate + late_rate.hashrate)).abs() < 1.0,
+            "{} vs {} + {}",
+            miner.hashrate,
+            early_rate.hashrate,
+            late_rate.hashrate
+        );
+    }
+
+    /// A worker whose submissions all left the ten-minute window is dropped.
+    #[test]
+    fn a_worker_without_recent_submissions_is_dropped() {
+        let (_sender, receiver) = mpsc::channel(8);
+        let mut actor = MetricsActor::new(receiver);
+        let handle = MetricsHandle::new(
+            mpsc::channel(1).0,
+            actor.subscribe_miner_hashrates(),
+            actor.subscribe_node_rates(),
+        );
+        actor.record_share_accepted("gone".into(), "rig".into(), 10, 10);
+        let now = actor.metrics.submission_window[0].at + SUBMISSION_WINDOW_SECS + 1;
+
+        actor.publish_node_rates(now);
+
+        assert!(handle.node_rates().workers.is_empty());
+        assert!(handle.node_rates().miners.is_empty());
+        assert!(handle.node_rates().stat.is_none());
+        assert!(actor.worker_windows.is_empty());
     }
 
     #[test]
