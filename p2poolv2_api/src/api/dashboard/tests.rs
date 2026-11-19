@@ -216,95 +216,97 @@ async fn the_miner_page_needs_an_address() {
     assert!(body.contains("Enter a payout or share chain address."));
 }
 
+/// The stratum-session rates the dashboards read: recorded through the
+/// handle, published on the actor's tick, and the miner detail figure and
+/// the column read one snapshot, so the two can never disagree.
 #[tokio::test]
 async fn the_miner_page_hashrate_matches_the_miners_page_column() {
     let (state, _store, _metrics) = build_state(None, None).await;
-    build_confirmed_test_chain(&state.chain_store_handle, 4).await;
-    let shares = newest_shares(&state, MINER_HASHRATE_SHARES);
-    let address = ShareInfoDisplay::from_share_info(
-        &shares[0],
-        Some(state.app_config.network),
-        state.app_config.cash_network,
-    )
-    .miner_bitcoin_address;
-    let detail = miner_hashrate(&state, &address);
-    let list = miner_hashrates(&state, &[address]);
-    let (rate, count, span) = detail.expect("the window holds the miner's shares");
-    assert_eq!(
-        list[0].expect("the column shows the same figure"),
-        rate,
-        "the miner page and the miners page column read one window"
-    );
-    assert_eq!(
-        (count, span),
-        (5, 4),
-        "all five shares are within the gap and span one second each"
-    );
-    // Every worked share contributes its work once over a span of four
-    // seconds, four shares over four seconds is one share's work per second.
-    assert!((rate - work_from_bits(shares[0].bits)).abs() < 1e-9);
-}
+    for rig in ["rig1", "rig2"] {
+        state
+            .metrics_handle
+            .increment_worker_count("bchtest:q".to_string(), rig.to_string())
+            .await
+            .expect("authorize worker");
+    }
+    for rig in ["rig1", "rig1", "rig2"] {
+        let share = SimplePplnsShare {
+            user_id: 1,
+            difficulty: 10,
+            btcaddress: Some("bchtest:q".to_string()),
+            workername: Some(rig.to_string()),
+            n_time: 1_000,
+            job_id: "job".to_string(),
+            extranonce2: "extra".to_string(),
+            nonce: "nonce".to_string(),
+        };
+        state
+            .metrics_handle
+            .record_share_accepted(share, 110)
+            .await
+            .expect("record share");
+    }
+    // Wait out the actor's publish tick: its interval fires every five
+    // seconds, so six seconds guarantee a tick at least a second after the
+    // last submission, and the window has a span to divide by.
+    tokio::time::sleep(std::time::Duration::from_secs(6)).await;
 
-#[tokio::test]
-async fn the_miner_hashrate_window_drops_shares_older_than_an_hour() {
-    let (state, _store, _metrics) = build_state(None, None).await;
-    let genesis_block = genesis_for_tests();
-    state
-        .chain_store_handle
-        .init_or_setup_genesis(genesis_block.clone())
+    let rates = state.metrics_handle.node_rates();
+    let stat = rates
+        .miners
+        .get("bchtest:q")
+        .copied()
+        .expect("the window holds the miner's submissions");
+    assert_eq!(stat.count, 3, "all three submissions are in the window");
+    assert!(stat.hashrate > 0.0, "{}", stat.hashrate);
+    let hashrate = stat.hashrate;
+    let listed = miners_page(&state, local_miners(&state).await, None)
         .await
-        .unwrap();
-    let first = TestShareBlockBuilder::new()
-        .prev_share_blockhash(genesis_block.block_hash().to_string())
-        .time(1_700_000_100)
-        .build();
-    confirm_share(&state, &first).await;
-    let second = TestShareBlockBuilder::new()
-        .prev_share_blockhash(first.block_hash().to_string())
-        .time(1_700_004_100)
-        .build();
-    confirm_share(&state, &second).await;
-    let third = TestShareBlockBuilder::new()
-        .prev_share_blockhash(second.block_hash().to_string())
-        .time(1_700_004_200)
-        .build();
-    confirm_share(&state, &third).await;
-
-    let shares = newest_shares(&state, MINER_HASHRATE_SHARES);
-    let address = ShareInfoDisplay::from_share_info(
-        &shares[0],
-        Some(state.app_config.network),
-        state.app_config.cash_network,
-    )
-    .miner_bitcoin_address;
-    let detail = miner_hashrate(&state, &address);
-    let (rate, count, span) = detail.expect("the newest shares hold the miner's work");
+        .0
+        .into_iter()
+        .find(|miner| miner.address == "bchtest:q")
+        .expect("the miner is listed");
     assert_eq!(
-        (count, span),
-        (2, 100),
-        "genesis and the first share fall outside the hour before the newest"
+        listed.hashrate.expect("the column shows a figure"),
+        hashrate,
+        "the miner page and the miners page column read one snapshot"
     );
-    let list = miner_hashrates(&state, &[address]);
-    assert_eq!(
-        list[0].expect("the column shows the same figure"),
-        rate,
-        "the miner page and the miners page column read one window"
-    );
+    // Each worker carries its own figure from the same snapshot.
+    for rig in ["rig1", "rig2"] {
+        let worker = listed
+            .workers
+            .iter()
+            .find(|worker| worker.name == rig)
+            .expect("the worker is listed");
+        assert!(
+            worker.hashrate.is_some_and(|rate| rate > 0.0),
+            "{rig} has its own window"
+        );
+    }
 }
 
+/// A miner that never submitted on this node has no rate anywhere: the
+/// detail page renders a dash and the column dashes the same miner.
 #[tokio::test]
-async fn a_miner_without_shares_in_the_window_has_no_hashrate() {
+async fn a_miner_without_submissions_has_no_hashrate() {
     let (state, _store, _metrics) = build_state(None, None).await;
-    build_confirmed_test_chain(&state.chain_store_handle, 4).await;
-    let stranger = "bchtest:qstrangerwithnoshareinthewindow";
+    let stranger = "bchtest:qstrangerwithnosubmissiononthisnode";
+    let rates = state.metrics_handle.node_rates();
     assert!(
-        miner_hashrate(&state, stranger).is_none(),
+        !rates.miners.contains_key(stranger),
         "the miner page renders a dash, not 0.00 H/s"
     );
-    assert_eq!(
-        miner_hashrates(&state, &[stranger.to_string()]),
-        vec![None],
-        "the miners page column dashes the same miner"
+    let listed = miners_page(&state, local_miners(&state).await, None)
+        .await
+        .0
+        .into_iter()
+        .find(|miner| miner.address == stranger);
+    if let Some(miner) = listed {
+        assert_eq!(miner.hashrate, None, "the column dashes the same miner");
+    }
+    assert!(
+        rates.stat.is_none(),
+        "the node's own figure is a dash before its first submission"
     );
 }
 
@@ -634,6 +636,7 @@ fn a_miner_row_serializes_as_the_wasm_app_reads_it() {
             accepted_work: 10,
             best_share: 5,
             last_share_at: 9,
+            hashrate: Some(2.0),
         }],
         accepted_work: 10,
         best_share: 5,
@@ -650,7 +653,8 @@ fn a_miner_row_serializes_as_the_wasm_app_reads_it() {
                 "active": true,
                 "accepted_work": 10,
                 "best_share": 5,
-                "last_share_at": 9
+                "last_share_at": 9,
+                "hashrate": 2.0
             }],
             "accepted_work": 10,
             "best_share": 5,
@@ -673,6 +677,7 @@ fn online_counts_count_active_workers() {
                 accepted_work: 1,
                 best_share: 1,
                 last_share_at: 1,
+                hashrate: None,
             })
             .collect(),
         accepted_work: 1,

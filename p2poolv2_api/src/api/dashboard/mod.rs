@@ -33,14 +33,11 @@ use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::get;
 use bitcoin::{BlockHash, Target};
 use chart::ChartBlock;
-use history::{
-    HashrateHistory, MAX_SHARE_GAP_SECS, is_block, newest_shares, pool_hashrate, work_from_bits,
-};
+use history::{HashrateHistory, is_block, pool_hashrate};
 use maud::Markup;
 use p2poolv2_lib::address::bch_share::BchShareNetwork;
 use p2poolv2_lib::address_display::ShareInfoDisplay;
 use p2poolv2_lib::address_display::payout_address_string;
-use p2poolv2_lib::store::dag_store::ShareInfo;
 use pages::{
     BlockView, BlocksView, FoundBlockRow, MinerRow, MinerView, MinersView, Overview, PAGE_SIZE,
     Paging, ShareRow, ShareView, SharesView, Site, WorkerRow, range_window_secs,
@@ -49,9 +46,6 @@ use serde::Deserialize;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-
-/// Shares a miner's hashrate is estimated from.
-const MINER_HASHRATE_SHARES: u32 = 500;
 
 /// Found blocks the overview lists; the blocks page has them all.
 const RECENT_BLOCKS: usize = 5;
@@ -114,7 +108,7 @@ pub(crate) fn site(state: &AppState) -> Site {
     }
 }
 
-fn unix_now() -> u64 {
+pub(crate) fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|elapsed| elapsed.as_secs())
@@ -350,6 +344,9 @@ fn payout_address_display(state: &AppState, stored: &str) -> String {
 /// The miners on this node with their workers, by accepted work, most first.
 pub(crate) async fn local_miners(state: &AppState) -> Vec<MinerRow> {
     let metrics = state.metrics_handle.get_metrics().await;
+    // The stratum-session rates the actor last published: each worker's own
+    // figure fills its cell beside the accepted-work columns.
+    let rates = state.metrics_handle.node_rates();
     let mut miners: Vec<MinerRow> = metrics
         .users
         .iter()
@@ -363,6 +360,10 @@ pub(crate) async fn local_miners(state: &AppState) -> Vec<MinerRow> {
                     accepted_work: worker.shares_valid_total,
                     best_share: worker.best_share,
                     last_share_at: worker.last_share_at,
+                    hashrate: rates
+                        .workers
+                        .get(&(address.clone(), name.clone()))
+                        .map(|stat| stat.hashrate),
                 })
                 .collect();
             workers.sort_by(|left, right| left.name.cmp(&right.name));
@@ -408,8 +409,7 @@ pub(crate) fn is_looked_up_miner(miner: &MinerRow, typed: &str, canonical: Optio
 }
 
 /// Page `page` of `miners`, each with its fraction of the next block's
-/// payout and its hashrate over the window behind the Hashrate column. Only
-/// this page's miners are looked up, in the window and in the store.
+/// payout. Only this page's miners are looked up, in the PPLNS window.
 pub(crate) async fn miners_page(
     state: &Arc<AppState>,
     miners: Vec<MinerRow>,
@@ -421,20 +421,18 @@ pub(crate) async fn miners_page(
         .skip((paging.page - 1) * PAGE_SIZE)
         .take(PAGE_SIZE)
         .collect();
+    // The Hashrate column: each miner's own stratum-session figure, as
+    // last published by the metrics actor. The read is synchronous, so it
+    // comes before the payout lookups.
+    let rates = state.metrics_handle.node_rates();
+    for miner in &mut shown {
+        miner.hashrate = rates.miners.get(&miner.address).map(|stat| stat.hashrate);
+    }
     for miner in &mut shown {
         miner.payout_fraction = miner_report(state, &miner.address, 1)
             .await
             .ok()
             .map(|report| report.payout_fraction);
-    }
-    if !shown.is_empty() {
-        let addresses: Vec<String> = shown.iter().map(|miner| miner.address.clone()).collect();
-        let read = read_store(state, move |state| miner_hashrates(state, &addresses)).await;
-        if let Ok(hashrates) = read {
-            for (miner, hashrate) in shown.iter_mut().zip(hashrates) {
-                miner.hashrate = hashrate;
-            }
-        }
     }
     (shown, paging)
 }
@@ -658,95 +656,6 @@ struct MinerPageQuery {
     page: Option<usize>,
 }
 
-/// The window behind the miners page's Hashrate column, oldest first, with
-/// the span it covers in seconds: the shares within [`MAX_SHARE_GAP_SECS`] of
-/// the newest one, falling back to the two newest shares as the KPI
-/// hashrates do, so a stale seed (e.g. the genesis share at a fixed past
-/// time) cannot stretch the span. The window's oldest share only opens the
-/// span: its work was done before it. `None` where `shares` holds fewer than
-/// two or the window has no time span. Callers hand over the newest
-/// [`MINER_HASHRATE_SHARES`] confirmed shares.
-fn miner_hashrate_window(shares: &[ShareInfo]) -> Option<(Vec<&ShareInfo>, u32)> {
-    if shares.len() < 2 {
-        return None;
-    }
-    let mut window: Vec<&ShareInfo> = shares.iter().collect();
-    window.sort_by_key(|share| share.timestamp);
-    let newest = window.last()?.timestamp;
-    let mut kept: Vec<&ShareInfo> = window
-        .iter()
-        .copied()
-        .filter(|share| newest.saturating_sub(share.timestamp) <= MAX_SHARE_GAP_SECS)
-        .collect();
-    if kept.len() < 2 {
-        kept = window[window.len() - 2..].to_vec();
-    }
-    let span = newest
-        .checked_sub(kept[0].timestamp)
-        .filter(|span| *span > 0)?;
-    Some((kept, span))
-}
-
-/// Each payout address's hashrate over [`miner_hashrate_window`]'s window,
-/// aligned with `addresses`: the work of its shares in the window over the
-/// window's time span. `None` per address with no share of its work in the
-/// window, rendered as a dash, and `None` throughout where the window has no
-/// time span. The column does not decay as the chain grows stale: it is
-/// anchored to chain activity, not to the wall clock.
-fn miner_hashrates(state: &AppState, addresses: &[String]) -> Vec<Option<f64>> {
-    let mut rates: Vec<Option<f64>> = vec![None; addresses.len()];
-    let shares = newest_shares(state, MINER_HASHRATE_SHARES);
-    let Some((kept, span)) = miner_hashrate_window(&shares) else {
-        return rates;
-    };
-    let mut work = vec![0.0_f64; addresses.len()];
-    let mut matched = vec![false; addresses.len()];
-    for share in kept.iter().skip(1) {
-        let share_work = work_from_bits(share.bits);
-        let display = ShareInfoDisplay::from_share_info(
-            share,
-            Some(state.app_config.network),
-            state.app_config.cash_network,
-        );
-        for (index, address) in addresses.iter().enumerate() {
-            if display.miner_bitcoin_address == *address || display.miner_address == *address {
-                matched[index] = true;
-                work[index] += share_work;
-            }
-        }
-    }
-    for (index, rate) in rates.iter_mut().enumerate() {
-        if matched[index] {
-            *rate = Some(work[index] / f64::from(span));
-        }
-    }
-    rates
-}
-
-/// A miner's hashrate over [`miner_hashrate_window`]'s window -- the figure
-/// the miners page's Hashrate column shows for `address` -- with how many
-/// shares and seconds the window covers. `None` where the window has no time
-/// span or the miner has no share of its work in it, as the column renders
-/// a dash.
-fn miner_hashrate(state: &AppState, address: &str) -> Option<(f64, usize, u32)> {
-    let shares = newest_shares(state, MINER_HASHRATE_SHARES);
-    let (kept, span) = miner_hashrate_window(&shares)?;
-    let mut work = 0.0_f64;
-    let mut matched = false;
-    for share in kept.iter().skip(1) {
-        let display = ShareInfoDisplay::from_share_info(
-            share,
-            Some(state.app_config.network),
-            state.app_config.cash_network,
-        );
-        if display.miner_bitcoin_address == address || display.miner_address == address {
-            matched = true;
-            work += work_from_bits(share.bits);
-        }
-    }
-    matched.then(|| (work / f64::from(span), kept.len(), span))
-}
-
 async fn miner(
     State(dashboard): State<Arc<DashboardState>>,
     Query(query): Query<MinerPageQuery>,
@@ -767,11 +676,9 @@ async fn miner(
         Ok(report) => report,
         Err(error) => return error_page(state, error),
     };
-    let reported_address = report.address.clone();
-    let estimate = read_store(state, move |state| miner_hashrate(state, &reported_address))
-        .await
-        .ok()
-        .flatten();
+    // The rate the report already carries is the same stratum-session
+    // snapshot the miners page's column reads: one source, one number.
+    let rate = (report.hashrate, report.recent_window);
     let workers = local_miners(state)
         .await
         .into_iter()
@@ -783,8 +690,8 @@ async fn miner(
         site: site(state),
         now: unix_now(),
         report,
-        hashrate: estimate.map(|(hashrate, _, _)| hashrate),
-        recent_window: estimate.map(|(_, shares, seconds)| (shares, seconds)),
+        hashrate: rate.0,
+        recent_window: rate.1,
         workers,
         paging,
     }))

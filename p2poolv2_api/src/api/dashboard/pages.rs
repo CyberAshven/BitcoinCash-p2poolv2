@@ -382,6 +382,10 @@ pub(crate) struct WorkerRow {
     pub(crate) accepted_work: u64,
     pub(crate) best_share: u64,
     pub(crate) last_share_at: u64,
+    /// Its hashrate from its own accepted stratum submissions in the
+    /// trailing ten minutes, in hashes per second, or `None` before its
+    /// first one (rendered as a dash).
+    pub(crate) hashrate: Option<f64>,
 }
 
 /// A miner on this node, for the miners page. `/miners` serves the same rows
@@ -396,9 +400,9 @@ pub(crate) struct MinerRow {
     /// Its fraction of the next block's PPLNS payout, when the window could
     /// be read for it.
     pub(crate) payout_fraction: Option<f64>,
-    /// Its hashrate over the window behind the miners page's Hashrate
-    /// column, in hashes per second, or `None` where its work is not in the
-    /// window (rendered as a dash).
+    /// Its hashrate from its accepted stratum submissions in the trailing
+    /// ten minutes, in hashes per second, or `None` before its first one
+    /// (rendered as a dash).
     pub(crate) hashrate: Option<f64>,
 }
 
@@ -415,12 +419,12 @@ pub(crate) struct MinerView {
     pub(crate) site: Site,
     pub(crate) now: u64,
     pub(crate) report: MinerResponse,
-    /// The miner's hashrate over the window behind the miners page's
-    /// Hashrate column, if it has any there.
+    /// The miner's hashrate from its accepted stratum submissions in the
+    /// trailing ten minutes, if it has any on this node.
     pub(crate) hashrate: Option<f64>,
-    /// The window `hashrate` was taken from: how many shares, over how many
-    /// seconds.
-    pub(crate) recent_window: Option<(usize, u32)>,
+    /// The window `hashrate` was taken from: how many submissions it holds,
+    /// over how many seconds.
+    pub(crate) recent_window: Option<(usize, u64)>,
     /// Its workers, when it mines on this node.
     pub(crate) workers: Vec<WorkerRow>,
     pub(crate) paging: Paging,
@@ -1573,8 +1577,9 @@ pub(crate) fn block(view: &BlockView) -> Markup {
     )
 }
 
-/// A miner's worker rows. `hashrate` adds the empty Hashrate cell the miners
-/// page's table has (after State); the miner page's table has no such column.
+/// A miner's worker rows. `hashrate` adds the worker's own stratum-session
+/// figure beside State, as the miners page's table has; the miner page's
+/// table has no such column.
 fn worker_rows(now: u64, workers: &[WorkerRow], hashrate: bool) -> Markup {
     html! {
         @for worker in workers {
@@ -1582,7 +1587,7 @@ fn worker_rows(now: u64, workers: &[WorkerRow], hashrate: bool) -> Markup {
                 span {}
                 span.mono { (worker.name) }
                 span { @if worker.active { "online" } @else { "idle" } }
-                @if hashrate { span {} }
+                @if hashrate { span { (optional(worker.hashrate, fmt_hashrate)) } }
                 span { (fmt_difficulty(worker.accepted_work as f64)) }
                 span {}
                 span { "best " (fmt_difficulty(worker.best_share as f64)) }
@@ -3009,6 +3014,8 @@ mod tests {
                 expected_payments_a_month: Some(17.17),
                 expected_income_a_month: Some(300_000.0),
                 monthly_swing: Some(0.308),
+                hashrate: None,
+                recent_window: None,
                 shares: Vec::new(),
             },
             hashrate: None,
@@ -3055,6 +3062,8 @@ mod tests {
                 expected_payments_a_month: None,
                 expected_income_a_month: None,
                 monthly_swing: None,
+                hashrate: None,
+                recent_window: None,
                 shares: Vec::new(),
             },
             hashrate: None,
@@ -3142,6 +3151,8 @@ mod tests {
                 expected_payments_a_month: None,
                 expected_income_a_month: None,
                 monthly_swing: None,
+                hashrate: None,
+                recent_window: None,
                 shares: vec![carrying, weak, uncle, plain],
             },
             hashrate: None,

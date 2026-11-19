@@ -385,6 +385,16 @@ pub struct Miner {
     /// `None` without credits, a window span, a template or a pool hashrate.
     #[serde(default)]
     pub monthly_swing: Option<f64>,
+    /// The miner's hashrate from its accepted stratum submissions in the
+    /// trailing ten minutes on this node, in hashes per second; `None` on a
+    /// node that does not report it or a miner not mining here (rendered as
+    /// a dash, as the node's page does).
+    #[serde(default)]
+    pub hashrate: Option<f64>,
+    /// The window `hashrate` was taken from: how many submissions it holds,
+    /// over how many seconds. `None` with `hashrate`.
+    #[serde(default)]
+    pub recent_window: Option<(usize, u64)>,
     pub shares: Vec<MinerShare>,
 }
 
@@ -396,6 +406,11 @@ pub struct Worker {
     pub accepted_work: u64,
     pub best_share: u64,
     pub last_share_at: u64,
+    /// Its hashrate from its own accepted stratum submissions in the
+    /// trailing ten minutes, in hashes per second; `None` on a node that
+    /// does not report it or before its first one (rendered as a dash).
+    #[serde(default)]
+    pub hashrate: Option<f64>,
 }
 
 /// A miner on this node.
@@ -615,6 +630,17 @@ mod tests {
         assert_eq!(report.expected_payments_a_month, Some(17.17));
         assert_eq!(report.expected_income_a_month, Some(300_000.0));
         assert_eq!(report.monthly_swing, Some(0.308));
+    }
+
+    #[test]
+    fn test_miner_report_parses_its_stratum_hashrate() {
+        let body = r#"{"address":"bchtest:q","address_type":"payout","anchor":"aa",
+            "anchor_height":30,"window":{"share_count":30},"share_count":7,
+            "uncle_count":1,"share_fraction":0.1,"payout_fraction":0.01,
+            "shares":[],"hashrate":8500000.0,"recent_window":[42,600]}"#;
+        let report: Miner = serde_json::from_str(body).unwrap();
+        assert_eq!(report.hashrate, Some(8.5e6));
+        assert_eq!(report.recent_window, Some((42, 600)));
     }
 
     #[test]
