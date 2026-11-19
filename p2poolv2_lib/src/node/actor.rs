@@ -1082,7 +1082,7 @@ impl NodeActor {
     /// `Ack`. A synchronous enqueue per peer, like a block broadcast.
     fn on_relay_transaction(&mut self, relay: RelayTransaction) {
         let txid = relay.transaction.compute_txid();
-        let peers = self.node.connected_peers();
+        let peers = self.node.share_chain_peers();
         let mut relayed = 0;
         for peer in peers.iter().filter(|peer| Some(**peer) != relay.source) {
             self.node
@@ -1109,7 +1109,7 @@ impl NodeActor {
     /// connected peer is told. Same send as a share transaction.
     fn send_local_weak_share(&mut self, weak_share: WeakShare) {
         let pow_hash = weak_share.pow_hash();
-        let peers = self.node.connected_peers();
+        let peers = self.node.share_chain_peers();
         let mut relayed = 0;
         for peer in &peers {
             self.node
@@ -1126,7 +1126,7 @@ impl NodeActor {
     /// omitting the hash that peer sent. `send_request` is the same call
     /// `on_relay_transaction` makes.
     fn flush_weak_announcements(&mut self) {
-        let peers = self.node.connected_peers();
+        let peers = self.node.share_chain_peers();
         let inventories = self.pending_weak_announcements.flush(&peers);
         for (peer, hashes) in inventories {
             self.node
@@ -1164,7 +1164,7 @@ impl NodeActor {
                 debug!("Sent message to response channel: {request_id:?}");
             }
             SwarmSend::BroadcastBlock(share_block, bch_headers) => {
-                let connected_peers = self.node.connected_peers();
+                let connected_peers = self.node.share_chain_peers();
                 let prefill = weak_shares_to_prefill(
                     &share_block,
                     self.node.request_response_handler.weak_pool().as_ref(),
@@ -1321,7 +1321,7 @@ impl NodeActor {
             return;
         }
 
-        let peers = self.node.connected_peers();
+        let peers = self.node.share_chain_peers();
         if !peers.is_empty() {
             let now_secs = SystemTime::now()
                 .duration_since(UNIX_EPOCH)

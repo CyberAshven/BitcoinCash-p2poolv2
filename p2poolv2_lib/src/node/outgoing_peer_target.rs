@@ -284,14 +284,16 @@ impl OutgoingPeerTarget {
     /// it goes to a dial_peer; so does one to an anchor while the target has
     /// room and the group is free. Any other outgoing connection is
     /// Kademlia's lookup. A dial the target started is no longer pending.
+    /// Returns whether the connection is a lookup.
     pub(crate) fn record_connection_established(
         &mut self,
         peer_id: PeerId,
         connection_id: ConnectionId,
         endpoint: &ConnectedPoint,
-    ) {
+    ) -> bool {
         let target_dial = self.pending.remove(&connection_id);
         let seed_dial = self.seed_dials.remove(&connection_id);
+        let mut is_lookup = false;
         if let ConnectedPoint::Dialer { address, .. } = endpoint {
             if self
                 .dial_peer_addresses
@@ -319,7 +321,9 @@ impl OutgoingPeerTarget {
                     lookup_established_at: lookup.then(Instant::now),
                 },
             );
+            is_lookup = lookup;
         }
+        is_lookup
     }
 
     /// Whether the target takes a connection it did not dial to `peer_id` as

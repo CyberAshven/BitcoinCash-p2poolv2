@@ -173,7 +173,8 @@ second (`p2poolv2_lib/src/node/outgoing_peer_target.rs`):
   each peer reports through Identify. A peer reached through a DNS seed
   (Bitcoin only) enters it the same way once connected. Kademlia's own
   table cannot serve: the node removes a peer from it on disconnect, unless
-  the node closed that peer's lookup connection itself. Only
+  the node closed that peer's lookup connection itself, and when a dial to a
+  peer it has no connection to fails. Only
   globally routable IPv4 and IPv6 addresses with a TCP port are kept, never
   a `/dns` name, a loopback or a private address, so nodes on a LAN or on
   one machine find each other through `dial_peers`. A peer the node has
@@ -191,9 +192,21 @@ second (`p2poolv2_lib/src/node/outgoing_peer_target.rs`):
   picked a node's peers. An outgoing connection none of the node's own dials
   opened is Kademlia's: it holds no group, does not count, and closes after
   10 seconds once no query runs, or after 60, Kademlia's query timeout, as
-  Bitcoin Cash Node's feeler connections close. The peer stays in the
-  routing table and the book. A connection to an anchor is the target's;
-  inbound connections stay; `target_outgoing_peers = 0` keeps lookups open.
+  Bitcoin Cash Node's feeler connections close. Like a feeler, a lookup only
+  discovers addresses: the node sends no handshake on it and answers the
+  peer's without a sync, and shares, weak shares and transactions go only to
+  peers that sent a handshake, so the lookup's peer never gets them and
+  closing the lookup cuts nothing in flight. The peer stays in the routing
+  table and the book; a connection that is not a lookup, opened while the
+  lookup is, makes it a share-chain peer. A connection to an anchor is the
+  target's; inbound connections stay; `target_outgoing_peers = 0` keeps
+  lookups open as full peers.
+- **Gone peers are forgotten.** Kademlia keeps an unreachable peer at its
+  last address, so a node that left, or came back under another peer ID,
+  would be handed to every lookup and dialed again by every node. When a
+  dial to a peer the node has no connection to fails, the node removes the
+  peer from the routing table; a live one is learned again from the next
+  lookup that finds it.
 - **Within the limits.** Outgoing dials in flight count toward the target,
   and no dial takes the node past `max_established_outgoing`. The target's
   own dials in flight stay below half of `max_pending_outgoing`, so
