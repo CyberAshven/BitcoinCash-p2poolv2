@@ -69,7 +69,11 @@ A node keeps its peer ID across restarts: its libp2p key is made on the
 first start and kept in `p2p_node_key` beside the store
 (`[network] node_key_path`). Peers and announcements keep finding it under
 the same peer ID. With `ephemeral_node_key = true` a node gets a new peer
-ID every start instead, which nothing links across restarts.
+ID every start instead, which nothing links across restarts. The key and the peer
+book (below) belong to one running node: a node holds `p2p_node_key.lock`
+and `p2p_peers.json.lock` while it runs, so a second node whose store sits in
+the same directory stops at start rather than taking the same peer ID, which
+would keep the two from ever connecting. Give each node its own directory.
 
 ### Finding peers through Nostr
 

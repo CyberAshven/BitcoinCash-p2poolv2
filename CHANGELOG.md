@@ -374,6 +374,12 @@ format and genesis re-pin.
 - The sim swarm's nodes connect again: since #142 they all read one node key
   from their shared run directory and refused to dial each other. Each now
   takes a new peer ID at every start and stays off Nostr (#151).
+- Two nodes whose stores share a directory no longer take one peer ID from the
+  shared `p2p_node_key` and never connect, or load each other's peers from
+  `p2p_peers.json`: a node holds `p2p_node_key.lock` and `p2p_peers.json.lock`
+  while it runs, and a second node on either file stops at start with what to
+  set. Since #142 and #144 a swarm or a host with two nodes in one directory
+  mined separate chains without a word (#157).
 - Templates from a node without long polling, such as Knuth, parse again: a
   missing `longpollid` reads as empty (#123).
 - Requests to the Bitcoin Cash node time out after 30 seconds without data,
