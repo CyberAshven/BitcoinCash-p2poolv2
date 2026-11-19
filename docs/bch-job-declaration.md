@@ -1,86 +1,235 @@
 # BCH P2Pool Job Declaration
 
-This is the BCH direct PPLNS contract carried by the published SV2 Mining
-and Job Declaration messages. A generic client that expects one custodial
-pool payout needs BCH P2Pool support. Preparation interoperability with Pickaxe has been verified on Chipnet as
-described below; a live independent ASIC share is still a separate test.
+A P2Pool node on Bitcoin Cash serves Stratum V2 Job Declaration: a miner
+declares its own block template and is still paid by P2Pool's direct PPLNS
+outputs. The declared coinbase must carry those exact outputs, so a generic
+client that expects one custodial pool payout needs P2Pool support: either
+[`POST /jd_prepare`](#read-only-preparation-for-an-external-declarator),
+which Pickaxe uses, or the
+[`0x5052` extension](#payout-outputs-on-the-job-declaration-connection).
+Protocol references: [SV2 Mining Protocol](https://stratumprotocol.org/specification/05-mining-protocol/)
+and [SV2 Job Declaration Protocol](https://stratumprotocol.org/specification/06-job-declaration-protocol/).
 
-An extended mining channel negotiates `REQUIRES_WORK_SELECTION` (bit 1).
-A separate Job Declaration connection selects Full-Template with
-`DECLARE_TX_DATA` (bit 0), or Coinbase-Only with that bit clear.
-Job Declaration setup success flags are zero in both modes.
+## Running it
 
-Allocation returns required payout scripts with zero values as a
-CompactSize-prefixed transaction-output vector. The actual payments come
-from the PPLNS window anchored by the token: use the same difficulty weights,
-donation/fee cuts, rounding and script ordering as peer payout validation.
-`PreparedNotifyParams::declared_outputs` and `build_pplns_outputs` implement
-that calculation. The declarator needs the local share-chain snapshot.
+| Key | Default | Effect |
+|---|---|---|
+| `[stratum] sv2_port` | unset | Opens the SV2 listener, for Mining and Job Declaration connections |
+| `sv2_authority_public_key`, `sv2_authority_secret_key`, `sv2_cert_validity_secs` | unset, unset, 3600 | Noise encryption; clients pin the public key ([setup](bch-quickstart.md#stratum-v2)) |
+| `sv2_coinbase_only_from` | `["127.0.0.0/8", "::1/128"]` | Clients that may use Coinbase-Only ([below](#which-clients-may-use-coinbase-only)) |
+| `merge_mining_tokens` | unset | Tokens the node merge-mines ([Auxiliary work proofs](bch-auxpow.md#merge-mining-tokens-on-a-public-node)) |
+| `[[submit_nodes]]` | none | Extra BCHN nodes a found block also goes to |
 
-The donation in those cuts is the one `AllocateMiningJobToken.user_identifier`
-chooses with `donation=<percent>` after a comma, as a mining channel's
-identity does ([Miner options](miner-options.md#donation)), or the node's
-own without the option. The mining channel that installs the job must have
-chosen the same donation, or it answers `donation-mismatch`. The protocol has
-no error reply to allocation, so a bad `donation=` there closes the
-connection, with the reason in the node's log.
+## Roles and modes
 
-The opaque token also exposes the public commitment terms. Its version-2
-layout is: version byte (2), 32 random bytes, previous share hash,
-CompactSize uncle count and hashes, compact share bits, share time, optional
-donation address, donation basis points, optional fee address, fee basis
-points, and the share version and desired version (two `u32`s; see
-[Share validation](sharechain/validation.md#share-versions-follow-a-vote)).
-Version 1, without the share version, is refused since the 2026-10-24 rule
-batch.
-Integers use Bitcoin consensus little endian. Optional addresses use the
-share-header address encoding. `ShareCommitment::from_mining_job_token`
-decodes these terms; parsing alone does not authenticate a token. The pool
-accepts only a token present in its registry, for 120 seconds after allocation,
-and consumes it once when a mining connection requests installation.
-Full-Template success rotates the random bytes without changing the terms.
+- A **Mining connection** opens an extended channel that negotiates
+  `REQUIRES_WORK_SELECTION` (bit 1) and installs declared jobs with
+  `SetCustomMiningJob`.
+- A separate **Job Declaration connection** allocates job tokens. In
+  **Full-Template** mode (`DECLARE_TX_DATA`, bit 0) it declares the
+  template and reveals its transactions; in **Coinbase-Only** mode (bit
+  clear) it reveals none. Setup success flags are zero in both modes.
 
-A token belongs to the Job Declaration connection that allocated it, and
-leaves the registry when that connection closes. A connection holds at most
-64 tokens. One more allocation is answered as usual and drops the
-connection's oldest open token (allocated, and neither declared nor used),
-or its oldest token of any state when none is open. So a client that
-allocates a token ahead of each job, and leaves it unused when the share
-chain moves first, is never closed for holding too many. A message that
-names a dropped token gets `invalid-mining-job-token`. The registry holds
-4,096 tokens for all connections together, and an allocation past that
+## Job tokens
+
+`AllocateMiningJobToken.user_identifier` is a mining identity with the
+options of a mining channel's ([Miner options](miner-options.md#stratum-v2)):
+`donation=` chooses the token's donation, or the node's own without it
+([Donation](miner-options.md#donation)), and `min-payout=` or
+`fee-tolerance=` its payout level. The channel that installs the job must
+have chosen the same donation (`donation-mismatch`). Allocation has no
+error reply, so a bad option closes the connection, with the reason in the
+node's log.
+
+The allocation's outputs are the required payout scripts with zero values,
+as a CompactSize-prefixed output vector. The payments come from the PPLNS
+window anchored by the token, with the weights, cuts, rounding and script
+order of peer payout validation (`PreparedNotifyParams::declared_outputs`,
+`build_pplns_outputs`), so a declarator needs the node's share-chain
+snapshot.
+
+**Layout.** The opaque token carries the public commitment terms, integers
+little endian. An address is `0` for none, or `1`, a network class byte and
+the script (the share header's address encoding).
+
+| Bytes | Content |
+|---|---|
+| 1 | Version, `5` |
+| 32 | Random nonce, not part of the commitment |
+| 32 | Previous share hash |
+| CompactSize, then 32 each | Uncle count (at most 3) and uncle hashes |
+| 4 | Share bits, compact |
+| 4 | Share time |
+| 1, then an address or nothing | Donation address |
+| 2 | Donation in basis points |
+| same as the donation | Fee address, then the fee in basis points |
+| 8 | Share version and desired version, two `u32` ([Share validation](sharechain/validation.md#share-versions-follow-a-vote)) |
+| 4 | Band cap ([The cap `C`](sharechain/small-miners-design.md#the-cap-c)) |
+| 1 | Payout level, 1 to 7 ([Payout level](miner-options.md#payout-level)) |
+| 4 | Weak ratio ([The weak target](sharechain/small-miners-design.md#the-weak-target)) |
+
+A token is at most 255 bytes. Another version, more than 3 uncles, a payout
+level outside 1 to 7, or bytes left over is not a token. Earlier layouts:
+[Rule history](sharechain/rule-history.md).
+`ShareCommitment::from_mining_job_token` decodes the terms: a declared
+share's bits are both its minimum and its wanted bits, and it carries no
+weak shares. Parsing alone does not authenticate a token.
+
+**Lifetime.** The node accepts only a token in its registry, for 120
+seconds after allocation, and consumes it once when a Mining connection
+installs it. Full-Template success rotates the nonce, not the terms. A
+token leaves the registry when its Job Declaration connection closes. A
+connection holds at most 64 tokens: one more allocation is answered and
+drops the oldest open token (neither declared nor used), or the oldest of
+any state when none is open, so the connection is never closed for it. A
+message that names a dropped token gets `invalid-mining-job-token`. The
+registry holds 4,096 tokens for all connections; an allocation past that
 closes its connection.
 
-The miner supplies its payout address, BCH share owner and selected template
-revenue when constructing the share commitment. The BCH descriptor binds the
-raw scriptSig prefix and the merge-mining v2 commitment (root, tree height
-`h` and salt; see [Auxiliary work proofs](bch-auxpow.md)). The prefix begins
-with the canonical height push and leaves room for the channel's complete
-12-byte extranonce within the 100-byte scriptSig limit. Coinbase version is
-2, sequence is `0xfffffffe`, and locktime is `height - 1`. Output order is
-the 53-byte merge-mining commitment as output 0 (the exact empty commitment
-when no token is merge-mined), the exact PPLNS outputs, canonical padding,
-then the share commitment. Arbitrary extra outputs and output reordering
-are rejected.
+## The declared coinbase
 
-Full-Template clients declare the serialized coinbase prefix and suffix
-around that extranonce, reveal all non-coinbase transactions, then present
-the returned token in `SetCustomMiningJob`. The server orders transactions
-by BCH CTOR, verifies the matching Merkle path and coinbase declaration,
-and asks the local BCHN node to validate a block proposal without PoW.
-Only a null proposal result permits installation. A successful response
-contains the installed channel job id; shares can be submitted immediately.
-The pool can broadcast a complete found block in this mode.
+The miner supplies its payout address, its share owner (a Bitcoin Cash
+P2PKH share address) and the template's revenue. The share commitment binds
+the raw scriptSig prefix and the merge-mining v2 commitment (root, tree
+height `h` and salt; [Auxiliary work proofs](bch-auxpow.md)). The coinbase
+is fixed:
 
-A job whose proposal the node does not accept gets
-`SetCustomMiningJob.Error`, with one of three codes. At a Bitcoin Cash tip
-change the node may already have left the block's parent; it then has no
-verdict on the block (BCHN and BCHD answer `inconclusive-not-best-prevblk`),
-and the job gets `stale-chain-tip`, as a job on another parent than the
-pool's template does. A check that gets no answer within 10 seconds, or
-whose request to the node fails, gets `template-unavailable`. In both cases
-the client declares again and stays on the pool. Only the node's own reason
-for refusing the block, such as `bad-cb-amount`, gets `invalid-template`.
+- **scriptSig:** the prefix, beginning with the canonical height push, then
+  the channel's 12-byte extranonce, within the 100-byte scriptSig limit;
+- **version** 2, input sequence `0xfffffffe`, lock time `height - 1`;
+- **outputs:** the 53-byte merge-mining commitment as output 0 (the exact
+  empty commitment when no token is merge-mined), the exact PPLNS outputs,
+  canonical padding, then the share commitment. Extra outputs and
+  reordering are refused.
+
+The PPLNS outputs follow the [hybrid payout rule](architecture/bch-hybrid-payouts.md)
+at the coinbase limit of a token share or a no-token share, as output 0
+makes the share.
+
+## Rules a declared job must meet
+
+The Mining connection checks each `SetCustomMiningJob`. A refusal is
+`SetCustomMiningJob.Error` `invalid-custom-job`, with the reason in the
+node's log, unless a code is given.
+
+1. The connection negotiated work selection (`work-selection-not-negotiated`),
+   the channel is extended (`invalid-channel-type`), and the node mines
+   Bitcoin Cash in P2Pool mode (`unsupported-pool-mode`).
+2. The token is in the registry and unused (`invalid-mining-job-token`).
+3. The channel chose the token's donation (`donation-mismatch`).
+4. The header has the previous block hash and nBits of the token's
+   template, changes version bits only inside the node's version mask, and
+   has `min_ntime` at or after the template's `mintime` and at most 7,200
+   seconds ahead.
+5. The coinbase is as above: version, sequence, lock time, a Bitcoin Cash
+   P2PKH share owner, a valid output 0, a value within BCH's money range,
+   and outputs equal to the node's rebuild byte for byte, within the
+   coinbase limit. Its parts around the extranonce are at most 65,535
+   bytes each.
+6. The merkle path has at most 32 siblings. In Full-Template mode the
+   coinbase is the declared prefix and suffix, the path is the one of the
+   declared transactions in CTOR, and the template passes the node's BCH
+   checks and block size limit.
+7. A token job (output 0 not empty) carries the [declared token
+   leaves](#declared-token-leaves), and its header nBits pass the
+   [ASERT header check](bch-auxpow.md#the-asert-header-check)
+   (`invalid-token-asert`).
+8. A Full-Template job's block passes the node's proposal check, below.
+
+### Full-Template
+
+The client declares the serialized coinbase prefix and suffix around the
+extranonce, reveals all non-coinbase transactions, then presents the
+returned token in `SetCustomMiningJob`. The node orders the transactions by
+CTOR, checks the merkle path and the coinbase against the declaration, and
+asks its BCHN node to validate a block proposal without PoW. Only a null
+proposal result installs the job. The success carries the installed channel
+job id, and shares can be submitted at once. The node can broadcast a found
+block in this mode.
+
+A proposal the node does not accept gets one of three codes. The first two
+do not say the template is bad: the client declares again and stays on the
+pool.
+
+| Code | When |
+|---|---|
+| `stale-chain-tip` | The node has left the block's parent at a Bitcoin Cash tip change and has no verdict (BCHN and BCHD answer `inconclusive-not-best-prevblk`), or the job's parent is not the pool template's |
+| `template-unavailable` | The check got no answer within 10 seconds, or the request to the node failed |
+| `invalid-template` | The node's own reason for refusing the block, such as `bad-cb-amount` |
+
+A connection holds at most eight pending declarations. Revealed
+transactions arrive in `ProvideMissingTransactions.Success`. A template past
+65,535 transactions or one 16 MiB frame needs the
+[large templates extension](architecture/sv2-large-templates-extension.md).
+Declared transactions, in all connections together, may take two blocks at
+the published template's size limit, and at least 64 MiB.
+
+**PushSolution.** A Full-Template client that finds a block also sends
+`PushSolution` on its Job Declaration connection (spec 6.4.9). The
+connection keeps its last four Full-Template declarations on the current
+previous block, under a second memory bound of the same size. The node
+rebuilds the block from the declaration, the pushed extranonce and the
+declared transactions in CTOR, checks the header against the token's
+template target, and submits it to BCHN and every `[[submit_nodes]]` entry
+(BCHN answers `duplicate` when the share also came on the Mining
+connection). A `PushSolution` that solves none of the connection's
+declarations, such as a Coinbase-Only client's, is ignored; none is
+answered.
+
+### Declared token leaves
+
+A Full-Template declaration whose output 0 is a token root discloses its
+leaves in `DeclareMiningJob.excess_data`, in Pickaxe's `CTMD` v2
+([Disclosure to miners](bch-auxpow.md#disclosure-to-miners); pickaxe-miner
+PR #70 at `a92fef7`, "Job Declaration leaves"): exactly one canonical
+disclosure, nothing trailing, each split hashing to its leaf's `ext`, and
+the leaves alone rebuilding output 0's root at its height and salt. Empty
+`excess_data` means no root. A root without leaves, leaves without a root,
+or leaves that do not decode or make the root get `DeclareMiningJob.Error`
+`invalid-coinbase-tx`, the reason in its details. At installation each
+leaf must pay the channel's miner (`payout_hash` is `HASH256` of the
+miner's payout script) and carry the job's split: the token's donation,
+then the node's fee, each to the script the coinbase pays it. So the fee
+and the donation apply to declared tokens as to BCH, and a token whose
+covenant takes no split cannot be merge-mined this way on a node that takes
+either cut.
+
+### Coinbase-Only
+
+A Coinbase-Only client does not declare or reveal its transactions. It
+presents the token with its coinbase and private merkle path directly. The
+node checks the visible coinbase and header rules, the exact payments and
+the share PoW. It cannot check hidden transactions, CTOR, actual fees or
+the hidden block size. The declarator must validate and broadcast the
+complete block; the node never broadcasts an incomplete substitute. A
+Coinbase-Only job declares no leaves, so it merge-mines no token: its
+output 0 must be the exact empty commitment.
+
+### Which clients may use Coinbase-Only
+
+A Coinbase-Only declarator's shares are credited on a block whose
+transactions the node never sees (`block_available = false`). A declarator
+that never lets a block through costs the other miners their part of it:
+block withholding, not theft (sv2-spec 6.3.1; Delving Bitcoin "PPLNS with
+job declaration"; jtoomim/p2pool#21). So a node takes Coinbase-Only only
+from the IP addresses or CIDR ranges in `[stratum] sv2_coinbase_only_from`,
+by default this computer. Add your own declarator, such as the Tailscale
+address of your own Knuth node. `[]` refuses everyone and
+`["0.0.0.0/0", "::/0"]` takes everyone; an IPv4-mapped IPv6 address counts
+as its IPv4 address. Full-Template is taken from every client, since the
+node checks the template. A refused client gets `SetupConnection.Error`
+`unsupported-feature-flags` with `flags` set to `DECLARE_TX_DATA` (`0x1`),
+and may set up again in Full-Template mode on the same connection.
+
+Behind a Tor onion service or an I2P server tunnel
+(`HiddenServicePort 3336 127.0.0.1:3336` in `torrc`), every miner connects
+from this computer's own address and would get Coinbase-Only: set
+`sv2_coinbase_only_from = []`, or point the onion service at an address of
+this computer that is not in the list. Tokens and declared jobs are counted
+per connection, not per address, so miners behind one onion service do not
+use up each other's.
+
+## Installed jobs
 
 A channel keeps its last eight declared jobs, counted apart from the 32 of
 the pool's own jobs it keeps: the pool still sends the channel its own job
@@ -90,153 +239,77 @@ Bitcoin Cash parent is two blocks back, or until the job tracker drops it,
 which keeps a job for at least 15 minutes. A share on a job that is gone
 gets `stale-share`.
 
-**PushSolution.** A Full-Template client that finds a block also sends
-`PushSolution` on its Job Declaration connection (spec 6.4.9). The
-connection keeps its last four Full-Template declarations on the current
-previous block. All connections together keep at most 64 MiB of them, on
-top of the 64 MiB the tokens may hold, since a kept declaration outlives
-its token. For a `PushSolution`, it rebuilds the coinbase as declared
-prefix, pushed extranonce and declared suffix, adds the declared
-transactions in CTOR, and checks that the header meets the target of the
-template the token was allocated against. If so, it submits the block to
-BCHN and every `[[submit_nodes]]` entry. When the share also arrived on the
-Mining connection, the node submits the block twice, and BCHN answers
-`duplicate` the second time. A `PushSolution` that solves none of the
-connection's declarations is ignored. That includes one from a
-Coinbase-Only client, whose transactions the node never saw. The
-connection stays open either way; the message has no answer.
-
-**Declared token leaves.** A Full-Template declaration whose output 0 is a
-token root discloses the leaves behind it in `DeclareMiningJob.excess_data`,
-in Pickaxe's `CTMD` v2 ([Disclosure to
-miners](bch-auxpow.md#disclosure-to-miners); pickaxe-miner PR #70 at
-`a92fef7`, "Job Declaration leaves"): exactly one canonical disclosure,
-nothing trailing, each split hashing to its leaf's `ext`, whose leaves alone
-rebuild output 0's root at its height and salt. Empty `excess_data` means
-no root: a root without leaves, leaves without a root, or leaves that do not
-decode or make the root are refused with `DeclareMiningJob.Error`
-`invalid-coinbase-tx` and the reason in its details. When the job is
-installed, each leaf must pay the channel's miner (its `payout_hash` is
-`HASH256` of the miner's payout script) and carry the job's terms as its
-split: the donation the token chose, then the node's fee, each to the
-script the coinbase pays it to. So the node's fee and the miner's P2Pool
-donation apply to declared tokens as to BCH; a token whose covenant takes
-no split cannot be merge-mined under Job Declaration on a node that takes
-either cut. Otherwise the custom job is refused (`invalid-custom-job`, the
-reason in the node's log).
-
-Coinbase-Only clients do not declare or reveal their transaction list.
-They present the allocated token with their coinbase and private Merkle
-path directly. The pool verifies visible coinbase/header rules, exact
-payments and share PoW. It cannot validate hidden transactions, CTOR, actual
-fees or total hidden block size. The declarator must validate and broadcast
-the complete block; the pool never broadcasts an incomplete substitute.
-This mode retains the protocol's withholding and hidden-invalid-work risk.
-A Coinbase-Only job declares no leaves, so it merge-mines no token: its
-output 0 must be the exact empty commitment.
-
-**Which clients may use Coinbase-Only.** A Coinbase-Only declarator's
-shares are credited on a block whose transactions the node never sees
-(`block_available = false`). PPLNS here weights shares by difficulty, so a
-declarator that never lets a block through costs the other miners their
-share of it. That is sabotage of the block-withholding kind, not theft
-(sv2-spec 6.3.1; Delving Bitcoin "PPLNS with job declaration";
-jtoomim/p2pool#21). So a node takes Coinbase-Only declarations only from the
-client addresses in `[stratum] sv2_coinbase_only_from`. Each entry is an IP
-address or a CIDR range, and the default is this computer
-(`["127.0.0.0/8", "::1/128"]`). Add your own declarator, for example the
-Tailscale address of your own Knuth node. `[]` refuses Coinbase-Only from
-everyone, and `["0.0.0.0/0", "::/0"]` takes it from everyone. An IPv4-mapped
-IPv6 address counts as its IPv4 address. Full-Template declarations are
-taken from every client, since the node checks their templates. A refused client gets
-`SetupConnection.Error` with error code `unsupported-feature-flags` and
-`flags` set to `DECLARE_TX_DATA` (`0x1`), the flag it must set (sv2-spec
-3.x). It may set up again in Full-Template mode on the same connection.
-
-**A node behind a Tor onion service or an I2P server tunnel.** Miners reach
-the Stratum V2 port through an onion service (`HiddenServicePort 3336
-127.0.0.1:3336` in `torrc`) or an I2P server tunnel with no change to the
-node. Every such miner then connects from this computer's own address, the
-one Tor or the I2P router forwards from. With the default
-`sv2_coinbase_only_from`, that gives every one of them Coinbase-Only. Set
-`sv2_coinbase_only_from = []` on such a node, or point the onion service at
-an address of this computer that is not in the list. Job tokens and declared
-jobs are counted for each connection, never for a client address, so
-miners behind the same onion service do not use up each other's.
-
-Once a job is active, its target and credited difficulty remain fixed.
+Once a job is active, its target and credited difficulty stay fixed.
 Vardiff and `UpdateChannel` change later jobs. Device maximum targets apply
-when each job is assigned; zero maximum targets are rejected.
+when each job is assigned; zero maximum targets are refused.
 
-Limits: 64 outstanding tokens and 64 MiB of declared transaction state per
-registry, eight pending declarations per connection, 32 Merkle siblings,
-SV2's 65,535-byte coinbase-output field and 16 MiB frame limit. All revealed
-transactions currently arrive in one response; larger declarations require
-transaction-cache negotiation before increasing those limits. The shared
-[auxiliary work verifier](bch-auxpow.md) checks a merge-mining v2 proof:
-the coinbase around output 0, its branch to the parent header, the token's
-target and the ASERT format check of the parent's nBits. The experimental
-SAFA covenant verified the older v1 proof in a real regtest spend and must
-be ported to v2 before any issuance. Other assets need their own covenant
-adapters; choosing an aux root alone cannot authorize their issuance.
+## Read-only preparation for an external declarator
 
-Protocol references: [SV2 Mining Protocol](https://stratumprotocol.org/specification/05-mining-protocol/)
-and [SV2 Job Declaration Protocol](https://stratumprotocol.org/specification/06-job-declaration-protocol/).
+`POST /jd_prepare` uses the normal REST API authentication. It accepts at
+most 8192 JSON bytes and refuses unknown request fields. Schema version 1
+contains `token` (hex), `payout` (CashAddr), `share_owner` (the
+independently specified BCH share address), `height`, `nbits` (integer
+compact bits), `previous_hash` (BCH RPC display order), `coinbase_value`
+(satoshis), `script_prefix` (hex), and `auxiliary` (`root` as 32 byte
+integers, `height` and `salt`, the merge-mining v2 commitment). It receives
+no RPC credentials, private keys or transaction bytes.
 
-## Encrypted network regression
+It requires the current mining-base anchor and BCH template tip, weights
+the PPLNS window by the paying block's difficulty (one cached snapshot,
+keyed by anchor and bits), and has no fallback recipient for empty or
+unavailable payout history. The node's own PPLNS and coinbase builders
+produce the bytes. The response contains `version`, `token_hash` (SHA256),
+`anchor`, `height`, `coinbase_value`, `coinbase_prefix`, `coinbase_suffix`
+and `extranonce_size` (12). A malformed request gets 400; an unavailable or
+mismatched snapshot or tip gets 503, and the caller retries with a new
+token after synchronization. The endpoint neither authenticates nor
+consumes SV2 tokens: the SV2 protocols still check the token, the
+recipient, the outputs and the custom job.
+
+## Payout outputs on the Job Declaration connection
+
+With the extension `0x5052`, "Requested Payout Outputs", a standard Job
+Declaration client asks its Job Declaration connection for each job's exact
+coinbase outputs, without `/jd_prepare` and without knowing how P2Pool
+builds a coinbase. A Bitcoin Cash node grants it to any Job Declaration
+connection that asks. `AllocateMiningJobToken.user_identifier` is then the
+channel's whole identity, and the job is checked as any other. Messages,
+rules and errors: [Requested payout outputs](architecture/sv2-payout-extension.md).
+
+## Tests
+
+### Encrypted network regression
 
 `encrypted_bch_job_declaration_modes_install_mine_and_emit` runs the real
-listener with a configured authority and three loopback TCP connections.
-The reference SV2 codec pins that authority for the mining connection and
-the separate Full-Template and Coinbase-Only declarators. It transfers their
-tokens to the mining connection, installs jobs, mines headers and checks both
-emitted coinbase proofs. Reusing a consumed token must fail.
-
-The clients send adjacent setup/allocation frames in one write and split
-other writes after the first byte. The Full-Template declaration discloses
-sixteen token leaves with their splits, a 3,830-byte `excess_data` that
-forces payload decoding across the listener's 4,096-byte reads; TCP decides
-the actual segmentation. The test also checks Full-Template proposal/submission
-calls, Coinbase-Only transaction privacy and connection cleanup. Simulation
-builds retain their existing block-submission suppression.
+listener with an authority key and three loopback connections (Mining,
+Full-Template, Coinbase-Only) through the reference SV2 codec. It installs
+both jobs, mines headers, checks both coinbase proofs and refuses a
+consumed token. Its frames split mid-message, and its 3,830-byte
+`excess_data` (sixteen token leaves) spans the listener's 4,096-byte reads.
+`a_standard_client_mines_on_requested_payout_outputs_in_both_modes` does the
+same with jobs built from `0x5052` replies alone. BCHN is mocked.
 
 ```sh
-cargo nextest run -p p2poolv2_lib -E 'test(encrypted_bch_job_declaration_modes_install_mine_and_emit)'
+cargo nextest run -p p2poolv2_lib -E 'test(encrypted_bch_job_declaration_modes_install_mine_and_emit) | test(a_standard_client_mines_on_requested_payout_outputs_in_both_modes)'
 ```
 
-BCHN responses are mocked in this test. The test below combines encrypted
-network exchange with real BCHN nodes. Neither test establishes independent
-client or ASIC compatibility.
+### Two-node BCHN regtest check
 
-Validated locally on Windows on 2026-10-16: the focused exchange passed,
-followed by 1,719 default workspace tests (two skipped) and 1,727 all-features
-tests (one skipped). Clippy passed for all targets with default and all
-features and warnings denied. Formatting and `git diff --check` passed.
+<a id="encrypted-bchn-and-safa-check-2026-10-17"></a>
 
-## Two-node BCHN regtest check
+The ignored `bchn_declared_jobs_reach_both_real_nodes_over_noise` test runs
+the same three Noise connections against two disposable, connected BCHN
+nodes. The pool node checks and submits the Full-Template block (two token
+leaves disclosed); the client broadcasts the Coinbase-Only block, which
+carries a private transaction absent from both mempools. Both nodes must
+accept each block, both coinbase proofs must match, and BCHN must refuse an
+extra satoshi of coinbase value.
+`bchn_jobs_on_requested_payout_outputs_reach_both_real_nodes` does the same
+with jobs built from `0x5052` replies. A SAFA v1 withdrawal on such nodes:
+[the SAFA evidence record](../p2poolv2_safa/README.md#regtest-evidence-and-reproduction).
 
-The ignored `bchn_declared_jobs_reach_both_real_nodes_over_noise` test uses two
-disposable, connected BCHN nodes and the actual SV2 TCP listener. A client
-using SRI's initiator pins the test authority key on three authenticated Noise
-connections: Mining, Full-Template JD and Coinbase-Only JD. It allocates tokens,
-declares and reveals Full-Template transactions, installs both jobs and submits
-their shares over these sockets. It verifies Full-Template proposal validation
-and pool submission, then a private transaction absent from both mempools, Coinbase-Only
-header submission and client block broadcast. Both nodes must accept each
-block, both emitted coinbase proofs must match, and BCHN must reject an extra
-satoshi of coinbase value. This repository's client uses the published SRI
-transport and messages; independent declarator or ASIC firmware interoperability
-still requires separate validation. Since the 2026-10-24 token leaf rules,
-the Full-Template declaration discloses its two token leaves in
-`excess_data`, and the Coinbase-Only job mines no token and prints no aux
-proof; the runs recorded below predate that change. It passed again with
-BCHN 29.2.0 on 2026-11-03: Full-Template block 102
-(`7f851d5d…904d`, two token leaves disclosed) and Coinbase-Only block 103
-(`1c3ed69e…7fce`, 219 satoshis of private fee), both accepted by both
-nodes.
-
-Use fresh data directories, outside the repository. The first node needs this
-`bitcoin.conf`:
+Use fresh data directories outside the repository. The first node needs
+this `bitcoin.conf`:
 
 ```ini
 regtest=1
@@ -256,11 +329,11 @@ port=19454
 
 The second uses the same settings with RPC port 19455 and P2P port 19456;
 add `connect=127.0.0.1:19454` under `[regtest]` and `disablewallet=1` before
-that section. The fixed credentials are solely for these loopback test nodes.
-Start both nodes, create/load a wallet named `jd-regtest` on the first, and
-mine at least 101 blocks to an address from that wallet. For example, in
-PowerShell with `$bchnBin` pointing to BCHN's `bin` directory and `$clientData`
-and `$poolData` pointing to the fresh directories:
+that section. The fixed credentials are only for these loopback test nodes.
+Start both nodes, create a wallet named `jd-regtest` on the first, and mine
+at least 101 blocks to it. In PowerShell, with `$bchnBin` pointing to
+BCHN's `bin` directory and `$clientData` and `$poolData` to the fresh
+directories:
 
 ```powershell
 Start-Process "$bchnBin/bitcoind.exe" -ArgumentList "`"-datadir=$clientData`"" -WindowStyle Hidden
@@ -277,211 +350,18 @@ cargo nextest run -p p2poolv2_lib --run-ignored ignored-only -E 'test(bchn_decla
 & "$bchnBin/bitcoin-cli.exe" "-datadir=$poolData" stop
 ```
 
-The test verifies loopback endpoints and `chain = regtest` before spending.
-It requires an otherwise empty mempool and enough mature wallet balance for
-two 1-BCH payments; do not run it concurrently against the same pair. Windows
-build prerequisites are the same as the workspace's other native Rust tests.
-
-Repeated with BCHN 29.2.0 on 2026-10-15 (one test passed, 0.158 seconds):
-
-| Mode | Height | Block hash | Coinbase value (sat) |
-|---|---|---|---|
-| Full-Template | 205 | `3e137beafcec73ffceb86ecf6937fd37c4e554b92f871a348d7c5ff90f200850` | 2500000219 |
-| Coinbase-Only | 206 | `4b67278077005751d6e25cbb058fc8e635d6761506c58757d2e2c8c554dbfe23` | 2500000219 |
-
-Each block included 219 satoshis in transaction fees. The Coinbase-Only
-transaction was signed with the disposable wallet but withheld from both
-mempools until its complete block was broadcast.
-
-Repeated on 2026-10-17 using the authenticated network test and real SAFA work:
-
-| Mode | Height | Block hash | Coinbase value (sat) |
-|---|---|---|---|
-| Full-Template | 173 | `44ccdc671714314018c0840339f46f057ac0cab71cff32e5330a2d6955f30975` | 2500000219 |
-| Coinbase-Only | 174 | `523418daf87a30df4f57d5d67cdd41d3cb17e8deeb24008cea80b46bfe392a7f` | 2500000219 |
-
-The test passed in 6.459 seconds. These proofs then authorized a real token
-withdrawal. BCHN rejected that identical signed transaction one block before
-its 74-block relative age matured, then accepted it after one more block.
-The withdrawal, public vectors and reproduction commands are in
-[the SAFA evidence record](../p2poolv2_safa/README.md#regtest-evidence-and-reproduction).
-
-## Encrypted BCHN and SAFA check (2026-10-17)
-
-The earlier 205/206 run used direct mining handlers. The current opt-in test
-also completed the full encrypted network exchange against two fresh BCHN
-29.2.0 nodes. Full-Template allocation, transaction delivery, token rotation,
-installation and submission all crossed authenticated TCP connections.
-Coinbase-Only kept its raw transaction on the client and used client broadcast
-after the pool accepted the header and emitted its proof. Both nodes accepted
-these blocks carrying actual experimental SAFA work:
-
-| Mode | Height | Block hash | Coinbase value (sat) |
-|---|---|---|---|
-| Full-Template | 249 | `291220623fcad14e4eda3d6388d12376014700abdb4171049a0ede9064a7ff45` | 2500000219 |
-| Coinbase-Only | 250 | `6ed5e6f5841ab37c8f32c1b821bee134463c51635ebe70b177aab66b179dc820` | 2500000219 |
-
-The private proof authorized withdrawal
-`9cea5236f7032f80635253e3529e3373c1f5aed68367e5173518c48c5eab8287`
-in block `5edef1a9f5669fdb44a34a919fec69a541944b833a7b5ed42550d00a413c7887`
-at height 252. Both nodes validated the continuation with 419,999,000 tokens
-and the 1,000-token recipient reward. Its 1,266-byte scriptSig includes the
-839-byte redeem script; the transaction paid 5,000 satoshis in fees using a
-sponsor input.
-BCHN rejected an altered coinbase Merkle sibling. Both private and Full-Template
-proofs also verified against the actual withdrawal and genesis outputs in
-the standard BCH 2026 VM; the Full-Template scriptSig used 1,298 bytes.
-
-At tip 250, BCHN rejected that same signed transaction with `non-BIP68-final`:
-the baton required 74 blocks. After mining block 251, the identical bytes
-passed the mempool check and the withdrawal confirmed at 252. The harness
-retains both results, separating VM sequence checks from actual chain maturity.
-
-Reproduce the token preparation and withdrawal using
-[the SAFA harness](../p2poolv2_safa/README.md#regtest-evidence-and-reproduction)
-around this opt-in test. An initial synthetic-work run also passed at heights
-102 and 103. The disposable nodes were stopped after validation, with their
-public proof and transaction evidence retained locally. Independent clients,
-ASIC firmware, chipnet issuance and the final SAFA economic policy remain open.
-
-The combined branch passed 1,719 default workspace tests (two skipped), 1,727
-all-features tests (one skipped), and all-target Clippy with default and all
-features and warnings denied. Formatting and whitespace checks passed.
-
-## Read-only preparation for an external declarator
-
-`POST /jd_prepare` uses the normal REST API authentication. It accepts at most
-8192 JSON bytes and rejects unknown request fields. Schema version 1 contains
-`token` (hex), `payout` (CashAddr), `share_owner` (the independently specified BCH
-share address), `height`, `nbits` (integer compact bits), `previous_hash` (BCH RPC
-display order), `coinbase_value` (satoshis), `script_prefix` (hex), and `auxiliary`
-(`root` as 32 byte integers, `height` and `salt`, the merge-mining v2
-commitment). It receives no RPC
-credentials, private keys or transaction bytes.
-
-The helper requires the current mining-base anchor and BCH template tip, then
-uses the selected paying block's difficulty to calculate the exact PPLNS
-weights. A single cached snapshot is keyed by anchor and bits. Empty or
-unavailable payout history has no fallback recipient. The existing PPLNS and
-coinbase builders produce the bytes; no payout or consensus rule is changed.
-
-The response contains `version`, `token_hash` (SHA256), `anchor`, `height`,
-`coinbase_value`, `coinbase_prefix`, `coinbase_suffix` and `extranonce_size` (12).
-Malformed requests return 400; unavailable or mismatched snapshots/tips return
-503. The caller retries with a newly allocated token after synchronization.
-This endpoint does not authenticate or consume SV2 tokens. The pool still
-validates its registry token, channel recipient, PPLNS outputs and custom job
-independently through the existing Mining and Job Declaration protocols.
-
-Pickaxe successfully declared Full-Template and Coinbase-only jobs for distinct
-personal and donation share owners on a separate Chipnet node at BCH height
-328754. Both custom jobs in each mode were acknowledged, with zero refusals.
-Full-Template used Start9 BCHN proposal validation. No hash search, share reward
-or found-block broadcast is claimed by this check. The API request regression
-also compares the prepared bytes with the existing core builder and refuses
-changed BCH tips, bits and share-owner networks.
-
-## Payout outputs on the Job Declaration connection
-
-A standard Job Declaration client can get a job's exact coinbase outputs on
-its Job Declaration connection, without `/jd_prepare` and without knowing how
-P2Pool builds a coinbase. The experimental extension `0x5052`, "Requested
-Payout Outputs", is specified in section 7 of the
-[SV2 payout proposal](architecture/sv2-payout-extension.md#7-specification).
-It changes no share-chain rule, and `/jd_prepare` is unchanged.
-
-The client asks for `0x5052` with `RequestExtensions` after
-`SetupConnection` on a Job Declaration connection, in either mode. A Bitcoin
-Cash node grants it there. A Mining connection and a Bitcoin node do not get
-it. A `0x5052` message on a connection that did not negotiate it closes the
-connection.
-
-`AllocateMiningJobToken.user_identifier` is a mining identity, as a mining
-channel's ([Miner options](miner-options.md#stratum-v2)): the payout
-CashAddr and worker, then `p2p=` with the share address unless the node
-configures one, and an optional `donation=`. The token remembers the payout
-address and share owner. The mining channel that installs the job must use
-the same identity. A token whose identity names no payout address or share
-owner is still allocated; a request for its outputs gets `invalid-request`.
-
-Before each `DeclareMiningJob` or `SetCustomMiningJob`, the client sends
-`RequestPayoutOutputs`: the token, its template's revenue, height, previous
-block hash and bits, and its scriptSig prefix. The node answers with the
-bytes `/jd_prepare` builds for them, from the same builder and the token's
-PPLNS snapshot: the exact empty merge-mining commitment as output 0, the
-PPLNS outputs, padding, and the share commitment last. `EXACT_OUTPUTS` is
-always set, with version 2, sequence `0xfffffffe` and lock time
-`height - 1`. The coinbase carries these outputs and no others, and its
-scriptSig is the prefix followed by the extranonce. The job is then
-validated as any other declared job. A client asks a second node for those
-same bytes with `VerifyPayoutOutputs`; section 7.9 of the proposal gives
-that message, and its success payload is the same bytes.
-
-An unknown, expired or used token gets `invalid-mining-job-token`. A token
-anchored on an earlier share, or a request for another height, previous hash
-or bits than the token's template, gets `stale-payout-outputs`. A prefix
-without the height push, revenue past BCH's monetary range, or any input the
-builders refuse gets `invalid-request`. Outputs past the 65,535-byte field
-get `payout-outputs-too-large`, and a template without PPLNS weights
-`payout-outputs-unavailable`. None of these closes the connection.
-
-Whenever the share the node anchors new tokens on, or the BCH block its
-template builds on, changes (every few seconds on a live pool), each
-connection that negotiated `0x5052` gets `PayoutOutputsStale`. Outputs for
-earlier tokens are then stale: the client allocates a new token and asks
-again. A `stale-payout-outputs` answer is the same race, not a reason to
-leave the pool. That holds for a token allocated after the notice too, even
-again and again: the answer then means the client's node and the pool's
-node differ on the Bitcoin Cash tip or its bits. The client keeps asking,
-no faster than once every few seconds, and keeps mining its last installed
-job or the pool's own jobs meanwhile. A connection may hold outputs for
-eight open tokens at once; asking for a ninth closes it, as a ninth pending
-declaration does.
-
-On a connection that negotiated `0x5052`, the allocation's zero-value
-outputs also list output 0, the largest padding and the commitment beside
-the payout scripts, so a client reserving their size for
-`CoinbaseOutputConstraints` has room for every answered set. Other
-connections get the payout scripts alone, as before.
-
-Merge-mined tokens still need Full-Template with the leaves in
-`excess_data`; this extension serves only the exact empty commitment.
-
-`a_standard_client_mines_on_requested_payout_outputs_in_both_modes` runs the
-encrypted listener with a client that builds both jobs from the reply alone.
-Both jobs are installed and each mines a share. BCHN responses are mocked.
-
-```sh
-cargo nextest run -p p2poolv2_lib -E 'test(a_standard_client_mines_on_requested_payout_outputs_in_both_modes)'
-```
-
-The ignored `bchn_jobs_on_requested_payout_outputs_reach_both_real_nodes`
-test does the same against two real BCHN nodes, set up as in the
-[two-node check](#two-node-bchn-regtest-check), and runs the same way with
-its own name. The pool node checks the Full-Template proposal and submits
-the block; the client broadcasts the Coinbase-only block, whose revenue
-includes the fee of a transaction the pool never saw. Both nodes must
-accept both blocks.
-
-Run with BCHN 29.2.0 on 2026-11-03, after the two-node check on the same
-pair (both tests passed, 5.9 seconds for this one; both nodes ended on
-block 105, `29eb5fcd…2f0b`):
-
-| Mode | Height | Block hash | Coinbase value (sat) |
-|---|---|---|---|
-| Full-Template | 104 | `48fb1a86c6d48c3b3825a9d4c5504776382ffb77e8dbb2cee3241bf2339199b8` | 5000000219 |
-| Coinbase-Only | 105 | `29eb5fcd34bc6a17e3c86839aca759bc7c25699294be723302b7ccaf40c62f0b` | 5000000219 |
-
-The Coinbase-Only value includes the private transaction's 219-satoshi fee.
-This is regtest evidence with this repository's test client; the chipnet run
-with an independent client that the proposal asks for is still open.
+Run the `0x5052` test the same way with its own name. The tests check
+loopback endpoints and `chain = regtest` before spending, and need an
+otherwise empty mempool and mature balance for two 1-BCH payments; run one
+at a time against a pair. Both use this repository's own client, not
+independent declarator or ASIC firmware.
 
 ### On a running node
 
 The ignored `a_running_node_serves_requested_payout_outputs` test is a Job
-Declaration client for a node that is already running. It needs no RPC login,
-only the node's Stratum V2 address, its published authority key and a mining
-identity:
+Declaration client for a node that is already running. It needs no RPC
+login, only the node's Stratum V2 address, its published authority key and
+a mining identity:
 
 ```sh
 P2POOL_SV2_ADDRESS=127.0.0.1:3336 \
@@ -490,38 +370,9 @@ P2POOL_SV2_IDENTITY='bchtest:q....worker,p2p=tp2pool:q...' \
 cargo test -p p2poolv2_lib --lib a_running_node_serves_requested_payout_outputs -- --ignored --nocapture
 ```
 
-It takes the template fields (version, previous block, bits, time, height)
-from the node's own extended job and declares an empty block, so its coinbase
-pays out the block subsidy alone. It then checks five things in turn:
-
-1. A request naming a block the node is not building on is refused.
-2. The outputs answered for the current block pay out the whole value with
-   `EXACT_OUTPUTS` and lock time `height - 1`.
-3. A Full-Template job on those outputs is declared, and it is installed with
-   `SetCustomMiningJob`. The node has its BCHN check the block proposal
-   first.
-4. The next share or block brings `PayoutOutputsStale`.
-5. A fresh token then gets the new outputs.
-
-It submits no shares.
-
-Run on 2026-11-05 at 13:16 UTC against the chipnet pool's node1, built from
-`ef59b72b`, with its templates from a BCHN 29.1.0 chipnet node; it passed in
-9.7 seconds. The test address is this repository's
-`bchtest:qr7fzmep8g7h7ymfxy74lgc0v950j3r295pdnvy3hr`.
-
-- **Refused:** a previous block of all zeros got `stale-payout-outputs`.
-- **Answered:** chipnet height 331011, previous block
-  `00000000000013f305ba63f37306cac43552a10c3eb487532df847a2c355734e`, 2,500,000,000
-  satoshis in six outputs, in this order:
-  - the empty merge-mining commitment;
-  - three PPLNS payees (1,194,333, 25,000,000 and 2,473,805,667 satoshis);
-  - the padding;
-  - the share commitment.
-- **Installed:** the declaration was accepted and the job installed as job 2.
-- **Stale, then fresh:** the next share pushed `PayoutOutputsStale` within 10
-  seconds. The fresh token's outputs paid 1,195,200, 25,000,000 and
-  2,473,804,800 satoshis, under a new share commitment.
-
-This was this repository's client against a real chipnet pool. Shares credited
-through an independent `0x5052` client still need a miner behind one.
+It declares an empty block on the node's own template and submits no
+shares. It checks that a request for a block the node is not building on is
+refused, that the outputs pay out the whole value with `EXACT_OUTPUTS` and
+lock time `height - 1`, that a Full-Template job on them is installed after
+the node's BCHN proposal check, and that the next share or block brings
+`PayoutOutputsStale` and a fresh token the new outputs.

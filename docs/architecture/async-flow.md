@@ -197,26 +197,22 @@ because they involve compaction-visible mutations and batch commits.
 
 ## BCH Storage and Memory Budget (2026-10-30)
 
-These are planning estimates, not disk or cache measurements. MB and GB
-use decimal bytes. The rate assumption is one stored share per 10 seconds.
-The BCH payout window is capped at 120,960 shares, about two weeks. Body
-retention is longer: `BCH_PRUNE_DEPTH` is 242,174 shares, about 28 days,
-before the prune interval and background-task lag. Headers and merkle
-branches remain after body pruning.
+These are planning estimates, not disk or cache measurements, in decimal
+bytes, at one stored share per 10 seconds. The BCH payout window holds at
+most 120,960 shares, about two weeks. Bodies are kept for `BCH_PRUNE_DEPTH`,
+242,174 shares, about 28 days, plus the prune interval and background-task
+lag; headers and merkle branches remain after body pruning
+([pruning](pruning.md)).
 
 A share stores its BCH coinbase, coinbase merkle branch and share-chain
-transactions. It does not store every transaction from the BCH template.
-`BitcoinTxids` has no production writer. The earlier estimate of 7.7 GB of
-template txids and 2 GB of deduplicated BCH bodies did not describe this
-store. See `store/share_store.rs` and `store/prune_blocks.rs`.
-
-For no-token shares with `N` direct P2PKH payees, use `367 + 34 * N`
-bytes as a conservative coinbase budget. The 367 bytes reserve every
-non-payee field at its largest size, including a tree output even when
-none is needed. P2SH20 outputs take 32 bytes each; P2SH32 outputs take 44.
-There is no BCH witness data or witness commitment. Token shares cap the
-coinbase at 3,072 bytes and move excess payees to a payout tree. No-token
-coinbases may reach 1,000,000 bytes. See `accounting/payout/coinbase_budget.rs`.
+transactions, not the BCH template's transactions: `BitcoinTxids` has no
+production writer, so upstream's 7.7 GB of template txids and 2 GB of
+deduplicated bodies do not apply (`store/share_store.rs`,
+`store/prune_blocks.rs`). The coinbase is the part that varies. A no-token
+coinbase with `N` direct P2PKH payees takes at most `367 + 34 * N` bytes
+(`accounting/payout/coinbase_budget.rs`); token shares cap it at 3,072
+bytes and no-token coinbases may reach 1,000,000
+([coinbase limit](bch-hybrid-payouts.md#33-the-coinbase-limit-c)).
 
 | Coinbase scenario | Bytes per coinbase | 242,174 retained coinbases |
 |---|---|---|
@@ -226,21 +222,21 @@ coinbases may reach 1,000,000 bytes. See `accounting/payout/coinbase_budget.rs`.
 | Token-share limit | 3,072 | 0.74 GB |
 | No-token limit | 1,000,000 | 242.13 GB |
 
-The share-chain rule permits another 204,800 bytes of share transactions.
-Filling both body allowances on every retained share gives 291.71 GB of
-raw transaction bytes. This excludes headers, branches, keys, transaction
-indexes, payout-tree data, forks, RocksDB overhead and pruning lag. It is
-not an on-disk upper bound. See `shares/validation/mod.rs`.
+Share transactions may add another 204,800 bytes a share
+(`shares/validation/mod.rs`). Filling both allowances on every retained
+share gives 291.71 GB of raw transaction bytes, before headers, branches,
+keys, transaction indexes, payout-tree data, forks, RocksDB overhead and
+pruning lag, so it is not an on-disk upper bound. Header and branch data,
+kept forever, grows by an estimated 3.7-4.2 GB per year for 32 MB to 1 GB
+templates ([pruning appendix](pruning.md#appendix-growth-of-data-kept-forever)).
 
-At the same rate, permanent header and branch data grows by an estimated
-3.7-4.2 GB per year in the 32 MB to 1 GB template scenarios in the
-[pruning appendix](pruning.md#appendix-growth-of-data-kept-forever).
-BCHN holds full BCH block data separately. At 600 seconds per BCH block,
-two weeks contain about 2,016 blocks: 32 MB blocks would add 64.51 GB;
-128 MB blocks, 258.05 GB; and 1 GB blocks, 2.02 TB. These are hypothetical
-filled-block volumes. Mainnet's 32 MB ABLA floor is not a fixed block-size
-cap. Use the actual template size and BCHN's pruning settings when sizing
-a deployment. See the [ABLA specification](https://gitlab.com/0353F40E/ebaa/-/blob/main/README.md#configuration-constants).
+BCHN holds full BCH block data separately. At 600 seconds per block, two
+weeks hold about 2,016 blocks: 64.51 GB at 32 MB, 258.05 GB at 128 MB and
+2.02 TB at 1 GB if every block were full. Mainnet's 32 MB ABLA floor is not a fixed
+block-size cap
+([ABLA specification](https://gitlab.com/0353F40E/ebaa/-/blob/main/README.md#configuration-constants)):
+size a deployment from the actual template size and BCHN's pruning
+settings.
 
 Serialized byte counts do not predict heap use or cache hit rates. A
 large template also occupies memory in RPC decoding and job construction.

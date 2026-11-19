@@ -80,11 +80,11 @@ uncle's cuts. Selling a payout right moves only the remaining payee credit;
 the share's donation and fee terms stay those it originally committed.
 The finding share's settings affect its own later window credit only.
 
-Why (the owner's decision, as P2Pool v1 did it): with the finding share's
-donation and fee taken off the whole coinbase, a miner choosing a 10%
-donation made the whole window donate 10% of that block, and a miner running
-its own node could set a 10% fee to itself and take 10% of every block it
-found. Per share, each miner's terms cost only that miner's own work.
+Why (as P2Pool v1 did it): with the finding share's donation and fee taken
+off the whole coinbase, a miner choosing a 10% donation would make the whole
+window donate 10% of that block, and a miner running its own node could set
+a 10% fee to itself and take 10% of every block it found. Per share, each
+miner's terms cost only that miner's own work.
 
 With basis-point integers `D`, `F` and `B = 10,000`, the exact numerators
 are `w * D * B`, `w * F * (B - D)` and
@@ -142,8 +142,8 @@ tag with the others.
   Validation keeps that shape off every valid chain: an uncle may have only
   one nephew on a chain, so `validate_uncles` rejects a share naming an uncle
   that one of its ancestors already names (see `share-processing-pipeline.md`,
-  "Uncle selection vs uncle acceptance"). This is a share-chain consensus
-  rule on both chains.
+  "Uncle selection vs uncle acceptance"). This is a share-chain rule on
+  both chains.
 - **A truncated walk is refused.** If the cache runs out before `W` shares
   and the cache does not reach height 0, return `InsufficientEntries`.
   Validation maps it to `Unresolvable`.
@@ -154,12 +154,11 @@ Bitcoin Cash sets `D` every block with ASERT, so `K * D` is `K` blocks' worth
 of work for the pool. The window therefore spans about `K` of the pool's own
 blocks at any pool size: short for a large pool, long for a small one, and
 shorter by itself when BCH blocks get faster. At 10-second shares and the
-one-minute blocks of CHIP-2025-03 (chipnet since 2026-11-15, mainnet from
-2027-05-15) the window is about `K * 6 / f` shares for a pool holding
-fraction `f` of BCH's hashrate, so pools under about `K / 20160` (0.015%)
-reach the cap and pay exactly upstream's fixed window. With ten-minute
-blocks it was `K * 60 / f` shares, ten times as long, and the cap bound
-under 0.15%.
+one-minute blocks of CHIP-2025-03 (mainnet from 2027-05-15) the window is
+about `K * 6 / f` shares for a pool holding fraction `f` of BCH's hashrate,
+so pools under about `K / 20160` (0.015%) reach the cap and pay exactly
+upstream's fixed window. With ten-minute blocks it is `K * 60 / f` shares,
+ten times as long, and the cap binds under 0.15%.
 
 | Pool share of BCH | Window (K = 3), one-minute blocks |
 |---|---|
@@ -212,131 +211,33 @@ under 0.15%.
 - **Truncation.** A walk that reaches `K * D` inside the cache is a property
   of the chain even when the cache no longer reaches height 0. Only a walk
   that runs out of cached entries before either bound is refused.
-- **Activation.** This is a share-chain rule, and nodes on different rules
-  rebuild different coinbases for every share and fork the share chain. The
-  BCH chains are alpha and run by their operators, so the change ships as a
-  flag day: every node upgrades in one release and starts from a new store
-  path, as the upstream sync did, so no share on the new chain was made
-  under the old rule. Miners lose only their share-chain position, because
-  payouts are coinbase outputs on BCH. Mainnet starts with the rule from its
-  first share, so it needs no activation height.
+- **Activation.** A share-chain rule: nodes on different rules rebuild
+  different coinbases and fork the share chain, so a change ships as a flag
+  day on a fresh store. Mainnet starts with the rule from its first share.
 - **Peers on another rule cannot connect.** On Bitcoin Cash every protocol
   string (request-response, Identify, Kademlia and the Noise prologue)
   carries `pplns-k<K>-m<N>` (now `pplns-k3-m100`) after the genesis tag,
   built from `BCH_PPLNS_WINDOW_BLOCKS` and `BCH_COINBASE_MATURITY` by
-  `share_chain_rule_tag`. A node on the old fixed window, or on another `K`
-  or maturity, fails the handshake instead of exchanging shares the other
-  rejects, and changing either constant changes the tag by itself. The
-  share difficulty rule follows it as `asert-parent`
-  (`docs/difficulty_adjustment/asert.md`), the share transaction rules as
-  `trade-htlc`, the payout to the holder of each share's payout right as
-  `payout-holder` (`docs/atomic-swap/bch-share-trading.md`) and the coinbase
-  hybrid as `payout-hybrid-t3072-f500-r1to3-z8-cov1` (below), which replaced
-  `payout-cap11` in the 2026-10-24 rule batch. After `uncle-once` come the
-  batch's own segments, among them `body-1000000-204800`,
-  `payee-p2pkh-p2sh20-p2sh32` and `weight-work` for the share body, payout
-  script and exact-weight rules (`share_chain_rule_tag` in
-  `node/behaviour/request_response.rs`). Bitcoin's protocol strings are
-  unchanged.
+  `share_chain_rule_tag` (`node/behaviour/request_response.rs`), so a node on
+  another `K` or maturity fails the handshake instead of exchanging shares
+  the other rejects. A segment for each later rule follows, among them
+  `asert-parent` (share difficulty), `trade-htlc` (share transactions),
+  `payout-holder` (payout rights), `payout-hybrid-t3072-f500-r1to3-z8-cov1`
+  (rule 8, which replaced `payout-cap11`), `cuts-per-share`, `uncle-once`,
+  `body-1000000-204800`, `payee-p2pkh-p2sh20-p2sh32` and `weight-work`.
+  Bitcoin's protocol strings are unchanged.
 
 ## Bitcoin Cash coinbase budget
 
-The implemented hybrid payout replaces the former 11-output cap and
-weighted draw. Its complete rule and covenant are in
-[bch-hybrid-payouts.md](bch-hybrid-payouts.md); plan decision 14 records the
-owner's approval.
-
-### The rule
-
-1. **Budget.** The exact empty merge-mining commitment permits a
-   1,000,000-byte coinbase, BCH's transaction limit. A token share permits
-   3,072 bytes so a token covenant can hash its coinbase. Merge-mining
-   format validation independently rejects malformed commitments.
-2. **Amounts and order.** Apply rule 7 after aggregating payout rights.
-   Payout, donation and fee scripts on BCH must be P2PKH, P2SH20 or P2SH32.
-3. **Reserve.** Allow 367 bytes beside PPLNS outputs: the 44-byte tree
-   output, the 53-byte CTMM output, padding, commitment and worst-case
-   transaction fields. Donation and fee are PPLNS payees (rule 1), so they
-   need no reserve.
-4. **Everyone fits.** If all payout outputs fit the budget without the
-   tree output, pay every payee directly. That is 80 P2PKH payees for a
-   token share or 29,402 for a no-token share, using the conservative
-   reserve above.
-5. **Straddle.** Otherwise take the longest canonical prefix that fits
-   with the tree output reserved: 79 or 29,400 P2PKH payees respectively.
-   The first payee that does not fit and every later payee go to the tree.
-   Never split a payee or back-fill with a later smaller output.
-6. **Dust.** Direct payouts below dust are paid as they are, which BCH
-   consensus permits in coinbases. Tree payees below their dust threshold
-   after fees at the highest allowed rate are merged into the last tree
-   payee. Recompute until no removable leaf is below dust. If that last
-   payee cannot pay its own fee and stay above dust, the merged tail is
-   paid to it directly in the tree output's place.
-
-The output order is CTMM at output 0, direct payouts, the tree root if
-needed, padding and the share commitment last. Validators check the
-complete rebuilt coinbase and the applicable size limit.
-
-### The payout tree
-
-Payees are grouped 500 per node, then nodes are grouped the same way until
-one root remains. Each node is a P2SH32 covenant that fixes its input value,
-transaction version, lock time, sequence, exact zero filler, output count
-and output hash, and prohibits tokens on its outputs. It has no keys.
-
-The root commits to output variants at 1, 2 and 3 sat/byte; each variant's
-descendants are fixed. Each payee funds its own output bytes and an equal
-share of the other tree bytes. Every node except the root pays exactly its
-variant's rate times its size; the root also pays the rounding excess.
-The executor pays nothing and receives nothing. BCH first-seen policy
-means a root already accepted at one rate cannot be replaced by another.
-
-The node that finds a block stores its tree by coinbase txid before it
-submits the block, and every P2Pool node stores it again when it validates
-the share, independently of later share-chain status. After the block has
-100 confirmations each node broadcasts the 1 sat/byte variant, root first,
-and finishes descendants of any higher-rate variant someone else started.
-It rebroadcasts on new BCH tips until every transaction of one variant has
-been confirmed for six tips in a row; a refused or missing child keeps the
-tree open. A tree whose block BCHN still does not know after six new tips,
-counted while BCHN is out of initial block download, is dropped: on a test
-network a share can claim a block with a minimum-difficulty header that no
-BCHN accepts. Tree data is retained after execution; `/payout_trees` and
-`/payout_tree?coinbase_txid=` serve the payees and raw transactions for
-every permitted rate.
-
-### Share bodies and channels
-
-The carried BCH coinbase has its own 1,000,000-byte limit beside 200 KiB
-of share transactions. `BCH_SHARE_BODY_SIZE_LIMIT` is 1,204,800 bytes and
-the BCH P2P message limit is 2,144 KiB, allowing the header, merkle branch
-and up to 960 KiB of carried weak shares.
-Compact transport and propagation measurements at large coinbase sizes
-remain follow-ups.
-
-SV1 sends the whole coinbase around the extranonce. SV2 extended jobs and
-Job Declaration encode prefix and suffix as fields of at most 65,535 bytes
-each; this gives roughly 1,922 P2PKH payouts, depending on other fields.
-SV2 standard channels carry headers and merkle paths, rather than the
-coinbase. A job is never truncated to fit: opening an extended channel
-whose job would not fit is refused with `coinbase-too-large`, and an open
-extended channel gets no job, only a log line, for a later template it
-cannot carry, while standard channels keep mining. These are transport
-limits of each channel type, not share-chain rules. Channel handling and
-device limits are documented in [Stratum](../stratum.md).
-
-### Activation and remaining measurements
-
-This share-chain rule batch starts on a fresh store. The hybrid tag segment
-is `payout-hybrid-t3072-f500-r1to3-z8-cov1`, replacing `payout-cap11`;
-`body-1000000-204800`, `payee-p2pkh-p2sh20-p2sh32`, `weight-work` and
-`cuts-per-share` name the share body, payout script, exact-weight and
-per-share cut rules. None of them changes BCH consensus.
-
-Firmware limits still need measurement on real ASICs over SV1 directly
-and behind an SV2 translator. Firmware evidence from other pools does not
-set a chain-wide limit. The tree has Rust covenant and BCHN regtest tests;
-chipnet execution and large-pool propagation are not yet measured.
+Rule 8, the hybrid payout (plan decision 14), is on its home page,
+[Hybrid payouts on Bitcoin Cash](bch-hybrid-payouts.md): the coinbase
+limit (1,000,000 bytes for the exact empty merge-mining commitment, 3,072
+for a token share, 367 bytes reserved beside the PPLNS outputs), the
+smallest-first order, the straddle rule, dust, the coinbase layout, and the
+P2SH32 covenant payout tree with its fees, executor and API. Donation and
+fee are PPLNS payees (rule 1), so they need no reserve; payout, donation and
+fee scripts must be P2PKH, P2SH20 or P2SH32. How SV1, SV2 and Job
+Declaration carry a large coinbase is on [Stratum](../stratum.md).
 
 ## Bitcoin Cash payout rights
 
@@ -354,14 +255,10 @@ In short:
   anchor's own chain up to and including the anchor. Uncles' transactions
   never count, and an uncle's own weight never moves.
 - `PplnsWindow` keeps the index (`payout_rights.rs`) beside its confirmed
-  entries: moved rights by share, by outpoint, and each cached share's
-  coinbase txid, all evicted with their share. `update` applies newly
-  confirmed shares in height order and undoes reorged-out ones from per-share
-  undo records kept for up to the newest `RIGHTS_UNDO_DEPTH` (1,210) shares
-  and `RIGHTS_UNDO_MAX_CHANGES` (100,000) changed entries; a deeper reorg
-  reloads. A walk from an anchor below the cached tip undoes the cached
-  shares above its fork point in an overlay, then applies its branch shares;
-  an anchor forking deeper than the undo log is `RightsHistoryTooShallow`,
+  entries, with undo records for reorgs and an overlay (`RightsOverlay`) for
+  an anchor below the cached tip
+  ([how a node looks a holder up](../atomic-swap/bch-share-trading.md#how-a-node-looks-a-holder-up)).
+  An anchor forking deeper than the undo log is `RightsHistoryTooShallow`,
   dropped without a verdict like `InsufficientEntries`.
 - Each output carries at most one right, so a share moves at most one right
   per input and the index never holds more than one entry per cached share.

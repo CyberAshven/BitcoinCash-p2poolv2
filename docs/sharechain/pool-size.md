@@ -44,30 +44,17 @@ coinbase; they are arithmetic, not measurements.
 
 ## The hybrid payout
 
-Plan decision 14 ([bch-plan.md](../bch-plan.md)) replaced the earlier cap of
-11 payouts in 784 bytes, which took Bitcoin's firmware report as a Bitcoin
-Cash limit:
-
-- **Shares that merge-mine no tokens** (the exact empty merge-mining
-  commitment) pay every payee directly, within
-  the 1,000,000-byte transaction limit: 29,402 P2PKH payees, or 29,400 beside
-  a tree output. Block space is ABLA's concern.
-- **Shares that merge-mine tokens** keep their coinbase within 3,072 bytes
-  (79 P2PKH payees, 80 without a tree output), so the token covenant can
-  still hash it in the VM. Either pool-built jobs or Job Declaration can
-  carry a token commitment.
-- **Past a share's limit,** payees are taken smallest first; the payee that
-  straddles the limit and every payee after it go to one covenant payout
-  tree output, whose keyless transactions of up to 500 outputs pay each of
-  them exactly, less their share of the fee at 1 to 3 sat/byte. Every P2Pool
-  node broadcasts the trees of found blocks once their coinbase is mature.
-
-It is a share-chain rule, carried in the Bitcoin Cash protocol strings as
-`payout-hybrid-t3072-f500-r1to3-z8-cov1`, and never changes Bitcoin Cash
-consensus. What stock firmware really accepts is still to be measured on
-chipnet over Stratum V1 and through an SV2 translator. Full rule:
-[Payout distribution](../architecture/payout-distribution.md) and
+Plan decision 14 ([bch-plan.md](../bch-plan.md)): a share that merge-mines
+no tokens pays every payee directly within the 1,000,000-byte transaction
+limit, about 29,400 P2PKH payees; a share that merge-mines tokens keeps its
+coinbase within 3,072 bytes, about 79, so the token covenant can still hash
+it in the VM. Past a share's limit, payees go smallest first, and the rest
+go to one covenant payout tree output, whose keyless transactions pay each
+of them exactly. It is a share-chain rule, carried in the protocol strings
+as `payout-hybrid-t3072-f500-r1to3-z8-cov1`; the full rule is on
 [Hybrid payouts on Bitcoin Cash](../architecture/bch-hybrid-payouts.md).
+What stock firmware accepts over Stratum V1 and through an SV2 translator is
+not yet measured.
 
 ## Other limits on pool size
 
@@ -75,11 +62,11 @@ chipnet over Stratum V1 and through an SV2 translator. Full rule:
   seconds. A share that reaches peers late becomes an uncle, which earns 90%
   of its difficulty, so latency costs miners a little but does not lose work.
 - **Small miners' variance.** A miner too small to have a share in most
-  windows is paid rarely. The mini share chain, with a target ceiling 256
-  times easier, serves them ([Small miners](../small-miners.md)), and shares
-  can be sold for BCH ([Selling shares](../payouts/selling-shares.md)).
+  windows would be paid rarely. The band, weak shares and payout levels
+  serve them ([Small miners](../small-miners.md)), and shares can be sold
+  for BCH ([Selling shares](../payouts/selling-shares.md)).
 - **Node resources.** Each node keeps the share headers forever (about 1 KB a
-  share, 3.1 GB a year per share chain) and block bodies for about 29 days,
+  share, 3.1 GB a year) and block bodies for about 28 days,
   mostly coinbases, which grow with the number of payees
   ([Requirements](../requirements.md#disk), [Pruning](../architecture/pruning.md)).
   Memory and CPU have not been measured.
