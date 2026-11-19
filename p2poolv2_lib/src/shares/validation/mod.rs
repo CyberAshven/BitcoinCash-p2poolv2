@@ -305,20 +305,6 @@ struct RecentAncestry {
     uncles_of_ancestors: HashSet<BlockHash>,
 }
 
-/// The future limit every share timestamp follows: at most
-/// `MAX_FUTURE_TIME_SECS` ahead of `current_time`, the local clock in seconds
-/// since the epoch. Shared by full validation and header sync so both apply
-/// the same rule.
-fn check_future_time_limit(share_time: u32, current_time: u64) -> Result<(), ValidationError> {
-    let share_timestamp = u64::from(share_time);
-    if share_timestamp > current_time.saturating_add(MAX_FUTURE_TIME_SECS) {
-        return Err(ValidationError::consensus(format!(
-            "Share timestamp {share_timestamp} is more than {MAX_FUTURE_TIME_SECS} seconds ahead of local time {current_time}"
-        )));
-    }
-    Ok(())
-}
-
 /// The future limit of a weak share a share carries: at most
 /// `MAX_FUTURE_TIME_SECS` after the carrying share's own time. Both times are
 /// chain data, so every node reaches the same verdict. A carrier whose own
@@ -505,6 +491,26 @@ fn window_error_verdict(error: WindowError) -> ValidationError {
     }
 }
 
+/// Refuse a share whose `time` is more than `MAX_FUTURE_TIME_SECS` ahead
+/// of the local clock.
+///
+/// The verdict depends on the local clock and changes as time passes, so a
+/// failure is `Recoverable`: the share is refused, never marked Invalid, and
+/// is accepted when offered again once its time has come.
+fn check_not_too_far_in_future(
+    share_time: u32,
+    time_provider: &dyn TimeProvider,
+) -> Result<(), ValidationError> {
+    let current_time = time_provider.seconds_since_epoch();
+    let share_timestamp = u64::from(share_time);
+    if share_timestamp > current_time + MAX_FUTURE_TIME_SECS {
+        return Err(ValidationError::recoverable(format!(
+            "Share timestamp {share_timestamp} is more than {MAX_FUTURE_TIME_SECS} seconds ahead of local time {current_time}"
+        )));
+    }
+    Ok(())
+}
+
 /// Check whether a block is in the PPLNS zone (needing full
 /// validation) or the prune zone (PoW-only validation).
 ///
@@ -628,7 +634,10 @@ pub trait ShareValidator {
     /// 1. Share `header.time` must be strictly greater than the median time
     ///    of the previous 11 share-chain ancestors (median time past).
     /// 2. Share `header.time` must not be more than `MAX_FUTURE_TIME_SECS`
-    ///    seconds ahead of the local clock.
+    ///    seconds ahead of the local clock. This is also checked on arrival
+    ///    by `validate_header_minimum_difficulty`; a failure here is
+    ///    `Recoverable` (only reachable if the clock moved backwards), never
+    ///    a reason to mark the share Invalid.
     fn validate_timestamp(
         &self,
         share: &ShareBlock,
@@ -640,7 +649,8 @@ pub trait ShareValidator {
     /// the header-sync and block-receipt paths, with the same two rules as
     /// `validate_timestamp`: `header.time` must be greater than the median of
     /// `ancestor_times`, and at most `MAX_FUTURE_TIME_SECS` ahead of this
-    /// validator's clock.
+    /// validator's clock. A time too far ahead is `Recoverable`, as in
+    /// `validate_timestamp`: the verdict depends on the local clock.
     ///
     /// `ancestor_times` are the times of up to `MTP_WINDOW` ancestors ending
     /// at the parent, which header sync reads from the batch and the store,
@@ -689,6 +699,11 @@ pub trait ShareValidator {
     /// declared bits target, and that the declared target is no easier than
     /// MAX_POOL_TARGET. This is the anti-spam gate for header sync and broadcast
     /// validation -- cheap and requires no store lookups.
+    ///
+    /// Also refuses a header more than `MAX_FUTURE_TIME_SECS` ahead of the
+    /// local clock, with a `Recoverable` error, so a far-future share is
+    /// never stored or relayed and its descendants cannot be built on the
+    /// easy ASERT target its time would give them.
     fn validate_header_minimum_difficulty(
         &self,
         share_header: &ShareHeader,
@@ -2106,6 +2121,7 @@ impl ShareValidator for DefaultShareValidator {
         &self,
         share_header: &ShareHeader,
     ) -> Result<(), ValidationError> {
+        check_not_too_far_in_future(share_header.time, self.time_provider.as_ref())?;
         self.validate_miner_address(share_header)?;
         self.validate_payout_cuts(share_header)?;
         self.validate_payout_scripts(share_header)?;
@@ -2238,7 +2254,7 @@ impl ShareValidator for DefaultShareValidator {
         chain_store_handle: &ChainStoreHandle,
         time_provider: &dyn TimeProvider,
     ) -> Result<(), ValidationError> {
-        check_future_time_limit(share.header.time, time_provider.seconds_since_epoch())?;
+        check_not_too_far_in_future(share.header.time, time_provider)?;
         let ancestor_times =
             stored_ancestor_times(share.header.prev_share_blockhash, chain_store_handle)?;
         // The walk is empty only when the loop never ran, which needs a terminal
@@ -2260,7 +2276,7 @@ impl ShareValidator for DefaultShareValidator {
         share_header: &ShareHeader,
         ancestor_times: &[u32],
     ) -> Result<(), ValidationError> {
-        check_future_time_limit(share_header.time, self.time_provider.seconds_since_epoch())?;
+        check_not_too_far_in_future(share_header.time, self.time_provider.as_ref())?;
         check_median_time_past(share_header.time, ancestor_times)
     }
 
@@ -3605,6 +3621,8 @@ mod tests {
     }
 
     /// Header sync applies the future limit with the validator's own clock.
+    /// The verdict depends on that clock, so the failure is `Recoverable`,
+    /// never a reason to mark the share Invalid.
     #[test]
     fn test_validate_header_timestamp_rejects_a_time_too_far_ahead() {
         let mut time_provider = TestTimeProvider::new(SystemTime::now());
@@ -3620,7 +3638,7 @@ mod tests {
             .validate_header_timestamp(&header, &[1_699_999_990])
             .unwrap_err();
 
-        assert_eq!(error.kind(), FailureKind::Consensus);
+        assert_eq!(error.kind(), FailureKind::Recoverable);
         assert!(
             error.to_string().contains("seconds ahead of local time"),
             "unexpected error: {error}"
@@ -3676,6 +3694,42 @@ mod tests {
             error.to_string().contains("seconds ahead of local time"),
             "unexpected error: {error}"
         );
+        //* Clock-dependent, so retried at organise rather than marked Invalid
+        assert_eq!(error.kind(), FailureKind::Recoverable);
+    }
+
+    /// A far-future header is refused on arrival, before it can be stored or
+    /// relayed, and the refusal is not a reason to mark it Invalid.
+    #[test]
+    fn test_validate_header_minimum_difficulty_rejects_far_future_header() {
+        let header = TestShareBlockBuilder::new().build().header;
+        let mut time_provider = TestTimeProvider::new(SystemTime::now());
+        time_provider.set_since_epoch(u64::from(header.time) - (MAX_FUTURE_TIME_SECS + 1));
+        let validator = DefaultShareValidator::with_time_provider(
+            PoolDifficulty::default(),
+            Arc::new(time_provider),
+        );
+
+        let error = validator
+            .validate_header_minimum_difficulty(&header)
+            .unwrap_err();
+
+        assert_eq!(error.kind(), FailureKind::Recoverable);
+        assert!(
+            error.to_string().contains("seconds ahead of local time"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn test_check_not_too_far_in_future_accepts_boundary() {
+        let header = TestShareBlockBuilder::new().build().header;
+        let mut time_provider = TestTimeProvider::new(SystemTime::now());
+        time_provider.set_since_epoch(u64::from(header.time) - MAX_FUTURE_TIME_SECS);
+
+        let result = check_not_too_far_in_future(header.time, &time_provider);
+
+        assert!(result.is_ok(), "got: {result:?}");
     }
 
     #[tokio::test]
