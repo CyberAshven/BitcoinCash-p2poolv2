@@ -140,3 +140,9 @@ carries the share's payout right. With transactions, a miner can sell a
 share for BCH through a contract on each chain. Bitcoin Cash share
 transactions accept only P2PKH spends and that contract. See
 [Share transactions](transactions.md).
+
+## Rule history
+
+Every Bitcoin Cash share-chain rule change, with its protocol string
+segment, store format and genesis re-pin, is listed in
+[Rule history](rule-history.md).

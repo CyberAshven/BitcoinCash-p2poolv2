@@ -146,6 +146,7 @@ pub(crate) fn validate_custom_job(
         || (request.version as i32 ^ original.version) & !version_mask != 0
         || request.min_ntime < original.mintime
         || u64::from(request.min_ntime) > now + 7200
+        || !original.allows_ntime(request.min_ntime)
     {
         return Err("invalid-header".into());
     }

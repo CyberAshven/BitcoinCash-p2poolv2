@@ -13,7 +13,7 @@ use bitcoin::consensus::Encodable;
 use bitcoin::consensus::encode;
 use bitcoin::{BlockHash, Work};
 use rocksdb::{BlockBasedOptions, ColumnFamilyDescriptor, DB, Options as RocksDbOptions};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::atomic::AtomicU32;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -28,63 +28,10 @@ const STORE_FORMAT_KEY: &[u8] = b"store_format";
 /// refuses it, so the operator resyncs the share chain instead of mixing
 /// old and new data in one database.
 ///
-/// - 1 (2026-10-30): chain work counts the work of each uncle a share
-///   names. Stores written before this have no version.
-/// - 2 (2026-11-05): Bitcoin Cash pays the genesis share only as the last
-///   resort (`BCH_GENESIS_LAST_RESORT_RULE_TAG`). A chain's first hours
-///   were validated under the old rule, so a node could not sync them from
-///   peers under the new one; the chain starts again.
-/// - 3 (2026-11-09): Bitcoin Cash has one share chain, the mini chain's,
-///   and its share headers carry a difficulty band (`BCH_BAND_RULE_TAG`):
-///   the share's minimum, the target its node wanted and its band cap. A
-///   stored header has none of these and would not decode, and the merged
-///   chain starts from a new genesis.
-/// - 4 (2026-11-09): Bitcoin Cash share headers carry their miner's payout
-///   level, and a slice below its payee's level is paid by a draw
-///   (`BCH_PAYOUT_LEVELS_RULE_TAG`). A stored header has no level and would
-///   not decode, its coinbase was validated without the draw, and the chain
-///   starts from a new genesis.
-/// - 5 (2026-11-09): Bitcoin Cash share headers carry a weak ratio and
-///   commit the weak shares their bodies carry (`BCH_WEAK_SHARE_RULE_TAG`),
-///   the store keeps those weak shares and a summary of their credit, and
-///   the PPLNS window credits proofs from jobs at the minimum at the weak
-///   work. A stored header has no weak ratio and would not decode, and its
-///   chain was paid under the old credit; the chain starts again.
-/// - 6 (2026-11-12): a Bitcoin Cash share's weak root commits each carried
-///   weak share's whole encoding, not only its proof-of-work hash
-///   (`BCH_WEAK_SHARE_RULE_TAG`, `weak2`). A stored share carrying weak
-///   shares commits the old root, which every node now refuses, so the
-///   chain starts again.
-/// - 7 (2026-11-12): Bitcoin Cash weak shares carry a 1% includer cut, may
-///   wait 48 shares for a carrier and are at most 256 times easier than the
-///   minimum (`BCH_WEAK_SHARE_RULE_TAG`, `weak2-64-100-48-256`, study #85).
-///   A stored chain was credited under the old cut and starts from a genesis
-///   whose weak ratio is the old `R_MAX`; the chain starts again.
-/// - 8 (2026-11-12): Bitcoin Cash payout levels start at the lowest
-///   (`BCH_PAYOUT_LEVELS_RULE_TAG`, `levels-546x2-k1`). A stored chain was
-///   validated under the rule that allowed level 0; the chain starts again.
-/// - 9 (2026-11-12): a weak share a share carries is held to its carrier's
-///   time (`BCH_WEAK_SHARE_RULE_TAG`, `weak3-64-100-48-256`). A stored chain
-///   was validated against each node's clock; the chain starts again.
-/// - 10 (2026-11-15): Bitcoin Cash share headers count the weak shares they
-///   carry that ask for an easier weak target, and the weak ratio follows
-///   those asks (`BCH_WEAK_SHARE_RULE_TAG`,
-///   `weak4-640-100-48-256-320-64-4096-64-32`). A stored header has no such count
-///   and would not decode, and the chain starts from a new genesis.
-/// - 11 (2026-11-16): a Bitcoin Cash share's weak root also commits the
-///   summary of the weak shares it carries (`BCH_WEAK_SHARE_RULE_TAG`,
-///   `-summary`), the `WeakSummaries` column family keeps their leaf root
-///   beside the summary (`PrunedWeakShares`), and whole weak shares are
-///   pruned one payout depth below the confirmed tip. A stored share
-///   carrying weak shares commits the old root, which every node now
-///   refuses, and a stored summary has no leaf root; the chain starts again.
-/// - 12 (2026-11-16): each known Bitcoin Cash header carries its
-///   CHIP-2025-03 ticks and next interval, worked out from its own branch's
-///   median time past (`BCH_CURRENT_CHAIN_RULE_TAG`, `bch-prev-1off-ticks`,
-///   and `BCH_MERGE_MINING_RULE_TAG`, `mm2-roots-asert8-ticks`). A stored
-///   header has neither and would not decode, and a stored chain was
-///   validated with intervals each node learned while running; the chain
-///   starts again.
+/// The version rises whenever what the store holds, or the rules a stored
+/// chain was validated under, change: the share-chain rule flag days and
+/// chain work that counts uncle work. `docs/sharechain/rule-history.md`
+/// lists each version.
 pub const STORE_FORMAT_VERSION: u32 = 12;
 
 pub mod bch_headers;
@@ -456,14 +403,9 @@ impl Store {
     /// block's parent is at height H-1, which is either in this batch
     /// or was sent in a previous batch.
     ///
-    /// A height with more than MAX_BLOCKS_PER_HEIGHT blocks, as a burst
-    /// of hashrate on a small pool makes, keeps MAX_BLOCKS_PER_HEIGHT of
-    /// them: first the blocks on the confirmed or candidate chain and the
-    /// uncles those chains name, then the rest by blockhash. Sorting by
-    /// blockhash alone could leave out the confirmed block, and a peer
-    /// syncing from this node then never connected the headers above it.
-    /// A block whose parent or uncle was left out is left out too: a peer
-    /// could not connect it either.
+    /// Returns an empty list when the store has no confirmed chain yet, since
+    /// there is nothing to serve. Any other store error is returned, so a
+    /// requester never mistakes a storage failure for the end of the chain.
     fn get_descendant_blockhashes(
         &self,
         blockhash: &BlockHash,
@@ -480,7 +422,8 @@ impl Store {
 
         let top_confirmed_height = match self.get_top_confirmed_height() {
             Ok(height) => height,
-            Err(_) => return Ok(blockhashes),
+            Err(StoreError::NotFound(_)) => return Ok(blockhashes),
+            Err(error) => return Err(error),
         };
 
         let end_height = std::cmp::min(
@@ -488,35 +431,10 @@ impl Store {
             top_confirmed_height,
         );
         let height_entries = self.get_blockhashes_for_height_range(start_height, end_height);
-        let mut left_out: HashSet<BlockHash> = HashSet::new();
 
-        for (height, raw_hashes) in height_entries {
-            let mut blocks_at_height: Vec<(BlockHash, ChainMembership)> = self
-                .get_block_metadata_batch(&raw_hashes)?
-                .into_iter()
-                .filter(|(_, metadata)| {
-                    metadata.status != Status::Pending && metadata.status != Status::Invalid
-                })
-                .map(|(hash, metadata)| (hash, metadata.chain))
-                .collect();
-            if !left_out.is_empty() {
-                self.leave_out_unconnectable(&mut blocks_at_height, &mut left_out)?;
-            }
-            blocks_at_height.sort_by_key(|(hash, _)| *hash);
-            if blocks_at_height.len() > MAX_BLOCKS_PER_HEIGHT {
-                let chain_uncles = self.uncles_named_by_chains_above(height)?;
-                blocks_at_height.sort_by_key(|(hash, chain)| {
-                    let on_a_chain = *chain != ChainMembership::None || chain_uncles.contains(hash);
-                    (!on_a_chain, *hash)
-                });
-                left_out.extend(
-                    blocks_at_height
-                        .drain(MAX_BLOCKS_PER_HEIGHT..)
-                        .map(|(hash, _)| hash),
-                );
-            }
-            let hashes_at_height: Vec<BlockHash> =
-                blocks_at_height.into_iter().map(|(hash, _)| hash).collect();
+        for (_height, raw_hashes) in height_entries {
+            let mut hashes_at_height = self.servable_blockhashes_sorted(&raw_hashes)?;
+            hashes_at_height.truncate(MAX_BLOCKS_PER_HEIGHT);
 
             let found_stop = hashes_at_height.contains(stop_blockhash);
             blockhashes.extend(hashes_at_height);
@@ -529,41 +447,93 @@ impl Store {
         Ok(blockhashes)
     }
 
-    /// The uncles that the confirmed and candidate blocks up to
-    /// MAX_UNCLES_DEPTH heights above `height` name.
-    fn uncles_named_by_chains_above(&self, height: u32) -> Result<HashSet<BlockHash>, StoreError> {
-        let mut uncles = HashSet::new();
-        for above in height + 1..=height.saturating_add(MAX_UNCLES_DEPTH as u32) {
-            let chain_blocks = [
-                self.get_confirmed_at_height(above).ok(),
-                self.get_candidate_at_height(above).ok(),
-            ];
-            for chain_block in chain_blocks.into_iter().flatten() {
-                if let Some(header) = self.get_share_header(&chain_block)? {
-                    uncles.extend(header.uncles);
+    /// Serve every servable block from `start_height` upward, for protocol
+    /// 1.1.0 header sync.
+    ///
+    /// Walks heights in ascending order and, within a height, blockhashes in
+    /// ascending order -- the same order `get_descendant_blockhashes` uses, but
+    /// with no per-height cap, so a block on the chain can never be left out
+    /// of a dense height. Pending and invalid blocks are excluded.
+    ///
+    /// `resume_after` skips the blocks at `start_height` up to and including
+    /// that hash, continuing a previous page from inside a height. The walk
+    /// stops after exactly `limit` blocks, even mid-height, so a response never
+    /// overshoots; the next request resumes after the last block served. It
+    /// also stops after `stop_blockhash` and at the top confirmed height.
+    ///
+    /// Every block's parent is at the height below, either earlier in this
+    /// page or served by a previous one, so pages arrive topologically sorted.
+    ///
+    /// Returns an empty list when the store has no confirmed chain yet, since
+    /// there is nothing to serve. Any other store error is returned, so a
+    /// requester never mistakes a storage failure for the end of the chain.
+    fn get_blockhashes_from_height(
+        &self,
+        start_height: u32,
+        resume_after: Option<BlockHash>,
+        stop_blockhash: &BlockHash,
+        limit: usize,
+    ) -> Result<Vec<BlockHash>, StoreError> {
+        let mut blockhashes = Vec::with_capacity(limit);
+        if limit == 0 {
+            return Ok(blockhashes);
+        }
+
+        let top_confirmed_height = match self.get_top_confirmed_height() {
+            Ok(height) => height,
+            Err(StoreError::NotFound(_)) => return Ok(blockhashes),
+            Err(error) => return Err(error),
+        };
+
+        // Every height up to the confirmed tip holds at least its confirmed
+        // block, so `limit` heights always hold at least `limit` blocks.
+        let end_height = std::cmp::min(
+            start_height.saturating_add(limit as u32),
+            top_confirmed_height,
+        );
+        let height_entries = self.get_blockhashes_for_height_range(start_height, end_height);
+
+        for (height, raw_hashes) in height_entries {
+            let hashes_at_height = self.servable_blockhashes_sorted(&raw_hashes)?;
+            //* Hashes are sorted, so the resume point is found by binary
+            //* search: serving starts at the first hash after it.
+            let first_unserved = match resume_after {
+                Some(resume_hash) if height == start_height => {
+                    hashes_at_height.partition_point(|hash| *hash <= resume_hash)
+                }
+                _ => 0,
+            };
+
+            //* Serve hashes in order, ending the page once it is full or the
+            //* stop hash has been served.
+            for blockhash in &hashes_at_height[first_unserved..] {
+                blockhashes.push(*blockhash);
+                if blockhashes.len() == limit || blockhash == stop_blockhash {
+                    return Ok(blockhashes);
                 }
             }
         }
-        Ok(uncles)
+
+        Ok(blockhashes)
     }
 
-    /// Remove from `blocks` each block whose parent or an uncle is in
-    /// `left_out`, and add it there.
-    fn leave_out_unconnectable(
+    /// The blocks among `raw_hashes` a header sync server may serve -- not
+    /// `Pending` and not `Invalid` -- sorted ascending by blockhash, the order
+    /// both serving walks use within a height.
+    fn servable_blockhashes_sorted(
         &self,
-        blocks: &mut Vec<(BlockHash, ChainMembership)>,
-        left_out: &mut HashSet<BlockHash>,
-    ) -> Result<(), StoreError> {
-        let hashes: Vec<BlockHash> = blocks.iter().map(|(hash, _)| *hash).collect();
-        for (hash, header) in self.get_share_headers(&hashes)? {
-            let unconnectable = left_out.contains(&header.prev_share_blockhash)
-                || header.uncles.iter().any(|uncle| left_out.contains(uncle));
-            if unconnectable {
-                left_out.insert(hash);
-            }
-        }
-        blocks.retain(|(hash, _)| !left_out.contains(hash));
-        Ok(())
+        raw_hashes: &[BlockHash],
+    ) -> Result<Vec<BlockHash>, StoreError> {
+        let mut servable: Vec<BlockHash> = self
+            .get_block_metadata_batch(raw_hashes)?
+            .into_iter()
+            .filter(|(_, metadata)| {
+                metadata.status != Status::Pending && metadata.status != Status::Invalid
+            })
+            .map(|(hash, _)| hash)
+            .collect();
+        servable.sort();
+        Ok(servable)
     }
 
     /// Get genesis block hash from chain state

@@ -373,9 +373,9 @@ pub const PRUNE_DEPTH: usize = ChainDepths::BITCOIN.prune_depth();
 /// 2x `BCH_PAYOUT_DEPTH` and `WEAK_DEPTH`: 242,174 shares, about 28 days at
 /// 10 s, against Bitcoin's 254,016. The 48 shares of `WEAK_DEPTH` hold the
 /// summaries a payout for a weak share carried at the bottom of the
-/// full-validation zone reads (`ChainDepths::weak_anchor_depth`); until
-/// 2026-11-16 a syncing node did not fetch them, credited those shares
-/// without their weak shares and could mark an honest share invalid.
+/// full-validation zone reads (`ChainDepths::weak_anchor_depth`); without
+/// them a syncing node would credit those shares without their weak shares
+/// and could mark an honest share invalid.
 pub const BCH_PRUNE_DEPTH: usize = ChainDepths::BITCOIN_CASH.prune_depth();
 
 /// The gap between the prune height and the prune target, and the size of

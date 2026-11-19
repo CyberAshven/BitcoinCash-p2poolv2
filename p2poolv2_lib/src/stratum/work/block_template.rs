@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
+use crate::shares::bch_headers::MinDifficultyMark;
 use crate::shares::coinbase_proof::MAX_COINBASE_MERKLE_BRANCH_LENGTH;
 use crate::stratum::sv2::ProvidedTemplate;
 use crate::stratum::work::error::WorkError;
@@ -101,6 +102,12 @@ pub struct BlockTemplate<T = TemplateTransaction> {
     /// of a node's JSON template.
     #[serde(skip)]
     pub light: Option<LightJob>,
+    /// Set by P2Pool on a test network whose minimum-difficulty rule ties
+    /// `bits` to the block's time, from the template's known previous block
+    /// ([`Self::bound_by_min_difficulty_mark`]). Never part of a node's JSON
+    /// template; `None` on mainnet.
+    #[serde(skip)]
+    pub min_difficulty_mark: Option<MinDifficultyMark>,
 }
 
 impl TryFrom<&TemplateTransaction> for Transaction {
@@ -131,6 +138,50 @@ impl BlockTemplate {
             .iter()
             .map(Transaction::try_from)
             .collect()
+    }
+
+    /// Bound this template's block times by `mark`: a block on it may then
+    /// carry only the times its `bits` allow ([`Self::allows_ntime`]), and
+    /// `curtime`, the time its jobs carry, moves to the nearest of them,
+    /// never below `mintime`.
+    pub fn bound_by_min_difficulty_mark(&mut self, mark: MinDifficultyMark) {
+        self.curtime = mark.nearest_allowed(self.curtime).max(self.mintime);
+        self.min_difficulty_mark = Some(mark);
+    }
+
+    /// Whether a block on this template may be dated `ntime` with its
+    /// `bits`: always, unless a test network's minimum-difficulty rule bounds
+    /// them ([`Self::bound_by_min_difficulty_mark`]).
+    pub fn allows_ntime(&self, ntime: u32) -> bool {
+        self.min_difficulty_mark
+            .is_none_or(|mark| mark.allows(ntime))
+    }
+
+    /// This template, bounded by ASERT's mark
+    /// ([`MinDifficultyMark::Until`]), as a block dated after the mark must
+    /// be: `bits`, the nBits a test network's minimum-difficulty rule then
+    /// requires, with their target, and `mintime` and `curtime` moved to at
+    /// least the second after the mark. The transactions, the coinbase value
+    /// and every other field stay. `None` for a template without ASERT's
+    /// mark, or whose nBits are already `bits`.
+    ///
+    /// A block found on it goes to the node over RPC, never back to a
+    /// Template Provider: `SubmitSolution` carries no nBits, so the provider
+    /// would rebuild the block with ASERT's.
+    pub fn past_min_difficulty_mark(&self, bits: CompactTarget) -> Option<Self> {
+        let Some(MinDifficultyMark::Until(mark)) = self.min_difficulty_mark else {
+            return None;
+        };
+        if CompactTarget::from_unprefixed_hex(&self.bits).ok() == Some(bits) {
+            return None;
+        }
+        let mut variant = self.clone();
+        variant.bits = format!("{:08x}", bits.to_consensus());
+        variant.target = hex::encode(Target::from_compact(bits).to_be_bytes());
+        variant.mintime = variant.mintime.max(mark.saturating_add(1));
+        variant.provided = None;
+        variant.bound_by_min_difficulty_mark(MinDifficultyMark::After(mark));
+        Some(variant)
     }
 
     /// Check BCH template data before computing merkle branches or issuing jobs.
@@ -330,6 +381,112 @@ mod tests {
         template.validate_bch().unwrap();
         assert_eq!(template.sizelimit, 32_000_000);
         assert_eq!(template.weightlimit, 0);
+    }
+
+    /// A node's template carries no mark, so it allows any time, as on
+    /// mainnet.
+    #[test]
+    fn a_template_without_a_mark_allows_any_time() {
+        let template: BlockTemplate = serde_json::from_str(BCHN_TEMPLATE).unwrap();
+        assert_eq!(template.min_difficulty_mark, None);
+        assert!(template.allows_ntime(0));
+        assert!(template.allows_ntime(u32::MAX));
+    }
+
+    /// A template with ASERT's bits whose time is past its mark is moved
+    /// back to the mark, which it then allows, and not a second later.
+    #[test]
+    fn a_template_with_asert_bits_is_moved_back_to_its_mark() {
+        let mut template: BlockTemplate = serde_json::from_str(BCHN_TEMPLATE).unwrap();
+        let mark = template.curtime - 5;
+        template.bound_by_min_difficulty_mark(MinDifficultyMark::Until(mark));
+        assert_eq!(template.curtime, mark);
+        assert!(template.allows_ntime(mark));
+        assert!(!template.allows_ntime(mark + 1));
+        template.validate_bch().unwrap();
+    }
+
+    /// A template with the limit's bits whose time is not past its mark is
+    /// moved to the second after it, which it then allows, and not the mark.
+    #[test]
+    fn a_template_with_the_limits_bits_is_moved_past_its_mark() {
+        let mut template: BlockTemplate = serde_json::from_str(BCHN_TEMPLATE).unwrap();
+        let mark = template.curtime;
+        template.bound_by_min_difficulty_mark(MinDifficultyMark::After(mark));
+        assert_eq!(template.curtime, mark + 1);
+        assert!(!template.allows_ntime(mark));
+        assert!(template.allows_ntime(mark + 1));
+    }
+
+    /// A mark below `mintime` cannot move `curtime` below it: no time is
+    /// then allowed, and every share on the template is refused.
+    #[test]
+    fn a_mark_never_moves_curtime_below_mintime() {
+        let mut template: BlockTemplate = serde_json::from_str(BCHN_TEMPLATE).unwrap();
+        let mark = template.mintime - 1;
+        template.bound_by_min_difficulty_mark(MinDifficultyMark::Until(mark));
+        assert_eq!(template.curtime, template.mintime);
+        assert!(!template.allows_ntime(template.curtime));
+    }
+
+    /// Past ASERT's mark the template becomes the limit's: its bits and
+    /// target change, its times move past the mark, and its transactions,
+    /// coinbase value, height, previous block and version stay. It is a
+    /// valid template the limit's mark allows.
+    #[test]
+    fn a_template_past_asert_mark_takes_the_limits_bits_and_nothing_else() {
+        let mut template: BlockTemplate = serde_json::from_str(BCHN_TEMPLATE).unwrap();
+        template.transactions = vec![bch_template_transaction(1)];
+        let mark = template.curtime + 30;
+        template.bound_by_min_difficulty_mark(MinDifficultyMark::Until(mark));
+        let limit = CompactTarget::from_consensus(0x1d00ffff);
+
+        let variant = template.past_min_difficulty_mark(limit).unwrap();
+
+        assert_eq!(variant.bits, "1d00ffff");
+        assert_eq!(
+            variant.target,
+            "00000000ffff0000000000000000000000000000000000000000000000000000"
+        );
+        assert_eq!(variant.curtime, mark + 1);
+        assert_eq!(variant.mintime, mark + 1);
+        assert_eq!(
+            variant.min_difficulty_mark,
+            Some(MinDifficultyMark::After(mark))
+        );
+        assert!(variant.allows_ntime(mark + 1));
+        assert!(!variant.allows_ntime(mark));
+        assert_eq!(
+            serde_json::to_value(&variant.transactions).unwrap(),
+            serde_json::to_value(&template.transactions).unwrap()
+        );
+        assert_eq!(variant.coinbasevalue, template.coinbasevalue);
+        assert_eq!(variant.coinbaseaux, template.coinbaseaux);
+        assert_eq!(variant.previousblockhash, template.previousblockhash);
+        assert_eq!(variant.height, template.height);
+        assert_eq!(variant.version, template.version);
+        assert_eq!(variant.sizelimit, template.sizelimit);
+        assert_eq!(variant.sigoplimit, template.sigoplimit);
+        variant.validate_bch().unwrap();
+    }
+
+    /// Only ASERT's mark leads to a variant: a template without a mark, as
+    /// every mainnet and regtest template is, a template already the
+    /// limit's, and one whose bits are already the ones asked for get none.
+    #[test]
+    fn only_a_template_with_asert_mark_has_a_variant() {
+        let limit = CompactTarget::from_consensus(0x1d00ffff);
+        let unmarked: BlockTemplate = serde_json::from_str(BCHN_TEMPLATE).unwrap();
+        assert!(unmarked.past_min_difficulty_mark(limit).is_none());
+
+        let mut after = unmarked.clone();
+        after.bound_by_min_difficulty_mark(MinDifficultyMark::After(after.curtime));
+        assert!(after.past_min_difficulty_mark(limit).is_none());
+
+        let mut same_bits = unmarked.clone();
+        same_bits.bound_by_min_difficulty_mark(MinDifficultyMark::Until(same_bits.curtime));
+        let own_bits = CompactTarget::from_unprefixed_hex(&same_bits.bits).unwrap();
+        assert!(same_bits.past_min_difficulty_mark(own_bits).is_none());
     }
 
     /// ABLA has no fixed maximum, so a limit past 32 bits must parse and hold.

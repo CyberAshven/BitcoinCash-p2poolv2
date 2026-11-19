@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-use bitcoin::consensus::{Decodable, Encodable};
+use bitcoin::consensus::Encodable;
 use bitcoin::hashes::{Hash, sha256d};
 use libp2p::futures::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use libp2p::request_response::{Codec, OutboundFailure};
@@ -51,163 +51,18 @@ fn genesis_tag(genesis_hash: BlockHash) -> String {
 /// Tag naming the share chain rules a Bitcoin Cash node enforces beyond
 /// upstream's, or `None` on Bitcoin, whose protocol strings stay upstream's.
 ///
-/// Bitcoin Cash sizes the PPLNS window by the paying block's difficulty
-/// (`BCH_PPLNS_WINDOW_BLOCKS`) behind its own maturity
-/// (`BCH_COINBASE_MATURITY`). A node on the earlier fixed window, or with
-/// another number of blocks or another maturity, rebuilds a different
-/// coinbase for every share, so the two must not peer: they would only
-/// exchange shares the other rejects. The tag is derived from the constants,
-/// so changing either rule changes the tag without anyone having to remember
-/// a version bump, as re-anchoring genesis does for `genesis_tag`.
+/// One segment per rule, each built from the rule's own constants, so
+/// changing a rule changes the tag without anyone having to remember a
+/// version bump, as re-anchoring genesis does for `genesis_tag`. A node on
+/// other rules would rebuild other coinbases or refuse shares this node
+/// accepts, so the two must not peer: their protocol strings differ and the
+/// handshake fails. Each constant's own documentation says what its rule is.
 ///
-/// Bitcoin Cash also anchors ASERT at each share's parent
-/// (`BCH_ASERT_ANCHOR_TAG`). A node anchoring at genesis computes another
-/// target for every share once the chain has been behind schedule, so it
-/// is kept apart the same way.
-///
-/// Then come the share transaction rules (`BCH_SHARE_TRADE_RULE_TAG`): the
-/// share-trading contract, dust-floored P2PKH or P2SH32 outputs and height
-/// finality. A node without them disagrees on shares carrying a contract
-/// spend, a dust output or an `OP_RETURN` output.
-///
-/// Then comes the payout to the holder of each share's payout right
-/// (`BCH_PAYOUT_HOLDER_RULE_TAG`). A node paying `miner_bitcoin_address`
-/// rebuilds another coinbase once any right has moved.
-///
-/// Then the hybrid payout (`bch_payout_rule_tag`, built from the token
-/// share's coinbase limit and the payout tree's fan-out, fee rates, filler
-/// and covenant version). A node on other values rebuilds another coinbase
-/// whenever payees go to the tree.
-///
-/// Then the donation and fee taken from each share's own weight at its own
-/// settings (`BCH_PER_SHARE_CUTS_RULE_TAG`). A node taking them off the
-/// whole coinbase at the paying share's settings rebuilds another coinbase
-/// whenever window shares differ in their cuts.
-///
-/// Then comes the rule that an uncle may have only one nephew on a chain
-/// (`BCH_UNCLE_ONCE_RULE_TAG`). A node without it accepts a share naming an
-/// uncle an ancestor already names, and pays that uncle twice.
-///
-/// Last come the other rules of the 2026-10-24 share-chain rule batch, one
-/// segment each, in the batch's item order: the share body limit
-/// (`BCH_SHARE_BODY_RULE_TAG`, item 2), payout scripts
-/// (`BCH_PAYOUT_SCRIPT_RULE_TAG`, 3), the 32-level merkle branch
-/// (`bch_merkle_rule_tag`, 4), depths from the 100-share maturity
-/// (`bch_depth_rule_tag`, 5), SigChecks (`bch_sig_checks_rule_tag`, 6), no
-/// SegWit commitment (`BCH_NO_SEGWIT_RULE_TAG`, 7), weights by work
-/// (`BCH_WORK_WEIGHT_RULE_TAG`, 8), merge-mining format v2 with the ASERT
-/// check (`BCH_MERGE_MINING_RULE_TAG`, 9) and the share-version vote
-/// (`BCH_SHARE_VERSION_RULE_TAG`, 10). The batch's item 1, the hybrid
-/// payout, took over the payout cap's slot above.
-///
-/// From that batch on, a rule change was to be a new share version that
-/// activates by a vote of the miners' work (`shares::share_version`),
-/// keeping this tag so nodes on the old and the new version peer for the
-/// vote to see both. Mining on the current chain
-/// (`BCH_CURRENT_CHAIN_RULE_TAG`, 2026-10-30) is the owner's exception for
-/// the alpha: it changes the share messages themselves, which now carry
-/// Bitcoin Cash headers a node before it cannot read, so it ships as a flag
-/// day with its own last segment. Later rule changes go through the vote.
-///
-/// Paying the genesis share only as the last resort
-/// (`BCH_GENESIS_LAST_RESORT_RULE_TAG`, 2026-11-05) is the owner's second
-/// exception, also a flag day with its own segment. It changes a coinbase
-/// only while genesis is in the window, in a new chain's first hours, and a
-/// vote cannot switch a chain before its parent is
-/// `SHARE_VERSION_VOTE_DEPTH` shares high, three days, by when genesis has
-/// left every window.
-///
-/// The difficulty band (`BCH_BAND_RULE_TAG`, 2026-11-09, issue #79 row 3) is
-/// the third flag day, shipped with the merge of the main and mini chains
-/// into one chain at the mini chain's genesis. A share may be up to `C_MAX`
-/// (64) times harder than the minimum, with its minimum, the target its node
-/// wanted and its band cap in its header (`shares::band`), and the next
-/// share's ASERT anchors at the minimum. A node before it cannot read the
-/// longer header and would refuse every heavier share, and the merged chain
-/// starts from a new genesis, so every node upgrades together on a fresh
-/// store rather than through the vote.
-///
-/// Payout levels (`BCH_PAYOUT_LEVELS_RULE_TAG`, 2026-11-09, issue #79 row 3,
-/// part 4) are the fourth flag day, on the same restart. Each share header
-/// carries its miner's payout level, and a slice of a found block below its
-/// payee's level `546 * 2^k` satoshis is paid by a draw among the slices at
-/// that level, seeded from the share's parent (`payout_levels`). A node
-/// before it cannot read the longer header and would rebuild another
-/// coinbase whenever a payee is below its level, and the header change gives
-/// the chain a new genesis, so every node upgrades together on a fresh store
-/// rather than through the vote.
-///
-/// Weak shares (`BCH_WEAK_SHARE_RULE_TAG`, 2026-11-09, issue #79 row 5) ship
-/// on the same flag day: a share carries up to `WEAK_CAP` easier proofs
-/// of work on jobs at the minimum, each with its parent at most `WEAK_DEPTH`
-/// shares below it, and the PPLNS window credits every proof from a job
-/// at the minimum at the weak work, with `INCLUDER_CUT` (100 basis points) of
-/// each weak share's credit to the share carrying it (`shares::weak`). The
-/// share header carries a weak ratio and commits the carried weak shares,
-/// and weak shares travel in a new message, none of which a node before it
-/// can read, so it cannot go through the vote.
-///
-/// The segment became `weak2` on 2026-11-12, a flag day of its own: a
-/// share's weak root now commits each carried weak share's whole encoding
-/// rather than its proof-of-work hash alone (`shares::weak::weak_root`). The
-/// old root left a carried weak share's coinbase value, branch, scriptSig and
-/// coinbase proof free for a relaying peer to change, and the change made an
-/// honest share invalid after its body was stored. A node on `weak` computes
-/// another root for every share carrying weak shares and refuses it, so the
-/// two cannot share a chain, and the vote cannot carry a fix to what a body
-/// check binds while the old rule lets any peer split a node off.
-///
-/// Its numbers changed on 2026-11-12, another flag day (study #85):
-/// `INCLUDER_CUT` from 500 to 100 basis points, `WEAK_DEPTH` from 6 to 48 and
-/// `R_MAX` from 4096 to 256, now in the segment. Nodes on the two credit weak
-/// shares differently and start from different genesis shares, so they
-/// cannot share a chain.
-///
-/// Payout levels' lowest rung changed on 2026-11-12, another flag day
-/// (`BCH_PAYOUT_LEVELS_RULE_TAG`, now `levels-546x2-k1`). Level 0 is not a
-/// valid payout level: it paid 546 satoshis, which is below dust once the
-/// payout tree's fee is taken, so a level 0 win that landed in the tree went
-/// to the tree's largest payee. A node on `levels-546x2` still accepts that
-/// header and pays the win, and the genesis share's level byte changed, so
-/// the two cannot share a chain.
-///
-/// The weak segment became `weak3` on 2026-11-12, another flag day: a weak
-/// share a share carries is held to its carrier's time, not to each node's
-/// clock (`check_carried_weak_time`). On `weak2` a share carrying a weak
-/// share stamped two minutes ahead was valid on a node whose clock had
-/// passed that time and invalid for good on one whose clock had not.
-///
-/// The weak segment became `weak4-640-100-48-256-320-64-4096-64-32` on 2026-11-15,
-/// another flag day (issue #79, part 6 of the design page): the weak ratio
-/// follows the weak shares that ask. A weak share asks when its
-/// `wanted_bits` is easier than the weak target it met, each share header
-/// counts the asking weak shares it carries as `weak_asking`, and while more
-/// than one in `WEAK_ASK_DIVISOR` (64) of them ask the weak ratio rises, past
-/// `R_MAX` as far as `R_ASK_MAX` (4096), until a share carries more than
-/// `WEAK_FILL_MAX` (320); a share may carry `WEAK_CAP` (640) weak shares,
-/// where it carried 64. A node on `weak3` cannot read the longer header,
-/// refuses a share whose `wanted_bits` is easier than its own target and
-/// steps the weak ratio without the asks, and the header change gives the
-/// chain a new genesis, so every node upgrades together on a fresh store
-/// rather than through the vote.
-///
-/// The weak segment gained `-summary` on 2026-11-16, before any node ran
-/// `weak4`, another flag day: a share's weak root also commits the summary
-/// of the weak shares it carries, so a node that pruned them one payout
-/// depth below its tip serves the body with their leaf root and summary, and
-/// a syncing peer checks those against the header. Every share carrying
-/// weak shares has another root under the two, and a node without it cannot
-/// read a body served that way.
-///
-/// The current-chain and merge-mining segments gained `-ticks` on
-/// 2026-11-15, another flag day (`bch-prev-1off-ticks`,
-/// `mm2-roots-asert8-ticks`): each known Bitcoin Cash header carries its
-/// CHIP-2025-03 ticks and next block interval, worked out from its own
-/// branch's median time past as BCHN does, and the nBits a peer's header
-/// must carry, the nBits that size a payout window and a token share's
-/// ASERT band follow them. Before, each node learned one-minute blocks
-/// while running from its own Bitcoin Cash node, so two nodes could require
-/// different nBits of one header; the two rules cannot share a chain.
+/// Rule changes after the 2026-10-24 batch were to go through the
+/// share-version vote (`shares::share_version`) and keep this tag. During
+/// the alpha each has instead shipped as a flag day, with a new segment and
+/// a fresh store. `docs/sharechain/rule-history.md` lists the segments and
+/// when each changed.
 fn share_chain_rule_tag(chain: Chain) -> Option<String> {
     match chain {
         Chain::Bitcoin => None,
@@ -232,22 +87,31 @@ fn share_chain_rule_tag(chain: Chain) -> Option<String> {
 /// the two apart, as it does for a rule. The network is in alpha: every node
 /// restarts on the new binary.
 ///
-/// `weak-by-hash` since 2026-11-15: a new share relayed to peers lists the
-/// weak shares it carries by proof-of-work hash (`ShareWithWeakHashes`),
-/// sending whole beside the list only the ones its peers probably lack, and
-/// a peer whose weak pool still lacks some asks the sender for them
-/// (`GetCarriedWeakShares`, answered with `CarriedWeakShares`). A node
-/// before it cannot read any of the three. Sync still sends weak shares
-/// whole.
+/// `weak-by-hash`: a new share relayed to peers lists the weak shares it
+/// carries by proof-of-work hash (`ShareWithWeakHashes`), sending whole
+/// beside the list only the ones its peers probably lack, and a peer whose
+/// weak pool still lacks some asks the sender for them
+/// (`GetCarriedWeakShares`, answered with `CarriedWeakShares`).
 ///
-/// `without-payouts` since 2026-11-16: a new share whose coinbase outputs
-/// are large (`RELAY_WITHOUT_PAYOUTS_MIN_BYTES`) is relayed without them
+/// `without-payouts`: a new share whose coinbase outputs are large
+/// (`RELAY_WITHOUT_PAYOUTS_MIN_BYTES`) is relayed without them
 /// (`ShareWithoutPayouts`, which also lists the weak shares by hash), and the
 /// receiver rebuilds them from its PPLNS window as validation does. A
 /// smaller share still goes whole, as `ShareWithWeakHashes` or `ShareBlock`.
-/// A node before it cannot read the new message. Sync still sends shares
-/// whole.
-const BCH_MESSAGES_TAG: &str = "weak-by-hash/without-payouts";
+///
+/// `headers-resume`: upstream's request-response protocol 1.1.0
+/// (`ProtocolVersion`). `GetShareHeaders` carries the last header the
+/// requester got (`resume_after`), and the answer serves every share at a
+/// height, a page ending inside a height if it fills, where 1.0.0 cuts each
+/// height at `MAX_BLOCKS_PER_HEIGHT` shares. Upstream picks the version per
+/// stream, so without the segment a node before it would peer on 1.0.0 and
+/// get cut heights, which can leave out the share the chain goes through.
+/// With it, Bitcoin Cash nodes always speak 1.1.0 to each other; 1.0.0 stays
+/// for a Bitcoin node and upstream's nodes.
+///
+/// Sync still sends shares and weak shares whole.
+/// `docs/sharechain/rule-history.md` lists when each segment came.
+const BCH_MESSAGES_TAG: &str = "weak-by-hash/without-payouts/headers-resume";
 
 /// The share chain part of every protocol string: the genesis tag, followed
 /// on Bitcoin Cash by the rule tag and the message tag.
@@ -261,15 +125,67 @@ fn share_chain_segment(chain: Chain, genesis_hash: BlockHash) -> String {
     }
 }
 
-/// Build the libp2p protocol string for a bitcoin network and share chain.
+/// Version of the request-response protocol negotiated on a stream.
 ///
-/// Network isolation is enforced through protocol negotiation: nodes on
-/// different networks, on share chains with different genesis blocks, or on
-/// Bitcoin Cash with different payout rules derive different protocol strings
-/// and therefore fail to negotiate a shared protocol. Centralizing
-/// construction here keeps the string consistent across the request-response
-/// protocol, Identify, and the Noise prologue.
-pub fn protocol_string(network: bitcoin::Network, chain: Chain, genesis_hash: BlockHash) -> String {
+/// The version selects how version-dependent messages are serialized and how
+/// a request is served, so a node can keep talking to peers that only know an
+/// older version.
+///
+/// The version is independent of share chain isolation. A chain reset
+/// re-anchors genesis, which changes the genesis tag in every protocol string
+/// (see [`network_prologue`]); it does not need, and must not rely on, a
+/// version bump.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProtocolVersion {
+    /// Original protocol. Header responses truncate each height to
+    /// `MAX_BLOCKS_PER_HEIGHT` blocks.
+    V1_0,
+    /// Header responses serve every block at a height and page with a resume
+    /// point inside a height.
+    V1_1,
+}
+
+impl ProtocolVersion {
+    /// Version segment of the protocol string.
+    fn as_str(self) -> &'static str {
+        match self {
+            ProtocolVersion::V1_0 => "1.0.0",
+            ProtocolVersion::V1_1 => "1.1.0",
+        }
+    }
+}
+
+/// Request-response versions this node supports, most preferred first.
+///
+/// Outbound streams offer the versions in this order and multistream-select
+/// takes the first one the remote accepts, so two current nodes negotiate the
+/// newest version and a current node falls back to 1.0.0 with an older peer.
+pub const SUPPORTED_PROTOCOL_VERSIONS: [ProtocolVersion; 2] =
+    [ProtocolVersion::V1_1, ProtocolVersion::V1_0];
+
+/// Build the network identifier for a bitcoin network and share chain.
+///
+/// Used as the Noise prologue and the Identify protocol version. Network
+/// isolation is enforced through the network and share chain segments: nodes
+/// on different networks, on share chains with different genesis blocks, or
+/// on Bitcoin Cash with different rules or messages derive different
+/// prologues and therefore fail the Noise handshake. The same segments are
+/// carried by [`request_response_protocol_string`] and
+/// [`kad_protocol_string`], so such nodes also fail to negotiate any shared
+/// protocol. Centralizing construction here keeps the segments consistent
+/// across the Noise prologue, Identify, request-response and Kademlia.
+///
+/// The string keeps its `1.0.0` suffix and does not follow the
+/// request-response protocol version. Noise requires byte-identical
+/// prologues, so changing it would stop old and new nodes from connecting at
+/// all and leave nothing to negotiate a version over. On Bitcoin it is the
+/// string v0.18 nodes use; on Bitcoin Cash the rule and message tags in its
+/// share chain segment are what keep nodes apart.
+pub fn network_prologue(
+    network: bitcoin::Network,
+    chain: Chain,
+    genesis_hash: BlockHash,
+) -> String {
     format!(
         "/p2pool/{}/{}/1.0.0",
         network.to_core_arg(),
@@ -277,9 +193,35 @@ pub fn protocol_string(network: bitcoin::Network, chain: Chain, genesis_hash: Bl
     )
 }
 
+/// Build the request-response protocol string for a bitcoin network, share
+/// chain and protocol version.
+///
+/// Carries the same network and share chain segments as
+/// [`network_prologue`], so nodes on different networks, or on share chains
+/// with different genesis blocks or rules, fail to negotiate a stream
+/// whatever version they support. Only the last segment varies with
+/// `version`. The 1.0.0 string equals the one v0.18 nodes offer.
+///
+/// The network and share chain segments are not strictly required for 1.1.0,
+/// since the Noise prologue already isolates chains, but 1.0.0 needs them for
+/// compatibility and keeping them helps debugging.
+pub fn request_response_protocol_string(
+    network: bitcoin::Network,
+    chain: Chain,
+    genesis_hash: BlockHash,
+    version: ProtocolVersion,
+) -> String {
+    format!(
+        "/p2pool/{}/{}/{}",
+        network.to_core_arg(),
+        share_chain_segment(chain, genesis_hash),
+        version.as_str()
+    )
+}
+
 /// Build the Kademlia protocol string for a bitcoin network and share chain.
 ///
-/// Kademlia uses a distinct protocol name from [`protocol_string`] but shares
+/// Kademlia uses a distinct protocol name from [`network_prologue`] but shares
 /// the same network and share chain segments, so it is derived here to keep
 /// both in step.
 pub fn kad_protocol_string(
@@ -296,17 +238,34 @@ pub fn kad_protocol_string(
 
 // Protocol name for our request-response protocol
 #[derive(Debug, Clone)]
-pub struct P2PoolRequestResponseProtocol(String);
+pub struct P2PoolRequestResponseProtocol {
+    name: String,
+    version: ProtocolVersion,
+}
 
 impl P2PoolRequestResponseProtocol {
-    pub fn new(network: bitcoin::Network, chain: Chain, genesis_hash: BlockHash) -> Self {
-        Self(protocol_string(network, chain, genesis_hash))
+    /// Protocol for `version` on the given network and share chain.
+    pub fn new(
+        network: bitcoin::Network,
+        chain: Chain,
+        genesis_hash: BlockHash,
+        version: ProtocolVersion,
+    ) -> Self {
+        Self {
+            name: request_response_protocol_string(network, chain, genesis_hash, version),
+            version,
+        }
+    }
+
+    /// Version this protocol negotiates.
+    pub fn version(&self) -> ProtocolVersion {
+        self.version
     }
 }
 
 impl AsRef<str> for P2PoolRequestResponseProtocol {
     fn as_ref(&self) -> &str {
-        &self.0
+        &self.name
     }
 }
 
@@ -315,7 +274,9 @@ impl AsRef<str> for P2PoolRequestResponseProtocol {
 pub struct ConsensusCodec;
 
 impl ConsensusCodec {
-    async fn read_message<T>(&self, io: &mut T) -> io::Result<Message>
+    /// Read one framed message, decoding the payload in the layout of the
+    /// stream's protocol `version`.
+    async fn read_message<T>(&self, version: ProtocolVersion, io: &mut T) -> io::Result<Message>
     where
         T: AsyncRead + Unpin + Send,
     {
@@ -361,17 +322,24 @@ impl ConsensusCodec {
             ));
         }
 
-        let message = Message::consensus_decode(&mut &payload_bytes[..])
+        let message = Message::consensus_decode_with_version(version, &mut &payload_bytes[..])
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
 
         Ok(message)
     }
 
-    async fn write_message<T>(&self, io: &mut T, msg: Message) -> io::Result<()>
+    /// Write one framed message, encoding the payload in the layout of the
+    /// stream's protocol `version`.
+    async fn write_message<T>(
+        &self,
+        version: ProtocolVersion,
+        io: &mut T,
+        msg: Message,
+    ) -> io::Result<()>
     where
         T: AsyncWrite + Unpin + Send,
     {
-        let raw_msg = RawMessage::new(msg);
+        let raw_msg = RawMessage::new_with_version(version, msg);
         let mut bytes = Vec::new();
         raw_msg
             .consensus_encode(&mut bytes)
@@ -385,46 +353,50 @@ impl Codec for ConsensusCodec {
     type Request = Message;
     type Response = Message;
 
-    async fn read_request<T>(&mut self, _: &Self::Protocol, io: &mut T) -> io::Result<Self::Request>
+    async fn read_request<T>(
+        &mut self,
+        protocol: &Self::Protocol,
+        io: &mut T,
+    ) -> io::Result<Self::Request>
     where
         T: AsyncRead + Unpin + Send,
     {
-        self.read_message(io).await
+        self.read_message(protocol.version(), io).await
     }
 
     async fn read_response<T>(
         &mut self,
-        _: &Self::Protocol,
+        protocol: &Self::Protocol,
         io: &mut T,
     ) -> io::Result<Self::Response>
     where
         T: AsyncRead + Unpin + Send,
     {
-        self.read_message(io).await
+        self.read_message(protocol.version(), io).await
     }
 
     async fn write_request<T>(
         &mut self,
-        _: &Self::Protocol,
+        protocol: &Self::Protocol,
         io: &mut T,
         req: Self::Request,
     ) -> io::Result<()>
     where
         T: AsyncWrite + Unpin + Send,
     {
-        self.write_message(io, req).await
+        self.write_message(protocol.version(), io, req).await
     }
 
     async fn write_response<T>(
         &mut self,
-        _: &Self::Protocol,
+        protocol: &Self::Protocol,
         io: &mut T,
         res: Self::Response,
     ) -> io::Result<()>
     where
         T: AsyncWrite + Unpin + Send,
     {
-        self.write_message(io, res).await
+        self.write_message(protocol.version(), io, res).await
     }
 }
 
@@ -444,11 +416,20 @@ pub enum RequestResponseError {
 
 #[cfg(test)]
 mod tests {
-    use super::{BCH_MESSAGES_TAG, GENESIS_TAG_LEN, kad_protocol_string, protocol_string};
+    use super::{
+        BCH_MESSAGES_TAG, ConsensusCodec, GENESIS_TAG_LEN, P2PoolRequestResponseProtocol,
+        ProtocolVersion, kad_protocol_string, network_prologue, request_response_protocol_string,
+    };
     use crate::config::Chain;
+    use crate::node::messages::{GetShareHeaders, Message};
     use crate::shares::bch_genesis;
     use crate::shares::share_block::ShareBlock;
+    use bitcoin::BlockHash;
+    use bitcoin::hashes::Hash;
+    use libp2p::futures::io::Cursor;
+    use libp2p::request_response::Codec;
     use p2poolv2_wallet::bch_share::BchShareNetwork;
+    use std::str::FromStr;
 
     /// A Bitcoin Cash protocol string without its message tag: the rule
     /// tests below take the rule segments off it one flag day at a time.
@@ -456,24 +437,26 @@ mod tests {
         protocol_string.replace(&format!("/{BCH_MESSAGES_TAG}/"), "/")
     }
 
+    /// The prologue must stay byte-identical to the string v0.18 nodes use,
+    /// or the Noise handshake between old and new nodes fails.
     #[test]
-    fn test_protocol_string_carries_network_and_genesis_tag() {
+    fn test_network_prologue_carries_network_and_genesis_tag() {
         let genesis_hash = ShareBlock::build_genesis_for_network(bitcoin::Network::Signet)
             .unwrap()
             .block_hash();
         let expected_tag = &genesis_hash.to_string()[..GENESIS_TAG_LEN];
 
         assert_eq!(
-            protocol_string(bitcoin::Network::Signet, Chain::Bitcoin, genesis_hash),
+            network_prologue(bitcoin::Network::Signet, Chain::Bitcoin, genesis_hash),
             format!("/p2pool/signet/{expected_tag}/1.0.0")
         );
     }
 
     /// The isolation property a chain reset relies on: re-anchoring genesis
-    /// changes the protocol string even though the bitcoin network is
-    /// unchanged, so nodes on the old chain cannot negotiate with new ones.
+    /// changes the prologue even though the bitcoin network is unchanged, so
+    /// nodes on the old chain cannot connect to new ones.
     #[test]
-    fn test_protocol_string_differs_when_genesis_differs_on_same_network() {
+    fn test_network_prologue_differs_when_genesis_differs_on_same_network() {
         let genesis_hash = ShareBlock::build_genesis_for_network(bitcoin::Network::Testnet4)
             .unwrap()
             .block_hash();
@@ -483,8 +466,8 @@ mod tests {
         assert_ne!(genesis_hash, other_genesis_hash);
 
         assert_ne!(
-            protocol_string(bitcoin::Network::Testnet4, Chain::Bitcoin, genesis_hash),
-            protocol_string(
+            network_prologue(bitcoin::Network::Testnet4, Chain::Bitcoin, genesis_hash),
+            network_prologue(
                 bitcoin::Network::Testnet4,
                 Chain::Bitcoin,
                 other_genesis_hash
@@ -505,7 +488,7 @@ mod tests {
         assert_eq!(kad, format!("/p2pool/signet/{expected_tag}/kad/1.0.0"));
         assert_ne!(
             kad,
-            protocol_string(bitcoin::Network::Signet, Chain::Bitcoin, genesis_hash)
+            network_prologue(bitcoin::Network::Signet, Chain::Bitcoin, genesis_hash)
         );
     }
 
@@ -520,15 +503,15 @@ mod tests {
         let expected_tag = &genesis_hash.to_string()[..GENESIS_TAG_LEN];
 
         assert_eq!(
-            protocol_string(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash),
+            network_prologue(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash),
             format!(
-                "/p2pool/test/{expected_tag}/pplns-k3-m100/asert-parent/trade-htlc/payout-holder/payout-hybrid-t3072-f500-r1to3-z8-cov1/cuts-per-share/uncle-once/body-1000000-204800/payee-p2pkh-p2sh20-p2sh32/merkle32/depths-m100/sigchecks3000-1452/no-segwit/weight-work/mm2-roots-asert8-ticks/version-vote/bch-prev-1off-ticks/genesis-last-resort/band-c64/levels-546x2-k1/weak4-640-100-48-256-320-64-4096-64-32-summary/weak-by-hash/without-payouts/1.0.0"
+                "/p2pool/test/{expected_tag}/pplns-k3-m100/asert-parent/trade-htlc/payout-holder/payout-hybrid-t3072-f500-r1to3-z8-cov1/cuts-per-share/uncle-once/body-1000000-204800/payee-p2pkh-p2sh20-p2sh32/merkle32/depths-m100/sigchecks3000-1452/no-segwit/weight-work/mm2-roots-asert8-ticks/version-vote/bch-prev-1off-ticks/genesis-last-resort/band-c64/levels-546x2-k1/weak4-640-100-48-256-320-64-4096-64-32-summary/weak-by-hash/without-payouts/headers-resume/1.0.0"
             )
         );
     }
 
-    /// From 2026-11-15 a new share is relayed with the weak shares it
-    /// carries listed by hash. A node before it derived the same string
+    /// A new share is relayed with the weak shares it carries listed by
+    /// hash. A node before it derived the same string
     /// without `/weak-by-hash`: it cannot read the new share message or the
     /// request for carried weak shares, so the two strings differ and the
     /// nodes fail the handshake rather than decode each other's messages as
@@ -538,13 +521,13 @@ mod tests {
         let genesis_hash = bch_genesis::build(BchShareNetwork::Chipnet)
             .unwrap()
             .block_hash();
-        let current = protocol_string(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash);
+        let current = network_prologue(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash);
         let before = rules_only(current.clone());
 
         assert_ne!(current, before, "weak shares by hash change the messages");
         assert!(
             current.ends_with(
-                "/weak4-640-100-48-256-320-64-4096-64-32-summary/weak-by-hash/without-payouts/1.0.0"
+                "/weak4-640-100-48-256-320-64-4096-64-32-summary/weak-by-hash/without-payouts/headers-resume/1.0.0"
             ),
             "{current}"
         );
@@ -554,13 +537,12 @@ mod tests {
         );
         let kad = kad_protocol_string(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash);
         assert!(
-            kad.ends_with("/weak-by-hash/without-payouts/kad/1.0.0"),
+            kad.ends_with("/weak-by-hash/without-payouts/headers-resume/kad/1.0.0"),
             "{kad}"
         );
     }
 
-    /// From 2026-11-16 a new share with large coinbase outputs is relayed
-    /// without them (`ShareWithoutPayouts`). A node on `weak-by-hash` alone
+    /// A new share with large coinbase outputs is relayed without them (`ShareWithoutPayouts`). A node on `weak-by-hash` alone
     /// derived the string without `/without-payouts`: it cannot read the new
     /// share message, so the two fail the handshake rather than drop large
     /// shares as malformed.
@@ -569,8 +551,10 @@ mod tests {
         let genesis_hash = bch_genesis::build(BchShareNetwork::Chipnet)
             .unwrap()
             .block_hash();
-        let current = protocol_string(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash);
-        let weak_by_hash_only = current.replace("/without-payouts/", "/");
+        let current = network_prologue(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash);
+        let weak_by_hash_only = current
+            .replace("/headers-resume/", "/")
+            .replace("/without-payouts/", "/");
 
         assert_ne!(current, weak_by_hash_only);
         assert!(
@@ -579,6 +563,65 @@ mod tests {
         );
         let kad = kad_protocol_string(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash);
         assert_ne!(kad, kad.replace("/without-payouts/", "/"));
+    }
+
+    /// A header request carries the last header the requester got and the
+    /// answer serves every share at a height
+    /// (request-response 1.1.0). A node on `without-payouts` derived the
+    /// string without `/headers-resume` and would peer on 1.0.0, where heights
+    /// are cut, so the two strings differ and the nodes fail the handshake
+    /// instead. Kademlia's string changes with it.
+    #[test]
+    fn test_bitcoin_cash_protocol_string_carries_the_headers_resume_messages() {
+        let genesis_hash = bch_genesis::build(BchShareNetwork::Chipnet)
+            .unwrap()
+            .block_hash();
+        let current = network_prologue(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash);
+        let before = current.replace("/headers-resume/", "/");
+
+        assert_ne!(current, before);
+        assert!(
+            current.ends_with("/without-payouts/headers-resume/1.0.0"),
+            "{current}"
+        );
+        assert!(
+            before.ends_with("/weak-by-hash/without-payouts/1.0.0"),
+            "{before}"
+        );
+        let kad = kad_protocol_string(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash);
+        assert_ne!(kad, kad.replace("/headers-resume/", "/"));
+    }
+
+    /// On Bitcoin Cash both request-response versions carry the prologue's
+    /// rule and message tags: 1.0.0 is the prologue itself and 1.1.0 differs
+    /// only in its last segment.
+    #[test]
+    fn test_bitcoin_cash_request_response_protocols_carry_the_share_chain_segment() {
+        let genesis_hash = bch_genesis::build(BchShareNetwork::Chipnet)
+            .unwrap()
+            .block_hash();
+        let prologue =
+            network_prologue(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash);
+        let share_chain_part = prologue.strip_suffix("/1.0.0").unwrap();
+
+        assert_eq!(
+            request_response_protocol_string(
+                bitcoin::Network::Testnet,
+                Chain::BitcoinCash,
+                genesis_hash,
+                ProtocolVersion::V1_0
+            ),
+            prologue
+        );
+        assert_eq!(
+            request_response_protocol_string(
+                bitcoin::Network::Testnet,
+                Chain::BitcoinCash,
+                genesis_hash,
+                ProtocolVersion::V1_1
+            ),
+            format!("{share_chain_part}/1.1.0")
+        );
     }
 
     /// Bitcoin shares carry no weak shares, so a Bitcoin node's messages did
@@ -590,7 +633,7 @@ mod tests {
             .block_hash();
 
         assert!(
-            !protocol_string(bitcoin::Network::Signet, Chain::Bitcoin, genesis_hash)
+            !network_prologue(bitcoin::Network::Signet, Chain::Bitcoin, genesis_hash)
                 .contains(BCH_MESSAGES_TAG)
         );
         assert!(
@@ -612,7 +655,7 @@ mod tests {
         let genesis_anchor_string = format!("/p2pool/test/{expected_tag}/pplns-k3-m100/1.0.0");
 
         assert_ne!(
-            protocol_string(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash),
+            network_prologue(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash),
             genesis_anchor_string
         );
     }
@@ -631,7 +674,7 @@ mod tests {
             format!("/p2pool/test/{expected_tag}/pplns-k3-m100/asert-parent/1.0.0");
 
         assert_ne!(
-            protocol_string(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash),
+            network_prologue(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash),
             before_trading_string
         );
     }
@@ -651,7 +694,7 @@ mod tests {
         );
 
         assert_ne!(
-            protocol_string(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash),
+            network_prologue(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash),
             before_budget_string
         );
     }
@@ -665,7 +708,7 @@ mod tests {
         let genesis_hash = bch_genesis::build(BchShareNetwork::Chipnet)
             .unwrap()
             .block_hash();
-        let current = rules_only(protocol_string(
+        let current = rules_only(network_prologue(
             bitcoin::Network::Testnet,
             Chain::BitcoinCash,
             genesis_hash,
@@ -688,7 +731,7 @@ mod tests {
         let genesis_hash = bch_genesis::build(BchShareNetwork::Chipnet)
             .unwrap()
             .block_hash();
-        let current = rules_only(protocol_string(
+        let current = rules_only(network_prologue(
             bitcoin::Network::Testnet,
             Chain::BitcoinCash,
             genesis_hash,
@@ -711,7 +754,7 @@ mod tests {
         let genesis_hash = bch_genesis::build(BchShareNetwork::Chipnet)
             .unwrap()
             .block_hash();
-        let current = rules_only(protocol_string(
+        let current = rules_only(network_prologue(
             bitcoin::Network::Testnet,
             Chain::BitcoinCash,
             genesis_hash,
@@ -734,7 +777,7 @@ mod tests {
         let genesis_hash = bch_genesis::build(BchShareNetwork::Chipnet)
             .unwrap()
             .block_hash();
-        let current = rules_only(protocol_string(
+        let current = rules_only(network_prologue(
             bitcoin::Network::Testnet,
             Chain::BitcoinCash,
             genesis_hash,
@@ -757,7 +800,7 @@ mod tests {
         let genesis_hash = bch_genesis::build(BchShareNetwork::Chipnet)
             .unwrap()
             .block_hash();
-        let current = rules_only(protocol_string(
+        let current = rules_only(network_prologue(
             bitcoin::Network::Testnet,
             Chain::BitcoinCash,
             genesis_hash,
@@ -782,7 +825,7 @@ mod tests {
         let genesis_hash = bch_genesis::build(BchShareNetwork::Chipnet)
             .unwrap()
             .block_hash();
-        let current = rules_only(protocol_string(
+        let current = rules_only(network_prologue(
             bitcoin::Network::Testnet,
             Chain::BitcoinCash,
             genesis_hash,
@@ -809,7 +852,7 @@ mod tests {
         let genesis_hash = bch_genesis::build(BchShareNetwork::Chipnet)
             .unwrap()
             .block_hash();
-        let current = rules_only(protocol_string(
+        let current = rules_only(network_prologue(
             bitcoin::Network::Testnet,
             Chain::BitcoinCash,
             genesis_hash,
@@ -826,8 +869,7 @@ mod tests {
         );
     }
 
-    /// From 2026-11-15 each known Bitcoin Cash header carries its ticks and
-    /// next interval from its own branch, and token shares' ASERT band
+    /// Each known Bitcoin Cash header carries its ticks and next interval from its own branch, and token shares' ASERT band
     /// follows them. A node on `bch-prev-1off` and `mm2-roots-asert8` learned
     /// one-minute blocks while running and could require other nBits, so the
     /// new string differs and the two cannot negotiate.
@@ -836,7 +878,7 @@ mod tests {
         let genesis_hash = bch_genesis::build(BchShareNetwork::Chipnet)
             .unwrap()
             .block_hash();
-        let current = protocol_string(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash);
+        let current = network_prologue(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash);
         let before = current
             .replace("/bch-prev-1off-ticks/", "/bch-prev-1off/")
             .replace("/mm2-roots-asert8-ticks/", "/mm2-roots-asert8/");
@@ -848,7 +890,7 @@ mod tests {
         );
     }
 
-    /// From 2026-11-12 a carried weak share is held to its carrier's time. A
+    /// A carried weak share is held to its carrier's time. A
     /// node on `weak2` judges it by its own clock, so the new string differs
     /// and the two cannot negotiate.
     #[test]
@@ -856,7 +898,7 @@ mod tests {
         let genesis_hash = bch_genesis::build(BchShareNetwork::Chipnet)
             .unwrap()
             .block_hash();
-        let current = rules_only(protocol_string(
+        let current = rules_only(network_prologue(
             bitcoin::Network::Testnet,
             Chain::BitcoinCash,
             genesis_hash,
@@ -885,7 +927,7 @@ mod tests {
         let genesis_hash = bch_genesis::build(BchShareNetwork::Chipnet)
             .unwrap()
             .block_hash();
-        let current = rules_only(protocol_string(
+        let current = rules_only(network_prologue(
             bitcoin::Network::Testnet,
             Chain::BitcoinCash,
             genesis_hash,
@@ -912,7 +954,7 @@ mod tests {
         let genesis_hash = bch_genesis::build(BchShareNetwork::Chipnet)
             .unwrap()
             .block_hash();
-        let current = rules_only(protocol_string(
+        let current = rules_only(network_prologue(
             bitcoin::Network::Testnet,
             Chain::BitcoinCash,
             genesis_hash,
@@ -929,7 +971,7 @@ mod tests {
         );
     }
 
-    /// From 2026-11-12 a Bitcoin Cash payout level starts at the lowest. A
+    /// A Bitcoin Cash payout level starts at the lowest. A
     /// node on `levels-546x2` still accepts level 0, so the new string differs
     /// and the two cannot negotiate.
     #[test]
@@ -937,7 +979,7 @@ mod tests {
         let genesis_hash = bch_genesis::build(BchShareNetwork::Chipnet)
             .unwrap()
             .block_hash();
-        let current = rules_only(protocol_string(
+        let current = rules_only(network_prologue(
             bitcoin::Network::Testnet,
             Chain::BitcoinCash,
             genesis_hash,
@@ -970,7 +1012,7 @@ mod tests {
         );
 
         assert_ne!(
-            protocol_string(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash),
+            network_prologue(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash),
             before_uncle_once_string
         );
     }
@@ -988,7 +1030,7 @@ mod tests {
         let before_batch_string = format!(
             "/p2pool/test/{expected_tag}/pplns-k3-m100/asert-parent/trade-htlc/payout-holder/payout-cap11/uncle-once/1.0.0"
         );
-        let string = protocol_string(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash);
+        let string = network_prologue(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash);
         assert_ne!(string, before_batch_string);
         assert!(!string.contains("payout-cap11"));
     }
@@ -1007,7 +1049,7 @@ mod tests {
         let before_fixes_string = format!(
             "/p2pool/test/{expected_tag}/pplns-k3-m100/asert-parent/trade-htlc/payout-holder/payout-hybrid-t3072-f500-r1to3-z8-cov1/uncle-once/body-1000000-204800/payee-p2pkh-p2sh20-p2sh32/merkle32/depths-m100/sigchecks3000-1452/no-segwit/weight-work/mm2-roots-asert/version-vote/1.0.0"
         );
-        let string = protocol_string(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash);
+        let string = network_prologue(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash);
         assert_ne!(string, before_fixes_string);
         assert!(string.contains("/cuts-per-share/"));
         assert!(string.contains("/mm2-roots-asert8-ticks/"));
@@ -1026,7 +1068,7 @@ mod tests {
         let fixed_window_string = format!("/p2pool/test/{expected_tag}/1.0.0");
 
         assert_ne!(
-            protocol_string(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash),
+            network_prologue(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash),
             fixed_window_string
         );
     }
@@ -1043,8 +1085,133 @@ mod tests {
         assert_eq!(
             kad_protocol_string(bitcoin::Network::Testnet, Chain::BitcoinCash, genesis_hash),
             format!(
-                "/p2pool/test/{expected_tag}/pplns-k3-m100/asert-parent/trade-htlc/payout-holder/payout-hybrid-t3072-f500-r1to3-z8-cov1/cuts-per-share/uncle-once/body-1000000-204800/payee-p2pkh-p2sh20-p2sh32/merkle32/depths-m100/sigchecks3000-1452/no-segwit/weight-work/mm2-roots-asert8-ticks/version-vote/bch-prev-1off-ticks/genesis-last-resort/band-c64/levels-546x2-k1/weak4-640-100-48-256-320-64-4096-64-32-summary/weak-by-hash/without-payouts/kad/1.0.0"
+                "/p2pool/test/{expected_tag}/pplns-k3-m100/asert-parent/trade-htlc/payout-holder/payout-hybrid-t3072-f500-r1to3-z8-cov1/cuts-per-share/uncle-once/body-1000000-204800/payee-p2pkh-p2sh20-p2sh32/merkle32/depths-m100/sigchecks3000-1452/no-segwit/weight-work/mm2-roots-asert8-ticks/version-vote/bch-prev-1off-ticks/genesis-last-resort/band-c64/levels-546x2-k1/weak4-640-100-48-256-320-64-4096-64-32-summary/weak-by-hash/without-payouts/headers-resume/kad/1.0.0"
             )
         );
+    }
+
+    /// A v0.18 node offers exactly this string for request-response, so the
+    /// 1.0.0 protocol must keep it for the two to negotiate a stream.
+    #[test]
+    fn test_v1_0_request_response_protocol_matches_legacy_string() {
+        let genesis_hash = ShareBlock::build_genesis_for_network(bitcoin::Network::Signet)
+            .unwrap()
+            .block_hash();
+        let expected_tag = &genesis_hash.to_string()[..GENESIS_TAG_LEN];
+
+        assert_eq!(
+            request_response_protocol_string(
+                bitcoin::Network::Signet,
+                Chain::Bitcoin,
+                genesis_hash,
+                ProtocolVersion::V1_0
+            ),
+            format!("/p2pool/signet/{expected_tag}/1.0.0")
+        );
+    }
+
+    #[test]
+    fn test_v1_1_request_response_protocol_carries_version() {
+        let genesis_hash = ShareBlock::build_genesis_for_network(bitcoin::Network::Signet)
+            .unwrap()
+            .block_hash();
+        let expected_tag = &genesis_hash.to_string()[..GENESIS_TAG_LEN];
+
+        assert_eq!(
+            request_response_protocol_string(
+                bitcoin::Network::Signet,
+                Chain::Bitcoin,
+                genesis_hash,
+                ProtocolVersion::V1_1
+            ),
+            format!("/p2pool/signet/{expected_tag}/1.1.0")
+        );
+    }
+
+    /// On a 1.0.0 stream the codec writes the legacy request layout, so the
+    /// resume point is not carried, and the reading side records the 1.0.0
+    /// stream on the decoded request.
+    #[tokio::test]
+    async fn test_codec_v1_0_stream_drops_resume_point_and_records_version() {
+        let genesis_hash = ShareBlock::build_genesis_for_network(bitcoin::Network::Signet)
+            .unwrap()
+            .block_hash();
+        let protocol = P2PoolRequestResponseProtocol::new(
+            bitcoin::Network::Signet,
+            Chain::Bitcoin,
+            genesis_hash,
+            ProtocolVersion::V1_0,
+        );
+        let locator_hash =
+            BlockHash::from_str("0000000086704a35f17580d06f76d4c02d2b1f68774800675fb45f0411205bb5")
+                .unwrap();
+        let request = GetShareHeaders::new(
+            vec![locator_hash],
+            BlockHash::all_zeros(),
+            Some(
+                BlockHash::from_str(
+                    "a3fbd2a0e62c42446e4e6d18dab3a479ebc84c279757450e019eafc89dfc1a62",
+                )
+                .unwrap(),
+            ),
+        );
+        let mut codec = ConsensusCodec;
+        let mut stream = Cursor::new(Vec::new());
+
+        codec
+            .write_request(&protocol, &mut stream, Message::GetShareHeaders(request))
+            .await
+            .unwrap();
+        stream.set_position(0);
+        let decoded = codec.read_request(&protocol, &mut stream).await.unwrap();
+
+        assert_eq!(
+            decoded,
+            Message::GetShareHeaders(GetShareHeaders {
+                locator: vec![locator_hash],
+                stop: BlockHash::all_zeros(),
+                resume_after: None,
+                protocol_version: ProtocolVersion::V1_0,
+            })
+        );
+    }
+
+    /// On a 1.1.0 stream the resume point survives the round trip.
+    #[tokio::test]
+    async fn test_codec_v1_1_stream_carries_resume_point() {
+        let genesis_hash = ShareBlock::build_genesis_for_network(bitcoin::Network::Signet)
+            .unwrap()
+            .block_hash();
+        let protocol = P2PoolRequestResponseProtocol::new(
+            bitcoin::Network::Signet,
+            Chain::Bitcoin,
+            genesis_hash,
+            ProtocolVersion::V1_1,
+        );
+        let locator_hash =
+            BlockHash::from_str("0000000086704a35f17580d06f76d4c02d2b1f68774800675fb45f0411205bb5")
+                .unwrap();
+        let request = GetShareHeaders::new(
+            vec![locator_hash],
+            BlockHash::all_zeros(),
+            Some(
+                BlockHash::from_str(
+                    "a3fbd2a0e62c42446e4e6d18dab3a479ebc84c279757450e019eafc89dfc1a62",
+                )
+                .unwrap(),
+            ),
+        );
+        let message = Message::GetShareHeaders(request);
+        let mut codec = ConsensusCodec;
+        let mut stream = Cursor::new(Vec::new());
+
+        codec
+            .write_request(&protocol, &mut stream, message.clone())
+            .await
+            .unwrap();
+        stream.set_position(0);
+        let decoded = codec.read_request(&protocol, &mut stream).await.unwrap();
+
+        assert_eq!(decoded, message);
     }
 }

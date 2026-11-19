@@ -98,6 +98,7 @@ mod tests {
             weightlimit: 0,
             provided: None,
             light: None,
+            min_difficulty_mark: None,
         }
     }
 

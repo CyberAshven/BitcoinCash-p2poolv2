@@ -258,7 +258,7 @@ async fn a_weak_share_on_an_unknown_parent_is_held_and_its_peer_asked_for_the_pa
     assert_eq!(pool.held_len(), 1);
     assert_eq!(pool.len(), 0);
     match swarm_rx.try_recv() {
-        Ok(SwarmSend::Request(asked, Message::GetShareHeaders(_, _))) => assert_eq!(asked, peer),
+        Ok(SwarmSend::Request(asked, Message::GetShareHeaders(_))) => assert_eq!(asked, peer),
         _ => panic!("expected a GetShareHeaders request to the weak share's peer"),
     }
 }
@@ -370,7 +370,7 @@ async fn a_peer_is_asked_for_unknown_parents_once_an_interval() {
     assert_eq!(pool.held_len(), 3);
     assert!(matches!(
         swarm_rx.try_recv(),
-        Ok(SwarmSend::Request(asked, Message::GetShareHeaders(_, _))) if asked == peer
+        Ok(SwarmSend::Request(asked, Message::GetShareHeaders(_))) if asked == peer
     ));
     assert!(swarm_rx.try_recv().is_err());
 
@@ -385,7 +385,7 @@ async fn a_peer_is_asked_for_unknown_parents_once_an_interval() {
 
     assert!(matches!(
         swarm_rx.try_recv(),
-        Ok(SwarmSend::Request(asked, Message::GetShareHeaders(_, _))) if asked == peer
+        Ok(SwarmSend::Request(asked, Message::GetShareHeaders(_))) if asked == peer
     ));
     assert!(swarm_rx.try_recv().is_err());
 }

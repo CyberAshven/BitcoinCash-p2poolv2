@@ -115,6 +115,7 @@ mod tests {
             default_witness_commitment: None,
             provided: None,
             light: None,
+            min_difficulty_mark: None,
         }
     }
 

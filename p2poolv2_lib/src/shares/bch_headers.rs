@@ -56,14 +56,11 @@ use bitcoin::{BlockHash, CompactTarget, Target};
 /// headers travel with shares, and a share is paid only for work on the
 /// paying share's BCH chain or one block off it.
 ///
-/// `bch-prev-1off-ticks` since 2026-11-15: each known header carries its
-/// CHIP-2025-03 ticks and next interval, worked out from its own branch's
-/// median time past as BCHN does, and the nBits a header from a peer must
-/// carry and the nBits that size a payout window follow them. On
-/// `bch-prev-1off` a node learned one-minute blocks while running, from its
-/// own BCHN, so two nodes could require different nBits of one header and
-/// size one window differently. Nodes on the two do not accept the same
-/// shares: a flag day, with a fresh store.
+/// `-ticks`: each known header carries its CHIP-2025-03 ticks and next
+/// interval, worked out from its own branch's median time past as BCHN
+/// does, and the nBits a header from a peer must carry and the nBits that
+/// size a payout window follow them. `docs/sharechain/rule-history.md` lists
+/// the earlier segment.
 pub const BCH_CURRENT_CHAIN_RULE_TAG: &str = "bch-prev-1off-ticks";
 
 /// BCHN's `MAX_FUTURE_BLOCK_TIME`: a block may be dated at most two hours
@@ -183,6 +180,39 @@ pub enum BchHeaderError {
     Height(BlockHash),
 }
 
+/// Which times a block on a known parent may carry its nBits under a test
+/// network's minimum-difficulty rule (`fPowAllowMinDifficultyBlocks` in
+/// BCHN). The mark is the parent's time plus twice its next interval
+/// ([`TickInfo::min_difficulty_gap`]): a block dated up to it must carry the
+/// nBits ASERT requires, and one dated after it the proof-of-work limit's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MinDifficultyMark {
+    /// ASERT's nBits: valid in a block dated up to and including the mark.
+    Until(u32),
+    /// The proof-of-work limit's nBits: valid only in a block dated after
+    /// the mark.
+    After(u32),
+}
+
+impl MinDifficultyMark {
+    /// Whether a block dated `time` may carry these nBits.
+    pub fn allows(&self, time: u32) -> bool {
+        match *self {
+            Self::Until(mark) => time <= mark,
+            Self::After(mark) => time > mark,
+        }
+    }
+
+    /// The time nearest to `time` that these nBits allow: `time` itself, the
+    /// mark, or the second after it.
+    pub fn nearest_allowed(&self, time: u32) -> u32 {
+        match *self {
+            Self::Until(mark) => time.min(mark),
+            Self::After(mark) => time.max(mark.saturating_add(1)),
+        }
+    }
+}
+
 /// How a network sets each block's nBits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BitsRule {
@@ -270,6 +300,34 @@ impl BchHeaderRules {
             }
             BitsRule::Parent => Some(parent.header.bits),
             BitsRule::Unchecked => None,
+        }
+    }
+
+    /// Which side of the minimum-difficulty mark nBits `bits` on `parent`
+    /// belong to ([`MinDifficultyMark`]), by [`Self::required_bits`] at the
+    /// mark and a second after it. `None` where the two are the same nBits,
+    /// so the time does not matter: mainnet, regtest, which never retargets,
+    /// and a parent whose ASERT target is already the limit; also where this
+    /// node does not check nBits (scalenet) and for nBits that are neither.
+    pub fn min_difficulty_mark(
+        &self,
+        parent: &KnownBchHeader,
+        bits: CompactTarget,
+    ) -> Option<MinDifficultyMark> {
+        let mark = parent
+            .header
+            .time
+            .saturating_add(parent.tick_info().min_difficulty_gap());
+        let until = self.required_bits(parent, mark)?;
+        let after = self.required_bits(parent, mark.saturating_add(1))?;
+        if until == after {
+            None
+        } else if bits == until {
+            Some(MinDifficultyMark::Until(mark))
+        } else if bits == after {
+            Some(MinDifficultyMark::After(mark))
+        } else {
+            None
         }
     }
 

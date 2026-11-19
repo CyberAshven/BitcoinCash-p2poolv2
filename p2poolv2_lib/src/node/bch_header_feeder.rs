@@ -63,22 +63,24 @@
 
 use crate::config::BitcoinCashNetwork;
 use crate::shares::bch_asert::{BCH_BLOCK_SPACING, MEDIAN_TIME_SPAN, TickInfo, TickSchedule};
-use crate::shares::bch_headers::{BchHeaderRules, KnownBchHeader};
+use crate::shares::bch_headers::{BchHeaderRules, KnownBchHeader, MinDifficultyMark};
 #[cfg(test)]
 #[mockall_double::double]
 use crate::shares::chain::chain_store_handle::ChainStoreHandle;
 #[cfg(not(test))]
 use crate::shares::chain::chain_store_handle::ChainStoreHandle;
+use crate::stratum::work::block_template::BlockTemplate;
 use crate::stratum::work::notify::{NotifyCmd, NotifyReceiver, NotifySender};
-use bitcoin::BlockHash;
 use bitcoin::block::Header;
 use bitcoin::hashes::Hash;
+use bitcoin::{BlockHash, CompactTarget};
 use bitcoindrpc::{BitcoindRpcClient, BlockHeaderSummary};
 use std::str::FromStr;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
-use tokio::sync::{Mutex, MutexGuard};
-use tokio::time::{MissedTickBehavior, interval, timeout};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tokio::sync::{Mutex, MutexGuard, mpsc};
+use tokio::time::{Instant, MissedTickBehavior, interval, sleep_until, timeout};
 use tracing::{debug, error, info, warn};
 
 /// How often the feeder asks BCHN for its best block.
@@ -780,6 +782,149 @@ impl BchHeaderFeeder {
             .get_bch_header(hash)
             .map_err(|error| format!("reading header {hash}: {error}"))
     }
+
+    /// Get `template` ready for the notifier: learn its previous block when
+    /// it is not `learned`, which then remembers it, and bound it by its
+    /// minimum-difficulty mark ([`Self::bound_by_min_difficulty`]). Returns
+    /// when and to which nBits that bound's ASERT nBits end.
+    async fn prepare_template(
+        &self,
+        learned: &mut Option<BlockHash>,
+        template: &mut Arc<BlockTemplate>,
+    ) -> Option<AsertBitsEnd> {
+        let prev = BlockHash::from_str(&template.previousblockhash).ok()?;
+        if *learned != Some(prev) {
+            match self.learn_from(prev).await {
+                Ok(_) => *learned = Some(prev),
+                Err(error) => warn!("Cannot learn template parent {prev} from the node: {error}"),
+            }
+        }
+        self.bound_by_min_difficulty(prev, template)
+    }
+
+    /// Bound `template`, on `prev`, by the minimum-difficulty mark its
+    /// `bits` belong to on a test network
+    /// ([`BlockTemplate::bound_by_min_difficulty_mark`]), where `prev` is
+    /// known and the rule ties its `bits` to the block's time. For ASERT's
+    /// nBits, returns the nBits the rule requires of a block on `prev`
+    /// dated a second after the mark, from [`BchHeaderRules::required_bits`]
+    /// as a header check takes them, and how long until then.
+    fn bound_by_min_difficulty(
+        &self,
+        prev: BlockHash,
+        template: &mut Arc<BlockTemplate>,
+    ) -> Option<AsertBitsEnd> {
+        let rules = self.rules?;
+        let parent = match self.known(&prev) {
+            Ok(parent) => parent?,
+            Err(error) => {
+                warn!("Cannot bound the template's times by its parent: {error}");
+                return None;
+            }
+        };
+        let bits = CompactTarget::from_unprefixed_hex(&template.bits).ok()?;
+        let mark = rules.min_difficulty_mark(&parent, bits)?;
+        Arc::make_mut(template).bound_by_min_difficulty_mark(mark);
+        let MinDifficultyMark::Until(mark) = mark else {
+            return None;
+        };
+        Some(AsertBitsEnd {
+            bits: rules.required_bits(&parent, mark.saturating_add(1))?,
+            delay: past_min_difficulty_mark_in(mark, SystemTime::now()),
+        })
+    }
+}
+
+/// Where a template's ASERT nBits end under a test network's
+/// minimum-difficulty rule ([`MinDifficultyMark::Until`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AsertBitsEnd {
+    /// The nBits a block on the same parent dated after the mark must
+    /// carry: the proof-of-work limit's.
+    bits: CompactTarget,
+    /// How long until a second after the mark: zero once it has come.
+    delay: Duration,
+}
+
+/// The latest template while its ASERT nBits last, waiting to be switched
+/// to the nBits after its mark ([`BlockTemplate::past_min_difficulty_mark`]).
+struct PendingSwitch {
+    /// The template as relayed, bounded by ASERT's mark.
+    template: Arc<BlockTemplate>,
+    /// The nBits after the mark ([`AsertBitsEnd::bits`]).
+    bits: CompactTarget,
+    /// A second after the mark.
+    at: Instant,
+}
+
+/// How long from `now` until a second after `mark`, when a block on the
+/// parent must carry the proof-of-work limit's nBits: zero once that second
+/// has come.
+fn past_min_difficulty_mark_in(mark: u32, now: SystemTime) -> Duration {
+    let switch_at = UNIX_EPOCH + Duration::from_secs(u64::from(mark) + 1);
+    switch_at.duration_since(now).unwrap_or(Duration::ZERO)
+}
+
+/// What the relay passes on for `template`, prepared with `end`, and the
+/// switch it then waits for. A template whose ASERT nBits have already
+/// ended is passed on switched to the nBits after its mark: the node or a
+/// Template Provider can date it by an earlier clock than this node's.
+/// One whose ASERT nBits end later is passed on as it is, and waits.
+fn relay_or_switch(
+    template: Arc<BlockTemplate>,
+    end: Option<AsertBitsEnd>,
+) -> (Arc<BlockTemplate>, Option<PendingSwitch>) {
+    match end {
+        Some(end) if end.delay.is_zero() => match template.past_min_difficulty_mark(end.bits) {
+            Some(switched) => {
+                debug!(
+                    "Template on {} is past its minimum-difficulty mark; switching its jobs to nBits {:08x}",
+                    switched.previousblockhash,
+                    end.bits.to_consensus()
+                );
+                (Arc::new(switched), None)
+            }
+            None => (template, None),
+        },
+        Some(end) => {
+            let pending = PendingSwitch {
+                template: Arc::clone(&template),
+                bits: end.bits,
+                at: Instant::now() + end.delay,
+            };
+            (template, Some(pending))
+        }
+        None => (template, None),
+    }
+}
+
+/// Switch `pending`'s template to the nBits after its mark and pass it on to
+/// the notifier on `output`, then ask the node for a new template through
+/// `template_refresh_tx`, which then replaces the switched one. Returns
+/// whether the notifier still listens.
+async fn switch_past_min_difficulty_mark(
+    pending: PendingSwitch,
+    output: &NotifySender,
+    template_refresh_tx: Option<&mpsc::Sender<()>>,
+) -> bool {
+    let Some(switched) = pending.template.past_min_difficulty_mark(pending.bits) else {
+        return true;
+    };
+    info!(
+        "Past the minimum-difficulty mark on {}; switching jobs to nBits {:08x}",
+        switched.previousblockhash,
+        pending.bits.to_consensus()
+    );
+    let listening = output
+        .send(NotifyCmd::SendToAll {
+            template: Arc::new(switched),
+        })
+        .await
+        .is_ok();
+    if let Some(template_refresh_tx) = template_refresh_tx {
+        let _ = template_refresh_tx.try_send(());
+    }
+    listening
 }
 
 /// Relay block templates from `input` to the notifier on `output`, first
@@ -790,27 +935,62 @@ impl BchHeaderFeeder {
 ///
 /// A template whose previous block cannot be learned is still relayed: the
 /// feeder's next round retries, and holding work back would idle miners.
+///
+/// On a test network the minimum-difficulty rule ties a block's nBits to its
+/// time: ASERT's up to twice the parent's next interval after the parent,
+/// the proof-of-work limit's after that. Each template whose `bits` it ties
+/// is bounded by that mark, so no job on it carries, and no share on it is
+/// taken with, a time the node would refuse as `bad-diffbits`. While the
+/// latest template carries ASERT's `bits`, the relay switches it itself a
+/// second after the mark: the same template with the limit's nBits and
+/// times past the mark ([`BlockTemplate::past_min_difficulty_mark`]), passed
+/// on as a new template, so miners move to the easier work at once, also
+/// from a Template Provider, which cannot be asked for a template. The relay
+/// then asks the node for one through `template_refresh_tx`, where it can;
+/// the node's own template on the parent replaces the switched one. A
+/// template that arrives with ASERT's `bits` after that second is switched
+/// before it is passed on. Mainnet and regtest have no such rule: their
+/// templates have no mark, and the relay passes them on as they come.
 pub async fn relay_templates_learning_prevs(
     client: BitcoindRpcClient,
     store: ChainStoreHandle,
     network: Option<BitcoinCashNetwork>,
     mut input: NotifyReceiver,
     output: NotifySender,
+    template_refresh_tx: Option<mpsc::Sender<()>>,
 ) {
     let feeder = BchHeaderFeeder::new(client, store, network);
     let mut learned: Option<BlockHash> = None;
-    while let Some(command) = input.recv().await {
-        if let NotifyCmd::SendToAll { template } = &command
-            && let Ok(prev) = BlockHash::from_str(&template.previousblockhash)
-            && learned != Some(prev)
-        {
-            match feeder.learn_from(prev).await {
-                Ok(_) => learned = Some(prev),
-                Err(error) => warn!("Cannot learn template parent {prev} from the node: {error}"),
+    let mut pending: Option<PendingSwitch> = None;
+    let mut relaying = true;
+    while relaying {
+        tokio::select! {
+            command = input.recv() => {
+                relaying = match command {
+                    Some(NotifyCmd::SendToAll { mut template }) => {
+                        let end = feeder.prepare_template(&mut learned, &mut template).await;
+                        let (template, waiting) = relay_or_switch(template, end);
+                        pending = waiting;
+                        output.send(NotifyCmd::SendToAll { template }).await.is_ok()
+                    }
+                    Some(NotifyCmd::Withdraw) => {
+                        pending = None;
+                        output.send(NotifyCmd::Withdraw).await.is_ok()
+                    }
+                    Some(command) => output.send(command).await.is_ok(),
+                    None => false,
+                };
             }
-        }
-        if output.send(command).await.is_err() {
-            break;
+            () = sleep_until(pending.as_ref().map_or_else(Instant::now, |pending| pending.at)), if pending.is_some() => {
+                if let Some(due) = pending.take() {
+                    relaying = switch_past_min_difficulty_mark(
+                        due,
+                        &output,
+                        template_refresh_tx.as_ref(),
+                    )
+                    .await;
+                }
+            }
         }
     }
 }
