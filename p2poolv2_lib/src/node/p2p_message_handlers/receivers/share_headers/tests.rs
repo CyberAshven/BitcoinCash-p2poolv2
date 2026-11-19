@@ -76,7 +76,7 @@ fn setup_chain_validation_mocks(chain_store_handle: &mut ChainStoreHandle) {
 
 fn setup_minimum_difficulty_mock(mock_validator: &mut MockDefaultShareValidator) {
     mock_validator
-        .expect_validate_header_minimum_difficulty()
+        .expect_validate_header_on_arrival()
         .returning(|_| Ok(()));
     mock_validator
         .expect_validate_coinbase_proof()
@@ -158,7 +158,7 @@ async fn test_handle_share_headers_rejects_header_with_invalid_coinbase_proof() 
         .expect_validate_uncles()
         .returning(|_, _| Ok(()));
     mock_validator
-        .expect_validate_header_minimum_difficulty()
+        .expect_validate_header_on_arrival()
         .returning(|_| Ok(()));
     mock_validator
         .expect_validate_coinbase_proof()
@@ -543,7 +543,7 @@ fn test_validate_header_chain_checks_timestamps_against_batch_and_store_ancestor
         .expect_validate_uncles()
         .returning(|_, _| Ok(()));
     mock_validator
-        .expect_validate_header_minimum_difficulty()
+        .expect_validate_header_on_arrival()
         .returning(|_| Ok(()));
     mock_validator
         .expect_validate_coinbase_proof()
@@ -600,7 +600,7 @@ fn test_validate_header_chain_rejects_a_header_with_an_invalid_timestamp() {
         .expect_validate_uncles()
         .returning(|_, _| Ok(()));
     mock_validator
-        .expect_validate_header_minimum_difficulty()
+        .expect_validate_header_on_arrival()
         .returning(|_| Ok(()));
     mock_validator
         .expect_validate_coinbase_proof()
@@ -1607,7 +1607,7 @@ fn test_validate_dag_accepts_a_heavier_header_inside_the_band() {
         });
     let mut mock_validator = MockDefaultShareValidator::default();
     mock_validator
-        .expect_validate_header_minimum_difficulty()
+        .expect_validate_header_on_arrival()
         .returning(|_| Ok(()));
     mock_validator
         .expect_validate_coinbase_proof()
@@ -1676,7 +1676,7 @@ fn test_validate_dag_refuses_a_header_past_the_band_cap() {
         });
     let mut mock_validator = MockDefaultShareValidator::default();
     mock_validator
-        .expect_validate_header_minimum_difficulty()
+        .expect_validate_header_on_arrival()
         .returning(|_| Ok(()));
     mock_validator
         .expect_validate_coinbase_proof()
@@ -1750,7 +1750,7 @@ fn test_validate_dag_refuses_a_header_easier_than_its_minimum() {
         });
     let mut mock_validator = MockDefaultShareValidator::default();
     mock_validator
-        .expect_validate_header_minimum_difficulty()
+        .expect_validate_header_on_arrival()
         .returning(|_| Ok(()));
     mock_validator
         .expect_validate_coinbase_proof()
@@ -1825,7 +1825,7 @@ fn test_validate_dag_refuses_a_band_cap_off_its_step() {
         });
     let mut mock_validator = MockDefaultShareValidator::default();
     mock_validator
-        .expect_validate_header_minimum_difficulty()
+        .expect_validate_header_on_arrival()
         .returning(|_| Ok(()));
     mock_validator
         .expect_validate_coinbase_proof()
@@ -1904,7 +1904,7 @@ fn test_validate_dag_refuses_a_minimum_other_than_the_asert_target() {
         });
     let mut mock_validator = MockDefaultShareValidator::default();
     mock_validator
-        .expect_validate_header_minimum_difficulty()
+        .expect_validate_header_on_arrival()
         .returning(|_| Ok(()));
     mock_validator
         .expect_validate_coinbase_proof()
@@ -1981,7 +1981,7 @@ fn test_validate_dag_accepts_wanted_bits_easier_than_bits() {
         });
     let mut mock_validator = MockDefaultShareValidator::default();
     mock_validator
-        .expect_validate_header_minimum_difficulty()
+        .expect_validate_header_on_arrival()
         .returning(|_| Ok(()));
     mock_validator
         .expect_validate_coinbase_proof()
