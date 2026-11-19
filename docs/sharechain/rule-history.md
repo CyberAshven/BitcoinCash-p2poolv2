@@ -22,9 +22,10 @@ A Bitcoin Cash node's libp2p protocol string is
 /p2pool/<network>/<genesis tag>/<rule tag>/<message tag>/1.0.0
 ```
 
-and Kademlia's ends in `/kad/1.0.0`. The genesis tag is the first eight hex
-characters of the genesis share's hash. The rule tag joins one segment per
-share-chain rule (`share_chain_rule_tag` in
+for the Noise prologue and Identify; request-response offers it ending in
+`/1.1.0` and in `/1.0.0`, and Kademlia's ends in `/kad/1.0.0`. The genesis
+tag is the first eight hex characters of the genesis share's hash. The rule
+tag joins one segment per share-chain rule (`share_chain_rule_tag` in
 `p2poolv2_lib/src/node/behaviour/request_response.rs`), each built from the
 rule's own constants, so changing a rule changes the string. The message tag
 (`BCH_MESSAGES_TAG`) names the P2P messages beyond upstream's. Nodes whose
@@ -56,7 +57,7 @@ The rule tag's segments today, in order:
 | `levels-546x2-k1` | payout levels | `BCH_PAYOUT_LEVELS_RULE_TAG` |
 | `weak4-640-100-48-256-320-64-4096-64-32-summary` | weak shares | `BCH_WEAK_SHARE_RULE_TAG` |
 
-The message tag today is `weak-by-hash/without-payouts`.
+The message tag today is `weak-by-hash/without-payouts/headers-resume`.
 
 ## Rule segments
 
@@ -102,6 +103,7 @@ but nodes that cannot read each other's messages must not peer.
 | --- | --- | --- | --- |
 | 2026-11-15 | `weak-by-hash` | A new share lists the weak shares it carries by hash (`ShareWithWeakHashes`), and a peer asks for the ones it lacks (`GetCarriedWeakShares`, `CarriedWeakShares`). | #121 |
 | 2026-11-16 | `without-payouts` | A new share with large coinbase outputs is relayed without them (`ShareWithoutPayouts`). | #131 |
+| 2026-11-18 | `headers-resume` | Upstream's request-response protocol 1.1.0: a header request carries the last header the requester got (`resume_after`), and the answer serves every share at a height, paging inside a height, where 1.0.0 cuts each height at 20 shares. The segment keeps Bitcoin Cash nodes on 1.1.0 with each other. | #152 |
 
 ## Store format
 

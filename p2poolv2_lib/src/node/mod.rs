@@ -21,6 +21,7 @@ pub mod peer_reconnector;
 pub mod request_response_handler;
 pub mod request_sender;
 pub mod response_worker;
+mod running_lock;
 pub mod validation_worker;
 mod weak_share_fetch;
 mod weak_share_fill;
@@ -50,7 +51,7 @@ use crate::shares::chain::chain_store_handle::ChainStoreHandle;
 use crate::shares::share_block::ShareBlock;
 use crate::shares::transaction_pool::ShareTransactionPool;
 use crate::shares::validation::ShareValidator;
-use behaviour::request_response::protocol_string;
+use behaviour::request_response::network_prologue;
 use behaviour::{P2PoolBehaviour, P2PoolBehaviourEvent};
 use libp2p::PeerId;
 use libp2p::SwarmBuilder;
@@ -222,6 +223,11 @@ struct Node {
     nostr_seeds: Option<Arc<nostr_seeds::NostrSeeds>>,
     /// The task publishing this node's announcement, while it runs.
     nostr_announcer: Option<tokio::task::JoinHandle<()>>,
+    /// Held while the node runs, so no other node starts on its key or its
+    /// peer book (`running_lock`). None for a node with `ephemeral_node_key`,
+    /// which keeps neither.
+    _node_key_lock: Option<running_lock::RunningLock>,
+    _peer_book_lock: Option<running_lock::RunningLock>,
 }
 
 impl Node {
@@ -237,14 +243,23 @@ impl Node {
         response_worker_tx: ResponseWorkerSender,
         share_transaction_pool: Option<ShareTransactionPool>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        let id_keys =
+        let (id_keys, node_key_lock) =
             node_key::load_or_create(config.network.node_key_file(&config.store.path).as_deref())?;
+        let peer_book_lock = match config.network.peer_book_file(&config.store.path) {
+            Some(path) => running_lock::hold(&path).map_err(|_| {
+                format!(
+                    "Another node keeps its peer list in {}. A node keeps it beside its store, so two nodes whose stores share a directory would load each other's peers. Give each node its own directory",
+                    path.display()
+                )
+            })?,
+            None => None,
+        };
 
         let genesis_hash = crate::shares::bch_genesis::genesis_for_stratum(&config.stratum)
             .map_err(|error| -> Box<dyn Error> { error })?
             .block_hash();
         let network_protocol =
-            protocol_string(config.stratum.network, config.stratum.chain, genesis_hash);
+            network_prologue(config.stratum.network, config.stratum.chain, genesis_hash);
         let nostr_seeds =
             nostr_seeds::from_config(&config, &id_keys, &network_protocol)?.map(Arc::new);
 
@@ -407,6 +422,8 @@ impl Node {
             dns_seeds,
             nostr_seeds,
             nostr_announcer: None,
+            _node_key_lock: node_key_lock,
+            _peer_book_lock: peer_book_lock,
         };
         node.attempt_reconnections();
         Ok(node)
@@ -1175,6 +1192,10 @@ mod tests {
     }
 
     fn build_test_node(config: Config) -> Node {
+        try_build_test_node(config).expect("Node initialization failed")
+    }
+
+    fn try_build_test_node(config: Config) -> Result<Node, Box<dyn std::error::Error>> {
         let mut chain_store_handle = ChainStoreHandle::default();
         chain_store_handle
             .expect_clone()
@@ -1195,7 +1216,6 @@ mod tests {
             response_worker_tx,
             None,
         )
-        .expect("Node initialization failed")
     }
 
     /// End to end on regtest: node A announces its address on a relay, and
@@ -1275,6 +1295,7 @@ mod tests {
         node.save_peer_book();
         let book = dir.path().join(crate::config::DEFAULT_PEER_BOOK_FILE);
         assert!(book.exists());
+        drop(node);
 
         let restarted = build_test_node(config.clone());
         assert!(
@@ -1290,6 +1311,52 @@ mod tests {
         config.network.ephemeral_node_key = true;
         build_test_node(config).save_peer_book();
         assert!(!book.exists());
+    }
+
+    /// Two nodes whose stores share a directory share the default key file.
+    /// The second is refused at start while the first runs, where it used to
+    /// take the first one's peer ID; with a key of its own it is still refused
+    /// on the peer book beside the stores. In its own directory, or once the
+    /// first has stopped, it starts.
+    #[tokio::test]
+    async fn a_second_node_in_one_directory_is_refused_while_the_first_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut first_config = build_test_config("/ip4/127.0.0.1/tcp/0", None);
+        first_config.store.path = dir.path().join("store-a.db").display().to_string();
+        first_config.network.ephemeral_node_key = false;
+        let mut second_config = first_config.clone();
+        second_config.store.path = dir.path().join("store-b.db").display().to_string();
+
+        let refusal = |config: Config| match try_build_test_node(config) {
+            Ok(_) => panic!("a second node started beside the first"),
+            Err(error) => error.to_string(),
+        };
+
+        let first = build_test_node(first_config);
+        let error = refusal(second_config.clone());
+        assert!(
+            error.contains("Another node is running on the node key"),
+            "{error}"
+        );
+
+        let mut own_key = second_config.clone();
+        own_key.network.node_key_path =
+            Some(dir.path().join("b.p2p_node_key").display().to_string());
+        let error = refusal(own_key);
+        assert!(
+            error.contains("Another node keeps its peer list"),
+            "{error}"
+        );
+
+        let mut own_directory = second_config.clone();
+        own_directory.store.path = dir.path().join("b").join("store.db").display().to_string();
+        let second = build_test_node(own_directory);
+        assert_ne!(first.swarm.local_peer_id(), second.swarm.local_peer_id());
+
+        let first_peer = *first.swarm.local_peer_id();
+        drop(first);
+        let after = build_test_node(second_config);
+        assert_eq!(*after.swarm.local_peer_id(), first_peer);
     }
 
     /// A node restarted on the same key file has the same peer ID; one with

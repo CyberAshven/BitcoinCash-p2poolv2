@@ -33,7 +33,8 @@ Mainnet and chipnet run the same rules; only the network setting differs.
 Nodes only talk to nodes on the same chain and rules. Every libp2p protocol
 string carries the Bitcoin Cash network, the share chain's genesis and, on
 Bitcoin Cash, a tag for each share-chain rule and last a tag for the P2P
-messages, `weak-by-hash/without-payouts` today (`protocol_string` in
+messages, `weak-by-hash/without-payouts/headers-resume` today
+(`network_prologue` in
 `p2poolv2_lib/src/node/behaviour/request_response.rs`). A node on another
 chain or rule fails the handshake instead of exchanging shares the other
 side would reject, and a node speaking other messages fails it instead of
@@ -69,7 +70,11 @@ A node keeps its peer ID across restarts: its libp2p key is made on the
 first start and kept in `p2p_node_key` beside the store
 (`[network] node_key_path`). Peers and announcements keep finding it under
 the same peer ID. With `ephemeral_node_key = true` a node gets a new peer
-ID every start instead, which nothing links across restarts.
+ID every start instead, which nothing links across restarts. The key and the peer
+book (below) belong to one running node: a node holds `p2p_node_key.lock`
+and `p2p_peers.json.lock` while it runs, so a second node whose store sits in
+the same directory stops at start rather than taking the same peer ID, which
+would keep the two from ever connecting. Give each node its own directory.
 
 ### Finding peers through Nostr
 

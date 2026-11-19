@@ -262,6 +262,77 @@ impl Store {
         Ok(None)
     }
 
+    /// Get headers to satisfy a protocol 1.1.0 header request.
+    ///
+    /// Serves every servable block, paged by `limit` with no per-height cap
+    /// (see `get_blockhashes_from_height`). The page starts after
+    /// `resume_after` when this node can serve that block, continuing a
+    /// previous page from inside a height. Otherwise it starts from the
+    /// locator the same way `get_blockhashes_for_locator` does, and when no
+    /// locator hash is known it returns just the genesis header.
+    pub fn get_headers_after(
+        &self,
+        locator: &[BlockHash],
+        resume_after: Option<BlockHash>,
+        stop_blockhash: &BlockHash,
+        limit: usize,
+    ) -> Result<Vec<ShareHeader>, StoreError> {
+        let blockhashes = match self.resolve_page_start(locator, resume_after)? {
+            Some((start_height, skip_through)) => {
+                self.get_blockhashes_from_height(start_height, skip_through, stop_blockhash, limit)?
+            }
+            None => self.get_genesis_blockhash().into_iter().collect(),
+        };
+        let headers = self.get_share_headers(&blockhashes)?;
+        Ok(headers.into_iter().map(|(_, header)| header).collect())
+    }
+
+    /// Where a protocol 1.1.0 page starts: a height, and the hash at that
+    /// height to skip through, if any.
+    ///
+    /// A `resume_after` this node can serve (known, not `Pending` or
+    /// `Invalid`) resumes right after it. Any other `resume_after` -- unknown
+    /// here, or no longer servable -- falls back to the locator, which starts
+    /// `MAX_UNCLES_DEPTH` heights below the first known locator hash so fork
+    /// blocks near the boundary get their parents. Returns `None` when no
+    /// locator hash is known either.
+    fn resolve_page_start(
+        &self,
+        locator: &[BlockHash],
+        resume_after: Option<BlockHash>,
+    ) -> Result<Option<(u32, Option<BlockHash>)>, StoreError> {
+        if let Some(resume_hash) = resume_after
+            && let Some(height) = self.servable_height(&resume_hash)?
+        {
+            return Ok(Some((height, Some(resume_hash))));
+        }
+
+        match self.first_known_for_locator(locator)? {
+            Some(locator_hash) => {
+                let locator_height = self.servable_height(&locator_hash)?.ok_or_else(|| {
+                    StoreError::Database(format!("No height found for {locator_hash}"))
+                })?;
+                let start_height = locator_height.saturating_sub(MAX_UNCLES_DEPTH as u32) + 1;
+                Ok(Some((start_height, None)))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Height of `blockhash` if this node would serve it in header sync, or
+    /// `None` when it is unknown, `Pending`, `Invalid` or has no height.
+    fn servable_height(&self, blockhash: &BlockHash) -> Result<Option<u32>, StoreError> {
+        match self.get_block_metadata(blockhash) {
+            Ok(metadata)
+                if metadata.status != Status::Pending && metadata.status != Status::Invalid =>
+            {
+                Ok(metadata.expected_height)
+            }
+            Ok(_) | Err(StoreError::NotFound(_)) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
     /// Get headers to satisfy the locator query.
     pub fn get_headers_for_locator(
         &self,

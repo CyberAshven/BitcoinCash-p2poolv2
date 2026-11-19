@@ -45,6 +45,9 @@ dial_timeout_secs = 30
 # made on the first start, so peers keep finding the node under one peer ID
 # after a restart. node_key_path puts the key elsewhere; ephemeral_node_key =
 # true gives a new peer ID on every start instead, which nothing can link.
+# One key per running node: a second node on the same key file, or on the
+# peer list kept beside the store, stops at start; give each node its own
+# directory.
 # node_key_path = "./p2p_node_key"
 # ephemeral_node_key = false
 # Nostr: a node announces its external_address on these relays (NIP-78
