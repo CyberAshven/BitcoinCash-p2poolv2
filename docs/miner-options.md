@@ -45,6 +45,11 @@ A miner needs two addresses, on two different chains:
   type it.
 - Everything after the first dot is the worker name. It labels the worker
   in the dashboard and metrics and is optional.
+- Omit it and the node names the worker itself: after the device from the
+  `mining.subscribe` user agent (`bitaxe/24.4.0` gives `bitaxe`, a second
+  bitaxe gives `bitaxe2`), then by number (`worker1`, `worker2`, ...) when
+  there is no user agent. Every login of one address then gets its own
+  dashboard row and metrics key. An explicit name is used exactly as typed.
 - Options may follow the worker name after a comma, space, tab or
   semicolon, in the password's format: `bchtest:qq....rig1,donation=0.5`.
   They count as if they came first in the password. Pickaxe writes its

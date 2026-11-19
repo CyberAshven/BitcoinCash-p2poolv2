@@ -55,6 +55,10 @@ pub struct Session<D: DifficultyAdjusterTrait> {
     pub payout_level_warned: bool,
     /// Worker name for the mining device
     pub workername: Option<String>,
+    /// The miner's `mining.subscribe` user agent, as sent (for example
+    /// `bitaxe/24.4.0`). Captured so a bare-address login can name its
+    /// worker after the device; never sent anywhere else.
+    pub user_agent: Option<String>,
     /// Optional password of the miner, supplied by the miner, we just store it in session
     pub password: Option<String>,
     /// User ID from the store
@@ -104,6 +108,7 @@ impl<D: DifficultyAdjusterTrait> Session<D> {
             subscribed: false,
             username: None,
             workername: None,
+            user_agent: None,
             btcaddress: None,
             parsed_address: None,
             miner_address: None,
