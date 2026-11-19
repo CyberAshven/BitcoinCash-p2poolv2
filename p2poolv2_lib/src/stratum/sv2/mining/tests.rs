@@ -2,7 +2,7 @@ use super::*;
 use crate::accounting::OutputPair;
 use crate::accounting::stats::metrics;
 use crate::shares::auxpow::{AuxProof, Disclosure};
-use crate::shares::bch_asert::BchAsert;
+use crate::shares::bch_asert::{BCH_POW_LIMIT_BITS, BchAsert};
 use crate::shares::bch_headers::MinDifficultyMark;
 use crate::shares::coinbase_proof::CoinbaseProof;
 use crate::shares::merge_mining::MergeMiningCommitment;
@@ -660,6 +660,62 @@ async fn new_bits_on_the_same_parent_send_a_new_prev_hash() {
     let mut prev_hash_payload = payload(&frames[1]);
     let prev_hash = SetNewPrevHash::from_bytes(&mut prev_hash_payload).unwrap();
     assert_eq!(prev_hash.nbits, 0x1e0f_fff0);
+}
+
+/// A second after the minimum-difficulty mark the template relay switches a
+/// template with ASERT's bits to the limit's itself
+/// (`BlockTemplate::past_min_difficulty_mark`). An SV2 channel mining the
+/// ASERT job gets the switched job with a `SetNewPrevHash` on the same
+/// parent that carries the limit's nbits and a `min_ntime` past the mark.
+#[tokio::test]
+async fn a_template_switched_past_its_mark_sends_a_new_prev_hash_with_the_limits_bits() {
+    let (ctx, _emissions, _dirs) = test_bch_stratum_context("http://127.0.0.1:1").await;
+    let mut channels = MiningChannels::new(ctx, DEFAULT_VERSION_MASK);
+    let asert_bits = CompactTarget::from_consensus(0x1a21_8c7e);
+    let mut asert: BlockTemplate = serde_json::from_str(include_str!(
+        "../../../../../bitcoindrpc/test_data/bchn-regtest-template.json"
+    ))
+    .unwrap();
+    asert.bits = format!("{:08x}", asert_bits.to_consensus());
+    asert.target = hex::encode(Target::from_compact(asert_bits).to_be_bytes());
+    let mark = asert.curtime + 30;
+    asert.bound_by_min_difficulty_mark(MinDifficultyMark::Until(mark));
+    let switched = asert
+        .past_min_difficulty_mark(CompactTarget::from_consensus(BCH_POW_LIMIT_BITS))
+        .unwrap();
+    let mut open = open_extended_request(&bch_identity());
+    let opened = channels
+        .handle(
+            MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL,
+            &mut open,
+            Some(test_bch_prepared_for_template(asert)),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        frame_type(&opened[2]),
+        MESSAGE_TYPE_MINING_SET_NEW_PREV_HASH
+    );
+    let mut opened_tip_payload = payload(&opened[2]);
+    let opened_tip = SetNewPrevHash::from_bytes(&mut opened_tip_payload).unwrap();
+    assert_eq!(opened_tip.nbits, asert_bits.to_consensus());
+
+    let frames = channels.on_template(&test_bch_prepared_for_template(switched));
+
+    assert_eq!(frames.len(), 2);
+    assert_eq!(frame_type(&frames[0]), MESSAGE_TYPE_NEW_EXTENDED_MINING_JOB);
+    assert_eq!(
+        frame_type(&frames[1]),
+        MESSAGE_TYPE_MINING_SET_NEW_PREV_HASH
+    );
+    let mut prev_hash_payload = payload(&frames[1]);
+    let prev_hash = SetNewPrevHash::from_bytes(&mut prev_hash_payload).unwrap();
+    assert_eq!(prev_hash.nbits, BCH_POW_LIMIT_BITS);
+    assert_eq!(prev_hash.min_ntime, mark + 1);
+    assert_eq!(
+        prev_hash.prev_hash.as_array(),
+        opened_tip.prev_hash.as_array()
+    );
 }
 
 #[tokio::test]
