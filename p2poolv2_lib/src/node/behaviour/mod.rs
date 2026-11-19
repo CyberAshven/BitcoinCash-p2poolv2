@@ -30,14 +30,21 @@ const PING_INTERVAL_SECS: u64 = 30;
 pub(crate) const KADEMLIA_QUERY_TIMEOUT_SECS: u64 = 60;
 
 // Combine the behaviors we want to use
+//
+// `limits` comes first: the derive asks each behaviour in field order to take
+// an established connection and stops at the first refusal. Request-response
+// records a connection as soon as it is asked and forgets it only on
+// ConnectionClosed, which a refused connection never gets; asked before the
+// limits refuse, it keeps a dead connection and silently loses every request
+// it routes there.
 #[derive(NetworkBehaviour)]
 #[behaviour(to_swarm = "P2PoolBehaviourEvent")]
 pub struct P2PoolBehaviour {
+    pub limits: connection_limits::Behaviour,
     pub kademlia: kad::Behaviour<MemoryStore>,
     pub identify: identify::Behaviour,
     pub ping: ping::Behaviour,
     pub request_response: RequestResponseBehaviour,
-    pub limits: connection_limits::Behaviour,
 }
 
 // Define the events that can be emitted by our behavior

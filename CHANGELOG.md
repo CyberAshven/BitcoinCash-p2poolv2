@@ -375,6 +375,11 @@ format and genesis re-pin.
 
 ### Fixed
 
+- Requests to a peer no longer vanish after the connection limits refuse a
+  connection to it. Request-response recorded the refused connection and
+  routed some requests there, which got no answer, timeout or failure; the
+  limits are now asked first. In the sim swarm, restarted nodes lost 13% to
+  87% of their requests and fell behind.
 - Chipnet blocks are no longer lost as `bad-diffbits` at the
   minimum-difficulty mark: a share's time must suit its job's nBits, and a
   new template is fetched a second after the mark (#155).
