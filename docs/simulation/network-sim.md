@@ -176,7 +176,7 @@ directly under each limit, with every other field at its largest.
 |---|---|---:|
 | 200 KiB share body (`BLOCK_TXS_SIZE_LIMIT`), before the hybrid rule | P2Pool share-chain rule, historical on Bitcoin Cash | 6,010 |
 | 1,204,800-byte share body (`BCH_SHARE_BODY_SIZE_LIMIT`, design section 8.1) | P2Pool share-chain rule, hybrid | 35,422 |
-| 1.25 MiB P2P message (`MAX_P2P_MESSAGE_SIZE` in the model; the node's is now 2,144 KiB, with room for weak shares) | this node's implementation | 38,525 |
+| 2,144 KiB P2P message (`MAX_P2P_MESSAGE_SIZE`), keeping 960 KiB for carried weak shares (`WEAK_BYTES`) | this node's implementation | 35,634 |
 | 1,000,000-byte transaction (`MAX_TX_SIZE`, BCHN `src/consensus/tx_check.cpp`) | Bitcoin Cash consensus | 29,402 |
 | 65,535-byte coinbase field of a Stratum V2 extended or declared job | Stratum V2 | 1,922 |
 | 10,000-byte VM stack element, for a token claim hashing the coinbase (CHIP-2021-05) | Bitcoin Cash consensus | 284 |
