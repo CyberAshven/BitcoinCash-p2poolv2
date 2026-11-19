@@ -47,6 +47,33 @@ templates from a Stratum V2 Template Provider instead, checks them as it
 checks BCHN's, and still asks BCHN for the height each template builds on
 (`stratum/sv2/template_distribution.rs`).
 
+**Minimum-difficulty mark (test networks).** On chipnet a block dated more
+than twice its parent's next interval after the parent (2 minutes after a
+one-minute block, 20 after a ten-minute one) must carry the proof-of-work
+limit's nBits, `1d00ffff`, and a block dated up to that mark must carry
+ASERT's; anything else is `bad-diffbits`. The template relay
+(`relay_templates_learning_prevs` in `node/bch_header_feeder.rs`) bounds
+each template by its parent's mark (`BchHeaderRules::min_difficulty_mark`):
+a job with ASERT's nBits carries a time no later than the mark, one with the
+limit's a time after it, and a share dated on the wrong side is refused
+(`nTime out of range` on SV1, `invalid-ntime` on SV2) instead of becoming a
+block the node refuses. A second after the mark, while the latest template
+still carries ASERT's nBits, the relay switches it itself: the same
+template, with the limit's nBits from `BchHeaderRules::required_bits` (the
+header check's), their target, and `mintime` and `curtime` past the mark
+(`BlockTemplate::past_min_difficulty_mark`), published as a new template.
+New nBits on the same parent clean the SV1 jobs, also for a session whose
+clean template the watch channel replaced, and give SV2 channels a
+`SetNewPrevHash`, so miners move to the easier work at once with either
+template source; a Template Provider cannot be asked for a template. A
+block on a switched provider template goes to the node over RPC, since
+`SubmitSolution` carries no nBits. With getblocktemplate the relay also
+asks the node for a template, which replaces the switched one, and a
+template that arrives with ASERT's nBits after the mark, from a node or
+provider whose clock is behind, is switched before it is published.
+Mainnet has no such rule; regtest never retargets, and scalenet's nBits are
+not checked here, so none of them is bounded or switched.
+
 **Job builder.** Turns each template into a mining job. The coinbase pays
 miners by the PPLNS window over the share chain, after the donation and the
 operator fee. It also carries the merge-mining commitment as output 0 (the

@@ -36,7 +36,9 @@ use crate::stratum::sv2::{self, PoolTransactionCache, Sv2Mining};
 use crate::stratum::work::band_policy::miner_job_band;
 use crate::stratum::work::error::WorkError;
 use crate::stratum::work::level_policy::session_payout_level;
-use crate::stratum::work::prepared_notify::{PreparedNotifyParams, build_notify_with_job_id};
+use crate::stratum::work::prepared_notify::{
+    PreparedNotifyParams, build_notify_with_job_id, set_clean_jobs,
+};
 use crate::stratum::work::tracker::JobTracker;
 use crate::utils::time_provider::{SystemTimeProvider, TimeProvider};
 use bitcoindrpc::{BitcoinRpcConfig, BitcoindRpcClient};
@@ -933,6 +935,15 @@ fn session_hashrate<D: DifficultyAdjusterTrait>(
 /// bits. Its job carries its payout level: the one its login chose, or the
 /// node's, lowered when it would expect fewer than 3 payments a month
 /// (`level_policy::session_payout_level`).
+///
+/// A job on another previous block or other nBits than the last one the
+/// miner got is sent with `clean_jobs`, whatever the template says. The
+/// notifier sets it only on the first template on a new previous block or
+/// new nBits, and the watch channel keeps only the latest template, so a
+/// second template there can replace the first before this session reads
+/// it. nBits change on the same previous block only on a test network, at
+/// its minimum-difficulty mark: on mainnet and regtest the previous block
+/// alone decides them.
 fn job_lines<D: DifficultyAdjusterTrait>(
     session: &mut Session<D>,
     prepared: &PreparedNotifyParams,
@@ -965,7 +976,7 @@ fn job_lines<D: DifficultyAdjusterTrait>(
     let lowered = session
         .difficulty_adjuster
         .set_share_difficulty_ceiling(ceiling);
-    let (notify_json, job_id) = build_notify_with_job_id(
+    let (mut notify_json, job_id) = build_notify_with_job_id(
         prepared,
         commitment_address,
         share_address,
@@ -973,6 +984,16 @@ fn job_lines<D: DifficultyAdjusterTrait>(
         payout_level,
         tracker_handle,
     )?;
+    let template = prepared.template();
+    let new_tip = session
+        .last_job_tip
+        .as_ref()
+        .is_none_or(|(prevhash, bits)| {
+            *prevhash != template.previousblockhash || *bits != template.bits
+        });
+    if new_tip {
+        set_clean_jobs(&mut notify_json);
+    }
     let mut lines = String::with_capacity(notify_json.len() + 1024);
     if let Some(difficulty) = lowered {
         lines.push_str(&serialize_line(&Message::SetDifficulty(
@@ -992,6 +1013,9 @@ fn job_lines<D: DifficultyAdjusterTrait>(
                 sv1_merge_leaves_params(&format!("{job_id:016x}"), &tokens),
             ),
         ))?);
+    }
+    if new_tip {
+        session.last_job_tip = Some((template.previousblockhash.clone(), template.bits.clone()));
     }
     Ok(lines)
 }
@@ -1065,13 +1089,18 @@ where
 #[cfg(test)]
 mod stratum_server_tests {
     use super::*;
+    use crate::accounting::OutputPair;
+    use crate::shares::bch_asert::tests::{MAINNET_PAIRS, header};
     use crate::stratum::messages::SimpleRequest;
     use crate::stratum::server;
+    use crate::stratum::work::prepared_notify::PreparedNotifyParamsBuilder;
     use crate::stratum::work::tracker::start_tracker_actor;
     use crate::test_utils::{TestShareBlockBuilder, setup_test_chain_store_handle};
     use crate::test_utils::{make_test_share_address, test_bch_prepared, test_bch_stratum_context};
     use crate::utils::time_provider::TestTimeProvider;
+    use bitcoin::block::Header;
     use bitcoin::hashes::Hash;
+    use bitcoin::{CompactTarget, Target};
     use bitcoindrpc::test_utils::setup_mock_bitcoin_rpc;
     use p2poolv2_config::DEFAULT_VERSION_MASK;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -2778,5 +2807,314 @@ mod stratum_server_tests {
         let lines = job_lines(&mut session, &prepared, false, None, &tracker_handle).unwrap();
 
         assert_eq!(lines.lines().count(), 1);
+    }
+
+    /// The notifier publishes `clean_jobs` only on the first template on a
+    /// new previous block. When a second template on that block replaces it
+    /// in the watch channel before the connection reads it, the job the
+    /// miner gets is still clean. The next job on the same block is not.
+    #[tokio::test]
+    async fn job_lines_send_a_new_previous_block_clean_after_its_clean_template_is_replaced() {
+        let tracker_handle = start_tracker_actor();
+        let first = create_test_prepared_notify();
+        let base_template = Arc::clone(first.template());
+        let prepared_on_new_block = |clean_jobs: bool| {
+            let mut template = base_template.as_ref().clone();
+            template.previousblockhash = "11".repeat(32);
+            let payee = OutputPair {
+                address: bitcoin::Address::p2pkh(
+                    bitcoin::PubkeyHash::from_byte_array([1; 20]),
+                    bitcoin::Network::Regtest,
+                )
+                .into(),
+                amount: bitcoin::Amount::from_sat(template.coinbasevalue),
+            };
+            Arc::new(
+                PreparedNotifyParamsBuilder::new(
+                    Arc::new(template),
+                    vec![payee],
+                    b"test_pool",
+                    clean_jobs,
+                )
+                .bits(bitcoin::CompactTarget::from_consensus(0x1d00ffff))
+                .build()
+                .unwrap(),
+            )
+        };
+        let is_clean = |lines: String| {
+            let notify: serde_json::Value = serde_json::from_str(lines.trim()).unwrap();
+            notify["params"][8].as_bool().unwrap()
+        };
+        let mut session = Session::<DifficultyAdjuster>::new(1, 1, None, DEFAULT_VERSION_MASK);
+        let (template_tx, mut template_rx) = watch::channel(Some(first));
+        let job = template_rx.borrow_and_update().clone().unwrap();
+        job_lines(&mut session, &job, false, None, &tracker_handle).unwrap();
+
+        // Both templates on the new block land before the connection reads.
+        template_tx.send(Some(prepared_on_new_block(true))).unwrap();
+        template_tx
+            .send(Some(prepared_on_new_block(false)))
+            .unwrap();
+        template_rx.changed().await.unwrap();
+        let job = template_rx.borrow_and_update().clone().unwrap();
+        let lines = job_lines(&mut session, &job, false, None, &tracker_handle).unwrap();
+        assert!(
+            is_clean(lines),
+            "the miner's first job on a new previous block must be clean"
+        );
+
+        template_tx
+            .send(Some(prepared_on_new_block(false)))
+            .unwrap();
+        template_rx.changed().await.unwrap();
+        let job = template_rx.borrow_and_update().clone().unwrap();
+        let lines = job_lines(&mut session, &job, false, None, &tracker_handle).unwrap();
+        assert!(!is_clean(lines));
+    }
+
+    /// On a test network the minimum-difficulty switch brings new nBits on
+    /// the same previous block. When the switched template, published with
+    /// `clean_jobs`, is replaced in the watch channel by the node's own
+    /// template with the same nBits before the connection reads it, the job
+    /// the miner gets is still clean, so it drops ASERT's harder work. The
+    /// next job with those nBits is not clean.
+    #[tokio::test]
+    async fn job_lines_send_new_bits_on_the_same_previous_block_clean_after_their_clean_template_is_replaced()
+     {
+        let tracker_handle = start_tracker_actor();
+        let base_template = Arc::clone(create_test_prepared_notify().template());
+        let prepared_with_bits = |bits: u32, clean_jobs: bool| {
+            let mut template = base_template.as_ref().clone();
+            template.previousblockhash = "11".repeat(32);
+            template.bits = format!("{bits:08x}");
+            template.target = hex::encode(
+                Target::from_compact(CompactTarget::from_consensus(bits)).to_be_bytes(),
+            );
+            let payee = OutputPair {
+                address: bitcoin::Address::p2pkh(
+                    bitcoin::PubkeyHash::from_byte_array([1; 20]),
+                    bitcoin::Network::Regtest,
+                )
+                .into(),
+                amount: bitcoin::Amount::from_sat(template.coinbasevalue),
+            };
+            Arc::new(
+                PreparedNotifyParamsBuilder::new(
+                    Arc::new(template),
+                    vec![payee],
+                    b"test_pool",
+                    clean_jobs,
+                )
+                .bits(CompactTarget::from_consensus(0x1d00ffff))
+                .build()
+                .unwrap(),
+            )
+        };
+        let is_clean = |lines: String| {
+            let notify: serde_json::Value = serde_json::from_str(lines.trim()).unwrap();
+            notify["params"][8].as_bool().unwrap()
+        };
+        let mut session = Session::<DifficultyAdjuster>::new(1, 1, None, DEFAULT_VERSION_MASK);
+        let asert = prepared_with_bits(0x1a21_8c7e, true);
+        job_lines(&mut session, &asert, false, None, &tracker_handle).unwrap();
+
+        // The switched template, clean, was replaced by the node's own.
+        let nodes = prepared_with_bits(0x1d00_ffff, false);
+        let lines = job_lines(&mut session, &nodes, false, None, &tracker_handle).unwrap();
+        assert!(
+            is_clean(lines),
+            "the miner's first job with new nBits must be clean"
+        );
+
+        let lines = job_lines(&mut session, &nodes, false, None, &tracker_handle).unwrap();
+        assert!(!is_clean(lines));
+    }
+
+    /// On mainnet a block's nBits follow from its previous block alone, so
+    /// a session checking both sends the jobs it sent checking the previous
+    /// block alone. Through a mainnet tip, a template update, a new previous
+    /// block whose clean template was replaced before the connection read
+    /// it, and an update there, every job line is the job builder's own line
+    /// with `clean_jobs` set by the previous block alone, the check before
+    /// nBits joined it, field for field apart from the stamps each build
+    /// makes anew: the job id, and the coinbase's nanoseconds and commitment
+    /// hash. The session is a Hydrapool one, whose jobs take no miner's own
+    /// arguments, so the builder can be called alongside with the same ones.
+    #[tokio::test]
+    async fn mainnet_job_lines_are_the_ones_the_previous_block_check_sent() {
+        let tracker_handle = start_tracker_actor();
+        let base_template = Arc::clone(create_test_prepared_notify().template());
+        // Mainnet blocks 661,647, 661,648 and 661,649.
+        let first_parent = header(MAINNET_PAIRS[0].1);
+        let second_parent = header(MAINNET_PAIRS[1].1);
+        let third_block = header(MAINNET_PAIRS[1].2);
+        let prepared_on = |parent: &Header, bits: CompactTarget, curtime: u32, clean_jobs: bool| {
+            let mut template = base_template.as_ref().clone();
+            template.previousblockhash = parent.block_hash().to_string();
+            template.bits = format!("{:08x}", bits.to_consensus());
+            template.target = hex::encode(Target::from_compact(bits).to_be_bytes());
+            template.curtime = curtime;
+            let payee = OutputPair {
+                address: bitcoin::Address::p2pkh(
+                    bitcoin::PubkeyHash::from_byte_array([1; 20]),
+                    bitcoin::Network::Bitcoin,
+                )
+                .into(),
+                amount: bitcoin::Amount::from_sat(template.coinbasevalue),
+            };
+            Arc::new(
+                PreparedNotifyParamsBuilder::new(
+                    Arc::new(template),
+                    vec![payee],
+                    b"test_pool",
+                    clean_jobs,
+                )
+                .bits(CompactTarget::from_consensus(0x1d00ffff))
+                .build()
+                .unwrap(),
+            )
+        };
+        // The job id, then the nanoseconds right after coinbase2's push
+        // opcode and the commitment hash right before its lock time.
+        let unstamped = |lines: &str| {
+            assert_eq!(lines.lines().count(), 1);
+            let mut notify: serde_json::Value = serde_json::from_str(lines.trim()).unwrap();
+            notify["params"][0] = serde_json::Value::Null;
+            let coinbase2 = notify["params"][3].as_str().unwrap().to_string();
+            let locktime = coinbase2.len() - 8;
+            notify["params"][3] = format!(
+                "{}{}{}",
+                &coinbase2[..2],
+                &coinbase2[18..locktime - 64],
+                &coinbase2[locktime..]
+            )
+            .into();
+            notify
+        };
+        let mut previous_block_sent: Option<String> = None;
+        let mut previous_block_check = |prepared: &PreparedNotifyParams| {
+            let (mut notify_json, _) =
+                build_notify_with_job_id(prepared, None, None, None, None, &tracker_handle)
+                    .unwrap();
+            let prevhash = &prepared.template().previousblockhash;
+            if previous_block_sent.as_ref() != Some(prevhash) {
+                set_clean_jobs(&mut notify_json);
+                previous_block_sent = Some(prevhash.clone());
+            }
+            notify_json
+        };
+        let mut session = Session::<DifficultyAdjuster>::new(1, 1, None, DEFAULT_VERSION_MASK);
+        let time = second_parent.time;
+
+        let tip = prepared_on(&first_parent, second_parent.bits, time, true);
+        let lines = job_lines(&mut session, &tip, true, None, &tracker_handle).unwrap();
+        assert_eq!(unstamped(&lines), unstamped(&previous_block_check(&tip)));
+
+        let update = prepared_on(&first_parent, second_parent.bits, time + 5, false);
+        let lines = job_lines(&mut session, &update, true, None, &tracker_handle).unwrap();
+        assert_eq!(unstamped(&lines), unstamped(&previous_block_check(&update)));
+
+        // The clean template on the new previous block was replaced.
+        let replaced = prepared_on(&second_parent, third_block.bits, time + 600, false);
+        let lines = job_lines(&mut session, &replaced, true, None, &tracker_handle).unwrap();
+        let sent = previous_block_check(&replaced);
+        assert!(sent.ends_with(",true]}"));
+        assert_eq!(unstamped(&lines), unstamped(&sent));
+
+        let update = prepared_on(&second_parent, third_block.bits, time + 605, false);
+        let lines = job_lines(&mut session, &update, true, None, &tracker_handle).unwrap();
+        let sent = previous_block_check(&update);
+        assert!(sent.ends_with(",false]}"));
+        assert_eq!(unstamped(&lines), unstamped(&sent));
+    }
+
+    /// On regtest, which never retargets, every block carries its parent's
+    /// nBits: a session checking both sends the jobs it sent checking the
+    /// previous block alone, as on mainnet
+    /// (`mainnet_job_lines_are_the_ones_the_previous_block_check_sent`).
+    #[tokio::test]
+    async fn regtest_job_lines_are_the_ones_the_previous_block_check_sent() {
+        let tracker_handle = start_tracker_actor();
+        let base_template = Arc::clone(create_test_prepared_notify().template());
+        let regtest_bits = CompactTarget::from_consensus(0x207f_ffff);
+        let prepared_on = |prevhash: &str, curtime: u32, clean_jobs: bool| {
+            let mut template = base_template.as_ref().clone();
+            template.previousblockhash = prevhash.to_string();
+            template.bits = format!("{:08x}", regtest_bits.to_consensus());
+            template.target = hex::encode(Target::from_compact(regtest_bits).to_be_bytes());
+            template.curtime = curtime;
+            let payee = OutputPair {
+                address: bitcoin::Address::p2pkh(
+                    bitcoin::PubkeyHash::from_byte_array([1; 20]),
+                    bitcoin::Network::Regtest,
+                )
+                .into(),
+                amount: bitcoin::Amount::from_sat(template.coinbasevalue),
+            };
+            Arc::new(
+                PreparedNotifyParamsBuilder::new(
+                    Arc::new(template),
+                    vec![payee],
+                    b"test_pool",
+                    clean_jobs,
+                )
+                .bits(CompactTarget::from_consensus(0x1d00ffff))
+                .build()
+                .unwrap(),
+            )
+        };
+        // The job id, then the nanoseconds right after coinbase2's push
+        // opcode and the commitment hash right before its lock time.
+        let unstamped = |lines: &str| {
+            assert_eq!(lines.lines().count(), 1);
+            let mut notify: serde_json::Value = serde_json::from_str(lines.trim()).unwrap();
+            notify["params"][0] = serde_json::Value::Null;
+            let coinbase2 = notify["params"][3].as_str().unwrap().to_string();
+            let locktime = coinbase2.len() - 8;
+            notify["params"][3] = format!(
+                "{}{}{}",
+                &coinbase2[..2],
+                &coinbase2[18..locktime - 64],
+                &coinbase2[locktime..]
+            )
+            .into();
+            notify
+        };
+        let mut previous_block_sent: Option<String> = None;
+        let mut previous_block_check = |prepared: &PreparedNotifyParams| {
+            let (mut notify_json, _) =
+                build_notify_with_job_id(prepared, None, None, None, None, &tracker_handle)
+                    .unwrap();
+            let prevhash = &prepared.template().previousblockhash;
+            if previous_block_sent.as_ref() != Some(prevhash) {
+                set_clean_jobs(&mut notify_json);
+                previous_block_sent = Some(prevhash.clone());
+            }
+            notify_json
+        };
+        let mut session = Session::<DifficultyAdjuster>::new(1, 1, None, DEFAULT_VERSION_MASK);
+        let first_parent = "11".repeat(32);
+        let second_parent = "22".repeat(32);
+
+        let tip = prepared_on(&first_parent, 1_791_754_322, true);
+        let lines = job_lines(&mut session, &tip, true, None, &tracker_handle).unwrap();
+        assert_eq!(unstamped(&lines), unstamped(&previous_block_check(&tip)));
+
+        let update = prepared_on(&first_parent, 1_791_754_327, false);
+        let lines = job_lines(&mut session, &update, true, None, &tracker_handle).unwrap();
+        assert_eq!(unstamped(&lines), unstamped(&previous_block_check(&update)));
+
+        // The clean template on the new previous block was replaced.
+        let replaced = prepared_on(&second_parent, 1_791_754_922, false);
+        let lines = job_lines(&mut session, &replaced, true, None, &tracker_handle).unwrap();
+        let sent = previous_block_check(&replaced);
+        assert!(sent.ends_with(",true]}"));
+        assert_eq!(unstamped(&lines), unstamped(&sent));
+
+        let update = prepared_on(&second_parent, 1_791_754_927, false);
+        let lines = job_lines(&mut session, &update, true, None, &tracker_handle).unwrap();
+        let sent = previous_block_check(&update);
+        assert!(sent.ends_with(",false]}"));
+        assert_eq!(unstamped(&lines), unstamped(&sent));
     }
 }

@@ -601,10 +601,13 @@ pub async fn start_notify(
     while let Some(cmd) = notifier_rx.recv().await {
         match cmd {
             NotifyCmd::SendToAll { template } => {
+                // New bits on the same parent, as a test network's
+                // minimum-difficulty rule brings, also clean the jobs.
                 let clean_jobs = !work_available
                     || latest_template.is_none()
                     || latest_template.as_ref().unwrap().previousblockhash
-                        != template.previousblockhash;
+                        != template.previousblockhash
+                    || latest_template.as_ref().unwrap().bits != template.bits;
                 latest_template = Some(Arc::clone(&template));
 
                 match publish_prepared_notify(
@@ -933,6 +936,126 @@ mod tests {
         )
         .unwrap();
         assert!(notify.params.clean_jobs);
+        drop(notify_tx);
+        task_handle.await.unwrap();
+    }
+
+    /// A template with new bits on the same parent, as a test network's
+    /// minimum-difficulty rule brings two minutes after a one-minute parent,
+    /// is published with clean jobs; the same bits again are not.
+    #[tokio::test]
+    async fn test_start_notify_cleans_jobs_on_new_bits_at_the_same_parent() {
+        let (template_tx, mut template_rx) = watch::channel(None);
+        let (notify_tx, notify_rx) = mpsc::channel(10);
+        let mut chain_store_handle = ChainStoreHandle::default();
+        let genesis = genesis_for_tests();
+        let genesis_hash = genesis.block_hash();
+        let genesis_header = genesis.header.clone();
+        chain_store_handle
+            .expect_get_mining_base_and_uncles()
+            .returning(move || Ok((genesis_hash, vec![])));
+        chain_store_handle.expect_get_asert_parent().returning(|_| {
+            let header = genesis_for_tests().header;
+            Ok(AsertParent::from_header(&header, 0, header.time))
+        });
+        chain_store_handle
+            .expect_get_share_header()
+            .returning(|_| Ok(genesis_for_tests().header));
+        chain_store_handle
+            .expect_get_confirmed_headers_in_range()
+            .returning(|_, _| Ok(vec![]));
+        let pool_difficulty =
+            pool_difficulty::PoolDifficulty::new(genesis_header.bits, genesis_header.time, 0);
+        let mut config = StratumConfig::new_for_test_default().parse().unwrap();
+        config.chain = crate::config::Chain::BitcoinCash;
+        config.bitcoin_cash_network = Some(BitcoinCashNetwork::Regtest);
+        let address = PayoutAddress::from(Address::p2pkh(
+            bitcoin::PubkeyHash::from_byte_array([0x22; 20]),
+            Network::Regtest,
+        ));
+        let mut payout = MockPayoutDistribution::default();
+        payout.expect_pplns_weights().returning(|| None);
+        payout
+            .expect_get_output_distribution()
+            .returning(move |_, _, _, amount, _| {
+                Ok(CoinbasePayouts::direct(vec![OutputPair {
+                    address: address.clone(),
+                    amount,
+                }]))
+            });
+        let task_handle = tokio::spawn(async move {
+            start_notify(
+                notify_rx,
+                template_tx,
+                chain_store_handle,
+                &config,
+                Box::new(payout),
+                pool_difficulty,
+                PoolTransactionCache::new(),
+                None,
+                None,
+                start_tracker_actor(),
+            )
+            .await;
+        });
+        let template: BlockTemplate = serde_json::from_str(include_str!(
+            "../../../../bitcoindrpc/test_data/bchn-regtest-template.json"
+        ))
+        .unwrap();
+        let mut limit = template.clone();
+        limit.bits = "1d00ffff".to_string();
+        limit.target =
+            "00000000ffff0000000000000000000000000000000000000000000000000000".to_string();
+        limit.validate_bch().unwrap();
+        let wait = std::time::Duration::from_secs(5);
+        let tracker = start_tracker_actor();
+
+        notify_tx
+            .send(NotifyCmd::SendToAll {
+                template: Arc::new(template),
+            })
+            .await
+            .unwrap();
+        tokio::time::timeout(wait, template_rx.changed())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(template_rx.borrow_and_update().is_some());
+
+        notify_tx
+            .send(NotifyCmd::SendToAll {
+                template: Arc::new(limit.clone()),
+            })
+            .await
+            .unwrap();
+        tokio::time::timeout(wait, template_rx.changed())
+            .await
+            .unwrap()
+            .unwrap();
+        let prepared = template_rx.borrow_and_update().clone().unwrap();
+        let notify: Notify = serde_json::from_str(
+            &build_notify_from_prepared(&prepared, None, None, &tracker).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(notify.params.nbits, "1d00ffff");
+        assert!(notify.params.clean_jobs);
+
+        notify_tx
+            .send(NotifyCmd::SendToAll {
+                template: Arc::new(limit),
+            })
+            .await
+            .unwrap();
+        tokio::time::timeout(wait, template_rx.changed())
+            .await
+            .unwrap()
+            .unwrap();
+        let prepared = template_rx.borrow_and_update().clone().unwrap();
+        let notify: Notify = serde_json::from_str(
+            &build_notify_from_prepared(&prepared, None, None, &tracker).unwrap(),
+        )
+        .unwrap();
+        assert!(!notify.params.clean_jobs);
         drop(notify_tx);
         task_handle.await.unwrap();
     }
@@ -1295,6 +1418,7 @@ mod tests {
             weightlimit: 0,
             provided: None,
             light: None,
+            min_difficulty_mark: None,
         };
 
         let original_output_pairs = vec![

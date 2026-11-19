@@ -227,6 +227,9 @@ format and genesis re-pin.
 
 ### Changed
 
+- At a chipnet minimum-difficulty mark P2Pool switches its jobs to the
+  limit's nBits itself, also with a Template Provider, without waiting for a
+  new template; mainnet and regtest are unchanged (#156).
 - The header rules of the weak shares a share carries are checked on several
   cores, one fewer than the node's CPUs; the verdict is unchanged (#127).
 - A new share with 50,000 bytes or more of coinbase outputs is relayed
@@ -366,9 +369,20 @@ format and genesis re-pin.
 
 ### Fixed
 
+- Chipnet blocks are no longer lost as `bad-diffbits` at the
+  minimum-difficulty mark: a share's time must suit its job's nBits, and a
+  new template is fetched a second after the mark (#155).
+- An SV1 miner's first job on a new previous block is always sent with
+  `clean_jobs`, even when a second template replaced the clean one (#153).
 - The sim swarm's nodes connect again: since #142 they all read one node key
   from their shared run directory and refused to dial each other. Each now
-  takes a new peer ID at every start and stays off Nostr.
+  takes a new peer ID at every start and stays off Nostr (#151).
+- Two nodes whose stores share a directory no longer take one peer ID from the
+  shared `p2p_node_key` and never connect, or load each other's peers from
+  `p2p_peers.json`: a node holds `p2p_node_key.lock` and `p2p_peers.json.lock`
+  while it runs, and a second node on either file stops at start with what to
+  set. Since #142 and #144 a swarm or a host with two nodes in one directory
+  mined separate chains without a word (#157).
 - Templates from a node without long polling, such as Knuth, parse again: a
   missing `longpollid` reads as empty (#123).
 - Requests to the Bitcoin Cash node time out after 30 seconds without data,
