@@ -1,6 +1,6 @@
 use super::*;
 use crate::node::SwarmSend;
-use crate::node::messages::{GetData, InventoryMessage, Message};
+use crate::node::messages::{GetData, GetShareHeaders, InventoryMessage, Message};
 use crate::node::p2p_message_handlers::receivers::block_receiver::create_block_receiver_channel;
 use crate::node::request_sender::MockRequestSender;
 #[mockall_double::double]
@@ -443,8 +443,8 @@ async fn test_dispatch_request_calls_service() {
             TestShareBlockBuilder::new().build().header,
             TestShareBlockBuilder::new().build().header,
         ];
-        mock.expect_get_headers_for_locator()
-            .returning(move |_, _, _| Ok(headers.clone()));
+        mock.expect_get_headers_after()
+            .returning(move |_, _, _, _| Ok(headers.clone()));
         mock.expect_get_template_merkle_branches()
             .returning(|_| Ok(Vec::new()));
         mock
@@ -459,7 +459,7 @@ async fn test_dispatch_request_calls_service() {
     let result = handler.dispatch_request(
         peer_id,
         ConnectionId::new_unchecked(1),
-        Message::GetShareHeaders(block_hashes, stop_block_hash),
+        Message::GetShareHeaders(GetShareHeaders::new(block_hashes, stop_block_hash, None)),
         response_tx,
         &mut MockRequestSender::new(),
     );

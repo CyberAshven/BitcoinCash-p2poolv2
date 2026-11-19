@@ -188,8 +188,8 @@ fn test_message_not_found_roundtrip() {
 }
 
 #[test]
-fn test_message_get_share_headers_roundtrip() {
-    let hashes = vec![
+fn test_get_share_headers_v1_1_roundtrip_with_resume_point() {
+    let locator = vec![
         BlockHash::from_str("0000000086704a35f17580d06f76d4c02d2b1f68774800675fb45f0411205bb5")
             .unwrap(),
         BlockHash::from_str("0000000086704a35f17580d06f76d4c02d2b1f68774800675fb45f0411205bb6")
@@ -198,19 +198,129 @@ fn test_message_get_share_headers_roundtrip() {
     let stop =
         BlockHash::from_str("0000000086704a35f17580d06f76d4c02d2b1f68774800675fb45f0411205bb7")
             .unwrap();
+    let request = GetShareHeaders::new(
+        locator,
+        stop,
+        Some(
+            BlockHash::from_str("a3fbd2a0e62c42446e4e6d18dab3a479ebc84c279757450e019eafc89dfc1a62")
+                .unwrap(),
+        ),
+    );
+    let message = Message::GetShareHeaders(request);
 
-    let msg = Message::GetShareHeaders(hashes.clone(), stop);
     let mut encoded = Vec::new();
-    msg.consensus_encode(&mut encoded).unwrap();
+    message
+        .consensus_encode_with_version(ProtocolVersion::V1_1, &mut encoded)
+        .unwrap();
+    let decoded =
+        Message::consensus_decode_with_version(ProtocolVersion::V1_1, &mut &encoded[..]).unwrap();
 
-    let decoded = Message::consensus_decode(&mut &encoded[..]).unwrap();
-    match decoded {
-        Message::GetShareHeaders(decoded_hashes, decoded_stop) => {
-            assert_eq!(decoded_hashes, hashes);
-            assert_eq!(decoded_stop, stop);
-        }
-        _ => panic!("Expected GetShareHeaders variant"),
-    }
+    assert_eq!(decoded, message);
+}
+
+#[test]
+fn test_get_share_headers_v1_1_roundtrip_without_resume_point() {
+    let locator = vec![
+        BlockHash::from_str("0000000086704a35f17580d06f76d4c02d2b1f68774800675fb45f0411205bb5")
+            .unwrap(),
+    ];
+    let message =
+        Message::GetShareHeaders(GetShareHeaders::new(locator, BlockHash::all_zeros(), None));
+
+    let mut encoded = Vec::new();
+    message
+        .consensus_encode_with_version(ProtocolVersion::V1_1, &mut encoded)
+        .unwrap();
+    let decoded =
+        Message::consensus_decode_with_version(ProtocolVersion::V1_1, &mut &encoded[..]).unwrap();
+
+    assert_eq!(decoded, message);
+}
+
+/// A v0.18 server decodes exactly discriminant, locator and stop. Encoding
+/// for 1.0.0 must produce those bytes and nothing else, dropping the
+/// resume point the old server would not understand.
+#[test]
+fn test_get_share_headers_v1_0_encoding_matches_legacy_layout() {
+    let locator = vec![
+        BlockHash::from_str("0000000086704a35f17580d06f76d4c02d2b1f68774800675fb45f0411205bb5")
+            .unwrap(),
+    ];
+    let stop =
+        BlockHash::from_str("0000000086704a35f17580d06f76d4c02d2b1f68774800675fb45f0411205bb7")
+            .unwrap();
+    let request = GetShareHeaders::new(
+        locator.clone(),
+        stop,
+        Some(
+            BlockHash::from_str("a3fbd2a0e62c42446e4e6d18dab3a479ebc84c279757450e019eafc89dfc1a62")
+                .unwrap(),
+        ),
+    );
+
+    let mut encoded = Vec::new();
+    Message::GetShareHeaders(request)
+        .consensus_encode_with_version(ProtocolVersion::V1_0, &mut encoded)
+        .unwrap();
+
+    let mut legacy = Vec::new();
+    message_discriminants::GET_SHARE_HEADERS
+        .consensus_encode(&mut legacy)
+        .unwrap();
+    locator.consensus_encode(&mut legacy).unwrap();
+    stop.consensus_encode(&mut legacy).unwrap();
+    assert_eq!(encoded, legacy);
+}
+
+/// A request from a v0.18 peer decodes with no resume point and records
+/// the 1.0.0 stream it arrived on, so the server answers the old way.
+#[test]
+fn test_get_share_headers_v1_0_decode_records_stream_version() {
+    let locator = vec![
+        BlockHash::from_str("0000000086704a35f17580d06f76d4c02d2b1f68774800675fb45f0411205bb5")
+            .unwrap(),
+    ];
+    let stop =
+        BlockHash::from_str("0000000086704a35f17580d06f76d4c02d2b1f68774800675fb45f0411205bb7")
+            .unwrap();
+    let mut legacy = Vec::new();
+    message_discriminants::GET_SHARE_HEADERS
+        .consensus_encode(&mut legacy)
+        .unwrap();
+    locator.consensus_encode(&mut legacy).unwrap();
+    stop.consensus_encode(&mut legacy).unwrap();
+
+    let decoded =
+        Message::consensus_decode_with_version(ProtocolVersion::V1_0, &mut &legacy[..]).unwrap();
+
+    assert_eq!(
+        decoded,
+        Message::GetShareHeaders(GetShareHeaders {
+            locator,
+            stop,
+            resume_after: None,
+            protocol_version: ProtocolVersion::V1_0,
+        })
+    );
+}
+
+#[test]
+fn test_get_share_headers_v1_1_rejects_invalid_resume_presence_byte() {
+    let mut encoded = Vec::new();
+    message_discriminants::GET_SHARE_HEADERS
+        .consensus_encode(&mut encoded)
+        .unwrap();
+    Vec::<BlockHash>::new()
+        .consensus_encode(&mut encoded)
+        .unwrap();
+    BlockHash::all_zeros()
+        .consensus_encode(&mut encoded)
+        .unwrap();
+    2u8.consensus_encode(&mut encoded).unwrap();
+
+    let result = Message::consensus_decode_with_version(ProtocolVersion::V1_1, &mut &encoded[..]);
+
+    assert!(result.is_err());
 }
 
 #[test]

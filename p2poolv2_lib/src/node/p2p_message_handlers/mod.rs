@@ -59,10 +59,9 @@ pub async fn handle_request<C: Send + Sync + 'static, T: TimeProvider + Send + S
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     debug!("Received request {} from peer: {}", ctx.request, ctx.peer);
     match ctx.request {
-        Message::GetShareHeaders(block_hashes, stop_block_hash) => {
+        Message::GetShareHeaders(request) => {
             handle_getheaders(
-                block_hashes,
-                stop_block_hash,
+                request,
                 ctx.chain_store_handle,
                 ctx.response_channel,
                 ctx.swarm_tx,

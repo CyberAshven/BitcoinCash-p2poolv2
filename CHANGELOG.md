@@ -298,6 +298,9 @@ format and genesis re-pin.
   `block_interval_secs` (#136).
 - A new store learns its BCH tip region first, in chunks of 2,000 headers,
   and a walk that stops is finished in later rounds (#136).
+- Synced with upstream P2Poolv2 through `75c4d7ea`: header sync serves every
+  share at a height and pages inside one, in place of #74's order (message
+  segment `headers-resume`, nodes restart together; testnet5 left out, #152).
 - Synced with upstream P2Poolv2 through `fdbf85df` (v0.18.0 and the
   Whatsminer change): host names in `dial_peers`, and a `d=` or `th=`
   difficulty that `mining.suggest_difficulty` no longer overrides; testnet5
