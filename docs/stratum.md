@@ -57,13 +57,22 @@ each template by its parent's mark (`BchHeaderRules::min_difficulty_mark`):
 a job with ASERT's nBits carries a time no later than the mark, one with the
 limit's a time after it, and a share dated on the wrong side is refused
 (`nTime out of range` on SV1, `invalid-ntime` on SV2) instead of becoming a
-block the node refuses. While the latest template carries ASERT's nBits and
-its mark is ahead, the relay asks for a new template a second after the
-mark, and new nBits on the same parent clean the jobs, so miners move to the
-easier work at once rather than at the next poll. A Template Provider pushes
-its own templates, so with `template_source = "sv2"` only the bounds apply.
+block the node refuses. A second after the mark, while the latest template
+still carries ASERT's nBits, the relay switches it itself: the same
+template, with the limit's nBits from `BchHeaderRules::required_bits` (the
+header check's), their target, and `mintime` and `curtime` past the mark
+(`BlockTemplate::past_min_difficulty_mark`), published as a new template.
+New nBits on the same parent clean the SV1 jobs, also for a session whose
+clean template the watch channel replaced, and give SV2 channels a
+`SetNewPrevHash`, so miners move to the easier work at once with either
+template source; a Template Provider cannot be asked for a template. A
+block on a switched provider template goes to the node over RPC, since
+`SubmitSolution` carries no nBits. With getblocktemplate the relay also
+asks the node for a template, which replaces the switched one, and a
+template that arrives with ASERT's nBits after the mark, from a node or
+provider whose clock is behind, is switched before it is published.
 Mainnet has no such rule; regtest never retargets, and scalenet's nBits are
-not checked here, so neither is bounded.
+not checked here, so none of them is bounded or switched.
 
 **Job builder.** Turns each template into a mining job whose coinbase pays
 miners by the PPLNS window, after the donation and the operator fee. It also

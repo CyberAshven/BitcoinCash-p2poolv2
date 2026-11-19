@@ -8,6 +8,7 @@ use crate::shares::chain::chain_store_handle::ChainStoreHandle;
 use crate::shares::share_block::MAX_POOL_TARGET;
 use crate::shares::validation::{MockDefaultShareValidator, ValidationError};
 use crate::store::block_tx_metadata::{BlockMetadata, ChainMembership, Status};
+use crate::store::dag_store::MAX_BLOCKS_PER_HEIGHT;
 use crate::test_utils::{TestShareBlockBuilder, share_header_batch_with_empty_branches};
 use p2poolv2_wallet::share_owner::ShareOwner;
 use tokio::sync::{mpsc, oneshot};
@@ -362,10 +363,20 @@ async fn test_share_headers_sends_getheaders_to_same_peer() {
         .try_recv()
         .expect("expected a follow-up getheaders request");
     match swarm_message {
-        SwarmSend::Request(sent_peer_id, Message::GetShareHeaders(locator, stop_hash)) => {
+        SwarmSend::Request(
+            sent_peer_id,
+            Message::GetShareHeaders(GetShareHeaders {
+                locator,
+                stop: stop_hash,
+                resume_after,
+                ..
+            }),
+        ) => {
             assert_eq!(sent_peer_id, peer_id);
             assert_eq!(locator, vec![expected_last_hash]);
             assert_eq!(stop_hash, BlockHash::all_zeros());
+            // A 1.1.0 server continues right after the last header served.
+            assert_eq!(resume_after, Some(expected_last_hash));
         }
         other => panic!("expected SwarmSend::Request with GetShareHeaders, got: {other:?}"),
     }
@@ -961,6 +972,41 @@ fn test_validate_header_chain_accepts_fork_from_anchor() {
     assert!(result.is_ok(), "Expected Ok, got: {}", result.unwrap_err());
 }
 
+/// A height with more blocks than the old per-height cap is valid: every
+/// block is real proof of work, and a server that serves all of them must
+/// not have its batch rejected or be disconnected for it.
+#[test]
+fn test_validate_header_chain_accepts_more_than_max_blocks_at_one_height() {
+    let anchor = TestShareBlockBuilder::new().nonce(1).build();
+    let sibling_count = MAX_BLOCKS_PER_HEIGHT as u32 + 1;
+    let headers: Vec<ShareHeader> = (0..sibling_count)
+        .map(|offset| {
+            let mut header = TestShareBlockBuilder::new()
+                .prev_share_blockhash(anchor.block_hash().to_string())
+                .nonce(100 + offset)
+                .build()
+                .header;
+            header.bits = CompactTarget::from_consensus(MAX_POOL_TARGET);
+            header
+        })
+        .collect();
+
+    let mut chain_store_handle = ChainStoreHandle::default();
+    setup_chain_validation_mocks(&mut chain_store_handle);
+    let mut mock_validator = MockDefaultShareValidator::default();
+    mock_validator
+        .expect_validate_uncles()
+        .returning(|_, _| Ok(()));
+    setup_minimum_difficulty_mock(&mut mock_validator);
+
+    let result = validate_header_chain(
+        &share_header_batch_with_empty_branches(headers),
+        &chain_store_handle,
+        &mock_validator,
+    );
+    assert!(result.is_ok(), "Expected Ok, got: {}", result.unwrap_err());
+}
+
 #[test]
 fn test_validate_header_chain_accepts_uncle_referencing_anchor() {
     let anchor = TestShareBlockBuilder::new().nonce(1).build();
@@ -1409,7 +1455,7 @@ async fn test_handle_share_headers_retries_on_missing_external_parent() {
     // Should have sent a getheaders request
     let message = swarm_rx.try_recv().expect("expected a getheaders retry");
     match message {
-        SwarmSend::Request(sent_peer, Message::GetShareHeaders(_, _)) => {
+        SwarmSend::Request(sent_peer, Message::GetShareHeaders(_)) => {
             assert_eq!(sent_peer, peer_id);
         }
         other => panic!("expected GetShareHeaders, got: {other:?}"),

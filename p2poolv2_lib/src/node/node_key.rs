@@ -15,7 +15,12 @@
 //! not hold a key stops the node rather than being replaced, since that would
 //! give the node another peer ID unnoticed. With `ephemeral_node_key` the
 //! node makes a new key on every start and keeps none.
+//!
+//! One key belongs to one running node: a node holds `<key file>.lock` while
+//! it runs (`running_lock`), and a second node on the same key stops at
+//! start, since two nodes on one key have one peer ID and never connect.
 
+use super::running_lock::{self, RunningLock};
 use libp2p::identity::Keypair;
 use std::error::Error;
 use std::fs::{self, OpenOptions};
@@ -24,16 +29,34 @@ use std::path::Path;
 use tracing::info;
 
 /// The node's identity: read from `path`, or made and written there when the
-/// file does not exist yet; a new one every call when `path` is `None`.
-pub(crate) fn load_or_create(path: Option<&Path>) -> Result<Keypair, Box<dyn Error>> {
+/// file does not exist yet, with the lock that keeps other nodes off it; a
+/// new one every call, and no lock, when `path` is `None`.
+pub(crate) fn load_or_create(
+    path: Option<&Path>,
+) -> Result<(Keypair, Option<RunningLock>), Box<dyn Error>> {
     let Some(path) = path else {
         let key = Keypair::generate_ed25519();
         info!(
             "This node's peer ID is {}, new on every start (ephemeral_node_key)",
             key.public().to_peer_id()
         );
-        return Ok(key);
+        return Ok((key, None));
     };
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("Cannot create {}: {error}", parent.display()))?;
+    }
+    // The lock comes first, so two nodes started at once on a new key do not
+    // both write it.
+    let lock = running_lock::hold(path).map_err(|_| {
+        format!(
+            "Another node is running on the node key {}. Two nodes on one key have one peer ID and never connect to each other. Give each node its own directory, where it keeps its key and peer list beside its store, or set network.node_key_path or ephemeral_node_key for one of them",
+            path.display()
+        )
+    })?;
     let key = match fs::read(path) {
         Ok(bytes) => Keypair::from_protobuf_encoding(&bytes).map_err(|error| {
             format!(
@@ -54,20 +77,12 @@ pub(crate) fn load_or_create(path: Option<&Path>) -> Result<Keypair, Box<dyn Err
         key.public().to_peer_id(),
         path.display()
     );
-    Ok(key)
+    Ok((key, lock))
 }
 
-/// Write `key` to a new file at `path` that only its owner can read, creating
-/// the directories above it. Refuses to overwrite a file, so a key is never
-/// replaced unnoticed.
+/// Write `key` to a new file at `path` that only its owner can read. Refuses
+/// to overwrite a file, so a key is never replaced unnoticed.
 fn write_new_key_file(path: &Path, key: &Keypair) -> Result<(), Box<dyn Error>> {
-    if let Some(parent) = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-    {
-        fs::create_dir_all(parent)
-            .map_err(|error| format!("Cannot create {}: {error}", parent.display()))?;
-    }
     let encoded = key
         .to_protobuf_encoding()
         .map_err(|error| format!("Cannot encode the node key: {error}"))?;
@@ -96,18 +111,56 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("data").join("p2p_node_key");
 
-        let first = load_or_create(Some(&path)).unwrap();
+        let (first, running) = load_or_create(Some(&path)).unwrap();
         assert!(path.exists(), "the key is written on the first start");
-        let second = load_or_create(Some(&path)).unwrap();
+        drop(running);
+        let (second, _running) = load_or_create(Some(&path)).unwrap();
 
         assert_eq!(first.public().to_peer_id(), second.public().to_peer_id());
     }
 
+    /// While one node runs on a key, a second one is refused with what to
+    /// set, and the key is untouched; once the first stops, the key is free.
     #[test]
-    fn an_ephemeral_node_gets_a_new_peer_id_each_start_and_writes_nothing() {
-        let first = load_or_create(None).unwrap();
-        let second = load_or_create(None).unwrap();
+    fn a_second_node_on_a_running_nodes_key_is_refused() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("p2p_node_key");
+
+        let (first, running) = load_or_create(Some(&path)).unwrap();
+        assert!(
+            running.is_some(),
+            "a kept key is locked while its node runs"
+        );
+        let key_bytes = fs::read(&path).unwrap();
+
+        let error = load_or_create(Some(&path)).unwrap_err().to_string();
+        assert!(error.contains("Another node is running"), "{error}");
+        assert!(error.contains("its own directory"), "{error}");
+        assert_eq!(fs::read(&path).unwrap(), key_bytes);
+
+        drop(running);
+        let (after, _running) = load_or_create(Some(&path)).unwrap();
+        assert_eq!(after.public().to_peer_id(), first.public().to_peer_id());
+    }
+
+    /// Two nodes with their own key files, as in their own directories, run
+    /// side by side with their own peer IDs.
+    #[test]
+    fn nodes_with_their_own_keys_run_side_by_side() {
+        let dir = tempdir().unwrap();
+        let (first, _first_running) =
+            load_or_create(Some(&dir.path().join("node1").join("p2p_node_key"))).unwrap();
+        let (second, _second_running) =
+            load_or_create(Some(&dir.path().join("node2").join("p2p_node_key"))).unwrap();
         assert_ne!(first.public().to_peer_id(), second.public().to_peer_id());
+    }
+
+    #[test]
+    fn an_ephemeral_node_gets_a_new_peer_id_each_start_and_holds_no_lock() {
+        let (first, first_lock) = load_or_create(None).unwrap();
+        let (second, second_lock) = load_or_create(None).unwrap();
+        assert_ne!(first.public().to_peer_id(), second.public().to_peer_id());
+        assert!(first_lock.is_none() && second_lock.is_none());
     }
 
     #[test]
@@ -129,7 +182,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("p2p_node_key");
 
-        load_or_create(Some(&path)).unwrap();
+        let _running = load_or_create(Some(&path)).unwrap();
 
         let mode = fs::metadata(&path).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600);

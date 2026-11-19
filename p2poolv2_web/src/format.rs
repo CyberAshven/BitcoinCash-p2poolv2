@@ -253,11 +253,6 @@ pub fn difficulty_from_bits(bits: u32) -> f64 {
     f64::from(0xffff_u32) / mantissa * 256_f64.powi(0x1d - exponent)
 }
 
-/// Hashes a share of compact target `bits` takes on average.
-pub fn work_from_bits(bits: u32) -> f64 {
-    difficulty_from_bits(bits) * HASHES_PER_DIFFICULTY
-}
-
 /// A weak share's difficulty from its compact target, hex the way the
 /// share lookup spells it (`0x1c0448d7`). Bits that do not parse render
 /// as the dash, as a list row with no difficulty does.
@@ -372,7 +367,6 @@ mod tests {
         assert!((difficulty_from_bits(0x1d00_ffff) - 1.0).abs() < 1e-12);
         assert!((difficulty_from_bits(0x1c00_ffff) - 256.0).abs() < 1e-9);
         assert_eq!(difficulty_from_bits(0x1d00_0000), 0.0);
-        assert!((work_from_bits(0x1d00_ffff) - HASHES_PER_DIFFICULTY).abs() < 1e-3);
     }
 
     #[test]

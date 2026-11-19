@@ -6,94 +6,21 @@
 //! `/dashboard/miner?address=` show them. Workers open with an HTML
 //! `<details>`, as on the node's pages.
 
-use crate::api::{Connection, Miner, Miners, Share, Shares, Worker};
+use crate::api::{Miner, Miners, Worker};
 use crate::app::{ctx, fetched};
-use crate::format::{
-    fmt_difficulty, fmt_hashrate, optional, percent, short, url_component, work_from_bits,
-};
+use crate::format::{fmt_difficulty, fmt_hashrate, optional, percent, short, url_component};
 use crate::layout::{
     Crumb, ErrorPage, dashboard_crumb, last_seen, loading, lookup_form, pager, share_link, stat,
 };
 use crate::route::{Paging, Route, Tab, miner_href, share_href};
 use leptos::prelude::*;
-use std::cmp::Reverse;
-
-/// Shares a miner's hashrate is estimated from, as on the node's miner page.
-const MINER_HASHRATE_SHARES: usize = 500;
-
-/// The gap the miners page's Hashrate column filters on, as on the node
-/// (`history::MAX_SHARE_GAP_SECS`): shares this many seconds before the
-/// newest one are dropped so a stale seed cannot stretch the span.
-const MAX_SHARE_GAP_SECS: u64 = 3600;
-
-/// Most shares `/shares` returns at once.
-const SHARES_PER_REQUEST: usize = 100;
 
 /// Most window shares `/miner` lists, the node's maximum.
 const MINER_SHARES_LIMIT: usize = 100;
 
-/// A miner's hashrate over the window behind the miners page's Hashrate
-/// column for `address`: `shares` are newest first, sorted by timestamp,
-/// keeping the ones within [`MAX_SHARE_GAP_SECS`] of the newest (falling back
-/// to the two newest, as the node does) so a stale seed cannot stretch the
-/// span. The window's oldest share only opens the span: its work was done
-/// before it. With how many shares and seconds the window covers. `None`
-/// where the window has no time span or the miner has no share of its work
-/// in it, as the column renders a dash.
-pub fn miner_hashrate(shares: &[Share], address: &str) -> Option<(f64, usize, u64)> {
-    if shares.len() < 2 {
-        return None;
-    }
-    let mut window: Vec<&Share> = shares.iter().collect();
-    window.sort_by_key(|share| share.timestamp);
-    let newest = window.last()?.timestamp;
-    let mut kept: Vec<&Share> = window
-        .iter()
-        .copied()
-        .filter(|share| newest.saturating_sub(share.timestamp) <= MAX_SHARE_GAP_SECS)
-        .collect();
-    if kept.len() < 2 {
-        kept = window[window.len() - 2..].to_vec();
-    }
-    let span = newest
-        .checked_sub(kept[0].timestamp)
-        .filter(|span| *span > 0)?;
-    let mut work = 0.0_f64;
-    let mut matched = false;
-    for share in kept.iter().skip(1) {
-        if share.miner_bitcoin_address == address || share.miner_address == address {
-            matched = true;
-            work += work_from_bits(share.bits);
-        }
-    }
-    matched.then(|| (work / span as f64, kept.len(), span))
-}
-
-/// The newest `count` confirmed shares, oldest first, read a page of
-/// `/shares` at a time.
-async fn newest_shares(connection: &Connection, count: usize) -> Result<Vec<Share>, String> {
-    let mut collected: Vec<Share> = Vec::with_capacity(count);
-    let mut below: Option<u32> = None;
-    let mut more = true;
-    while more && collected.len() < count {
-        let wanted = (count - collected.len()).min(SHARES_PER_REQUEST);
-        let path = match below {
-            Some(height) => format!("/shares?to={height}&num={wanted}"),
-            None => format!("/shares?num={wanted}"),
-        };
-        let page = connection.get::<Shares>(&path).await?.shares;
-        let lowest = page.iter().map(|share| share.height).min();
-        more = !page.is_empty() && lowest.is_some_and(|lowest| lowest > 0);
-        below = lowest.map(|lowest| lowest.saturating_sub(1));
-        collected.extend(page);
-    }
-    collected.sort_by_key(|share| share.height);
-    Ok(collected)
-}
-
-/// A miner's workers, as rows of the miners grid. `hashrate` adds the empty
-/// Hashrate cell the miners page's table has (after State); the miner page's
-/// table has no such column.
+/// A miner's workers, as rows of the miners grid. `hashrate` adds the
+/// worker's own stratum-session figure beside State, as on the node's
+/// miners page; the miner page's table has no such column.
 fn worker_rows(workers: Vec<Worker>, hashrate: bool) -> impl IntoView {
     workers
         .into_iter()
@@ -103,7 +30,9 @@ fn worker_rows(workers: Vec<Worker>, hashrate: bool) -> impl IntoView {
                     <span></span>
                     <span class="mono">{worker.name}</span>
                     <span>{if worker.active { "online" } else { "idle" }}</span>
-                    {hashrate.then(|| view! { <span></span> })}
+                    {hashrate.then(|| view! {
+                        <span>{optional(worker.hashrate, fmt_hashrate)}</span>
+                    })}
                     <span>{fmt_difficulty(worker.accepted_work as f64)}</span>
                     <span></span>
                     <span>"best " {fmt_difficulty(worker.best_share as f64)}</span>
@@ -309,27 +238,6 @@ pub fn MinerPage(address: String, page: usize) -> impl IntoView {
     let report_path = format!("/miner?address={encoded}&limit={MINER_SHARES_LIMIT}");
     let report = fetched::<Miner>(move || report_path.clone());
     let local = fetched::<Miners>(move || format!("/miners?address={encoded}"));
-    let connection = context.connection;
-    // The hashrate is estimated from the newest shares over the miners
-    // page's Hashrate column window, for the address the window lookup
-    // returned, as the node's miner page does.
-    let estimate = LocalResource::new(move || {
-        let connection = connection.get();
-        let reported = report
-            .get()
-            .and_then(Result::ok)
-            .map(|report| report.address);
-        async move {
-            let reported = reported?;
-            let mut shares = newest_shares(&connection, MINER_HASHRATE_SHARES)
-                .await
-                .ok()?;
-            shares.sort_by_key(|share| Reverse(share.height));
-            shares.truncate(MINER_HASHRATE_SHARES);
-            shares.reverse();
-            miner_hashrate(&shares, &reported)
-        }
-    });
 
     (move || match report.get() {
         None => view! { <div class="panel">{loading()}</div> }.into_any(),
@@ -346,19 +254,6 @@ pub fn MinerPage(address: String, page: usize) -> impl IntoView {
                 report.window.share_count,
                 percent(report.share_fraction)
             );
-            let hashrate = move || {
-                let found = estimate.get().flatten();
-                let window = found.map(|(_, shares, seconds)| {
-                    view! {
-                        <br />
-                        <small>{format!("over the last {shares} shares, {} min", seconds / 60)}</small>
-                    }
-                });
-                view! {
-                    {optional(found.map(|(hashrate, _, _)| hashrate), fmt_hashrate)}
-                    {window}
-                }
-            };
             let workers = move || match local.get() {
                 Some(Ok(local)) => local
                     .miners
@@ -462,7 +357,19 @@ pub fn MinerPage(address: String, page: usize) -> impl IntoView {
                                 .into_any(),
                             )
                         })}
-                        {stat("Hashrate", view! { {hashrate} }.into_any())}
+                        {stat(
+                            "Hashrate",
+                            view! {
+                                {optional(report.hashrate, fmt_hashrate)}
+                                {report.recent_window.map(|(count, seconds)| view! {
+                                    <br />
+                                    <small>
+                                        {format!("over the last {count} shares, {} min", seconds / 60)}
+                                    </small>
+                                })}
+                            }
+                                .into_any(),
+                        )}
                         {stat(
                             "Mining on",
                             view! {
@@ -484,73 +391,4 @@ pub fn MinerPage(address: String, page: usize) -> impl IntoView {
         }
     })
     .into_any()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn share(height: u32, timestamp: u64, address: &str) -> Share {
-        Share {
-            blockhash: format!("{height}"),
-            height,
-            miner_bitcoin_address: address.to_string(),
-            miner_address: "tp2pool:owner".to_string(),
-            timestamp,
-            bits: 0x1d00_ffff,
-            uncles: Vec::new(),
-            weak_count: 0,
-        }
-    }
-
-    #[test]
-    fn test_miner_hashrate_leaves_out_the_oldest_shares_work() {
-        let shares = [
-            share(1, 0, "bchtest:me"),
-            share(2, 10, "bchtest:me"),
-            share(3, 20, "bchtest:other"),
-        ];
-        let (hashrate, count, span) = miner_hashrate(&shares, "bchtest:me").unwrap();
-        assert!((hashrate - work_from_bits(0x1d00_ffff) / 20.0).abs() < 1e-6);
-        assert_eq!((count, span), (3, 20));
-    }
-
-    #[test]
-    fn test_miner_hashrate_matches_the_share_owner_too() {
-        let shares = [share(1, 0, "bchtest:a"), share(2, 10, "bchtest:b")];
-        let (hashrate, _, _) = miner_hashrate(&shares, "tp2pool:owner").unwrap();
-        assert!(hashrate > 0.0);
-    }
-
-    #[test]
-    fn test_miner_hashrate_needs_time_between_shares() {
-        assert_eq!(miner_hashrate(&[share(1, 5, "x")], "x"), None);
-        assert_eq!(miner_hashrate(&[], "x"), None);
-    }
-
-    #[test]
-    fn test_miner_hashrate_drops_shares_older_than_an_hour() {
-        let shares = [
-            share(1, 100, "bchtest:me"),
-            share(2, 4100, "bchtest:me"),
-            share(3, 4200, "bchtest:me"),
-        ];
-        let (hashrate, count, span) = miner_hashrate(&shares, "bchtest:me").unwrap();
-        assert_eq!(
-            (count, span),
-            (2, 100),
-            "the share an hour before the newest is dropped from the window"
-        );
-        assert!((hashrate - work_from_bits(0x1d00_ffff) / 100.0).abs() < 1e-6);
-    }
-
-    #[test]
-    fn test_miner_hashrate_is_none_without_shares_in_the_window() {
-        let shares = [share(1, 0, "bchtest:other"), share(2, 10, "bchtest:other")];
-        assert_eq!(
-            miner_hashrate(&shares, "bchtest:me"),
-            None,
-            "no share of its work in the window, as the column dashes it"
-        );
-    }
 }

@@ -31,7 +31,7 @@ Mainnet and chipnet run the same rules; only the network setting differs.
 Nodes only talk to nodes on the same chain and rules. Every libp2p protocol
 string carries the network, the share chain's genesis, a tag for each
 share-chain rule and last a tag for the P2P messages,
-`weak-by-hash/without-payouts` today (`protocol_string` in
+`weak-by-hash/without-payouts/headers-resume` today (`network_prologue` in
 `p2poolv2_lib/src/node/behaviour/request_response.rs`). A node on other
 rules or messages fails the handshake instead of exchanging shares or
 messages the other side cannot use.
@@ -108,7 +108,11 @@ peer, and `blocked_ips` is checked after a name resolves.
 A node keeps its peer ID across restarts: its libp2p key is made on the first
 start and kept in `p2p_node_key` beside the store
 (`[network] node_key_path`). With `ephemeral_node_key = true` it gets a new
-peer ID every start, which nothing links across restarts.
+peer ID every start, which nothing links across restarts. A running node
+holds `p2p_node_key.lock` and `p2p_peers.json.lock`, so a second node whose
+store sits in the same directory stops at start instead of taking the same
+peer ID, which would keep the two from ever connecting. Give each node its
+own directory.
 
 ### Finding peers through Nostr
 
@@ -161,14 +165,24 @@ target, or a DNS or Nostr seed. While short, it dials one more peer a second
   does (`CConnman::ThreadOpenConnections`, `CNetAddr::GetGroup`).
   `dial_peers` connections hold no group and are left to the reconnector.
 - **Lookups close.** Kademlia dials each unconnected peer a lookup asks, and
-  share relay would keep those connections open, so lookups, not the target,
-  would pick a node's peers. An outgoing connection none of the node's own
-  dials opened is Kademlia's: it holds no group, does not count, and closes
-  after 10 seconds once no query runs, or after 60, Kademlia's query
-  timeout, as Bitcoin Cash Node's feeler connections close. The peer stays
-  in the routing table and the book. A connection to an anchor is the
-  target's; inbound connections stay; `target_outgoing_peers = 0` keeps
-  lookups open.
+  share relay kept those connections open, so lookups, not the target,
+  picked a node's peers. An outgoing connection none of the node's own dials
+  opened is Kademlia's: it holds no group, does not count, and closes after
+  10 seconds once no query runs, or after 60, Kademlia's query timeout. Like
+  Bitcoin Cash Node's feeler connections, a lookup only discovers addresses:
+  the node sends no handshake on it and answers the peer's without a sync,
+  and shares, weak shares and transactions go only to peers that sent a
+  handshake, so closing a lookup cuts nothing in flight. The peer stays in
+  the routing table and the book. A connection that is not a lookup, opened
+  while the lookup is, makes the peer a share-chain peer. A connection to an
+  anchor is the target's; inbound connections stay;
+  `target_outgoing_peers = 0` keeps lookups open as full peers.
+- **Gone peers are forgotten.** Kademlia keeps an unreachable peer at its
+  last address, so a node that left, or came back under another peer ID,
+  would be handed to every lookup and dialed by every node. When a dial to a
+  peer the node has no connection to fails, the node removes it from the
+  routing table; a live peer is learned again from the next lookup that
+  finds it.
 - **Within the limits.** Dials in flight count toward the target, no dial
   passes `max_established_outgoing`, and the target's own dials in flight
   stay below half of `max_pending_outgoing`. Blocked IPs are never dialed.

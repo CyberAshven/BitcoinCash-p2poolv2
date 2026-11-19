@@ -36,7 +36,7 @@ use crate::utils::time_provider::SystemTimeProvider;
 use libp2p::PeerId;
 use libp2p::request_response::ResponseChannel;
 use libp2p::swarm::ConnectionId;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -88,6 +88,15 @@ pub struct RequestResponseHandler<C: Send + Sync> {
     /// Bitcoin Cash: what rebuilds the coinbase of a share relayed without
     /// its payouts. `None` on Bitcoin.
     coinbase_rebuilder: Option<CoinbaseRebuilder>,
+    /// Peers that sent this node a handshake. Share-chain traffic goes only
+    /// to these, so a peer that connected only to look up addresses, and
+    /// so never sent one, gets none.
+    handshaken: HashSet<PeerId>,
+    /// Peers this node is connected to only through its own Kademlia
+    /// lookups. It sends them no handshake and answers theirs without
+    /// syncing, so nothing of the share chain is in flight when the lookup
+    /// closes.
+    lookup_only: HashSet<PeerId>,
 }
 
 /// Implementation of ResponseChannel<Message>, used in production.
@@ -125,6 +134,8 @@ impl RequestResponseHandler<ResponseChannel<Message>> {
             share_transaction_pool,
             weak_share_tx: None,
             coinbase_rebuilder: None,
+            handshaken: HashSet::new(),
+            lookup_only: HashSet::new(),
         }
     }
 
@@ -247,6 +258,23 @@ impl<C: Send + Sync + 'static> RequestResponseHandler<C> {
         self.peer_handles.insert(peer_id, handle);
     }
 
+    /// Mark a peer this node reached only through its own Kademlia lookup.
+    pub fn set_lookup_only(&mut self, peer_id: PeerId) {
+        self.lookup_only.insert(peer_id);
+    }
+
+    /// The peer now has a connection that is not a lookup. Returns whether it
+    /// was lookup only.
+    pub fn clear_lookup_only(&mut self, peer_id: &PeerId) -> bool {
+        self.lookup_only.remove(peer_id)
+    }
+
+    /// Whether share-chain traffic goes to the peer: it sent a handshake and
+    /// is not connected only through this node's lookup.
+    pub fn is_share_chain_peer(&self, peer_id: &PeerId) -> bool {
+        self.handshaken.contains(peer_id) && !self.lookup_only.contains(peer_id)
+    }
+
     /// Requests sent by this node that failed, since start.
     pub fn outbound_failures_total(&self) -> u64 {
         self.outbound_failures_total
@@ -307,6 +335,8 @@ impl<C: Send + Sync + 'static> RequestResponseHandler<C> {
     /// requests to this peer.
     pub fn remove_peer(&mut self, peer_id: &PeerId) {
         self.peer_handles.remove(peer_id);
+        self.handshaken.remove(peer_id);
+        self.lookup_only.remove(peer_id);
         self.peer_block_knowledge.remove_peer(peer_id);
         // try_send, not an awaited send: this runs on the node's event loop, so
         // it must not block. A full or closed fetcher channel is tolerable --
@@ -369,6 +399,25 @@ impl<C: Send + Sync + 'static> RequestResponseHandler<C> {
         request_sender: &mut impl RequestSender,
     ) -> Result<(), Box<dyn Error>> {
         self.record_peer_knowledge(&peer, &request);
+
+        if matches!(request, Message::Handshake(_)) {
+            self.handshaken.insert(peer);
+            // A peer this node reached only to look up addresses: answer its
+            // handshake so its request completes, but start no sync, so no
+            // share-chain request is in flight when the lookup closes.
+            if self.lookup_only.contains(&peer) {
+                debug!(
+                    "Handshake from lookup-only peer {peer} on connection {connection_id}, not syncing"
+                );
+                if let Err(send_error) = self
+                    .swarm_tx
+                    .try_send(SwarmSend::Response(channel, Message::Ack))
+                {
+                    warn!("Failed to ack the handshake of lookup-only peer {peer}: {send_error}");
+                }
+                return Ok(());
+            }
+        }
 
         let ctx = RequestContext::<C, _> {
             peer,

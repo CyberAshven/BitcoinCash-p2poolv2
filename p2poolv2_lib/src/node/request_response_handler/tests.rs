@@ -1,6 +1,6 @@
 use super::*;
 use crate::node::SwarmSend;
-use crate::node::messages::{GetData, InventoryMessage, Message};
+use crate::node::messages::{GetData, GetShareHeaders, InventoryMessage, Message};
 use crate::node::p2p_message_handlers::receivers::block_receiver::create_block_receiver_channel;
 use crate::node::request_sender::MockRequestSender;
 #[mockall_double::double]
@@ -82,6 +82,8 @@ fn build_test_handler_parts(
         share_transaction_pool: None,
         weak_share_tx: None,
         coinbase_rebuilder: None,
+        handshaken: Default::default(),
+        lookup_only: Default::default(),
     };
     (handler, response_worker_rx)
 }
@@ -443,8 +445,8 @@ async fn test_dispatch_request_calls_service() {
             TestShareBlockBuilder::new().build().header,
             TestShareBlockBuilder::new().build().header,
         ];
-        mock.expect_get_headers_for_locator()
-            .returning(move |_, _, _| Ok(headers.clone()));
+        mock.expect_get_headers_after()
+            .returning(move |_, _, _, _| Ok(headers.clone()));
         mock.expect_get_template_merkle_branches()
             .returning(|_| Ok(Vec::new()));
         mock
@@ -459,7 +461,7 @@ async fn test_dispatch_request_calls_service() {
     let result = handler.dispatch_request(
         peer_id,
         ConnectionId::new_unchecked(1),
-        Message::GetShareHeaders(block_hashes, stop_block_hash),
+        Message::GetShareHeaders(GetShareHeaders::new(block_hashes, stop_block_hash, None)),
         response_tx,
         &mut MockRequestSender::new(),
     );
@@ -680,6 +682,84 @@ async fn test_dispatch_response_records_inventory_knowledge() {
             .peer_block_knowledge()
             .peer_knows_block(&peer_id, &block_hash)
     );
+}
+
+/// A peer this node reaches only through its own lookup has its handshake
+/// acknowledged and nothing more: no sync starts, so nothing is in flight when
+/// the lookup closes, and share-chain traffic goes to it only once the peer
+/// has a connection that is not a lookup.
+#[tokio::test]
+async fn test_a_lookup_only_peer_is_acked_and_not_synced() {
+    let (swarm_tx, mut swarm_rx) = mpsc::channel(32);
+    // No expectations: a sync would read the tip and panic.
+    let mut handler = build_test_handler(ChainStoreHandle::default(), swarm_tx);
+    let peer_id = PeerId::random();
+    handler.add_peer(peer_id);
+    handler.set_lookup_only(peer_id);
+    let (response_tx, _response_rx) = oneshot::channel::<Message>();
+
+    let handshake = Message::Handshake(crate::node::messages::HandshakeData {
+        tip_height: 7,
+        tip_hash: BlockHash::all_zeros(),
+    });
+    handler
+        .dispatch_request(
+            peer_id,
+            ConnectionId::new_unchecked(1),
+            handshake,
+            response_tx,
+            &mut MockRequestSender::new(),
+        )
+        .unwrap();
+
+    assert!(matches!(
+        swarm_rx.try_recv(),
+        Ok(SwarmSend::Response(_, Message::Ack))
+    ));
+    tokio::task::yield_now().await;
+    assert!(swarm_rx.try_recv().is_err(), "no getheaders follows");
+    assert!(!handler.is_share_chain_peer(&peer_id));
+
+    assert!(handler.clear_lookup_only(&peer_id));
+    assert!(handler.is_share_chain_peer(&peer_id), "it sent a handshake");
+    handler.remove_peer(&peer_id);
+    assert!(!handler.is_share_chain_peer(&peer_id));
+}
+
+/// Share-chain traffic waits for the peer's handshake.
+#[tokio::test]
+async fn test_a_peer_is_a_share_chain_peer_once_it_sends_a_handshake() {
+    let (swarm_tx, _swarm_rx) = mpsc::channel(32);
+    let mut chain_store_handle = ChainStoreHandle::default();
+    chain_store_handle.expect_clone().returning(|| {
+        // The peer's tip is ours, so the handshake starts no sync.
+        let mut mock = ChainStoreHandle::default();
+        mock.expect_get_tip_height().returning(|| Ok(Some(7)));
+        mock.expect_get_chain_tip()
+            .returning(|| Ok(BlockHash::all_zeros()));
+        mock
+    });
+    let mut handler = build_test_handler(chain_store_handle, swarm_tx);
+    let peer_id = PeerId::random();
+    handler.add_peer(peer_id);
+    assert!(!handler.is_share_chain_peer(&peer_id));
+
+    let (response_tx, _response_rx) = oneshot::channel::<Message>();
+    let handshake = Message::Handshake(crate::node::messages::HandshakeData {
+        tip_height: 7,
+        tip_hash: BlockHash::all_zeros(),
+    });
+    handler
+        .dispatch_request(
+            peer_id,
+            ConnectionId::new_unchecked(1),
+            handshake,
+            response_tx,
+            &mut MockRequestSender::new(),
+        )
+        .unwrap();
+
+    assert!(handler.is_share_chain_peer(&peer_id));
 }
 
 #[tokio::test]
