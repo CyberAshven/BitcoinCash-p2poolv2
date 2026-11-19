@@ -18,6 +18,10 @@ use std::str::FromStr;
 #[cfg(not(feature = "sim"))]
 use crate::config::DEFAULT_VERSION_MASK;
 #[cfg(not(feature = "sim"))]
+use crate::shares::bch_asert::BCH_POW_LIMIT_BITS;
+#[cfg(not(feature = "sim"))]
+use crate::shares::bch_headers::MinDifficultyMark;
+#[cfg(not(feature = "sim"))]
 use crate::stratum::message_handlers::submit::submit_found_block;
 #[cfg(not(feature = "sim"))]
 use crate::stratum::sv2::mining::MiningChannels;
@@ -2546,6 +2550,69 @@ async fn a_block_whose_provider_connection_is_gone_goes_over_rpc() {
     submit_found_block(&ctx, header, test_coinbase_transaction(1), &job)
         .await
         .unwrap();
+}
+
+/// A provided template switched past its minimum-difficulty mark carries
+/// the limit's nBits, which `SubmitSolution` cannot carry: the provider
+/// would rebuild the block with ASERT's. A block on it goes to the node
+/// over RPC, and nothing goes back to the provider.
+#[cfg(not(feature = "sim"))]
+#[tokio::test]
+async fn a_block_on_a_provided_template_switched_past_its_mark_goes_over_rpc() {
+    let rpc = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(body_partial_json(
+            serde_json::json!({"method": "submitblock"}),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "result": null,
+            "error": null,
+            "id": 0,
+        })))
+        .expect(1)
+        .mount(&rpc)
+        .await;
+    let (ctx, _emissions, _dirs) = test_bch_stratum_context(&rpc.uri()).await;
+    let (solutions, mut queue) = mpsc::channel(1);
+    let mut template: BlockTemplate = serde_json::from_str(REGTEST_TEMPLATE).unwrap();
+    template.provided = Some(ProvidedTemplate {
+        template_id: 12,
+        height: 102,
+        solutions,
+    });
+    let mark = template.curtime;
+    template.bound_by_min_difficulty_mark(MinDifficultyMark::Until(mark));
+    let switched = template
+        .past_min_difficulty_mark(CompactTarget::from_consensus(BCH_POW_LIMIT_BITS))
+        .unwrap();
+    assert!(switched.provided.is_none());
+    let job = JobDetails {
+        block_available: true,
+        blocktemplate: Arc::new(switched),
+        coinbase1: String::new(),
+        coinbase2: String::new(),
+        generation_timestamp: 0,
+        share_commitment: None,
+        coinbase_nsecs: 0,
+        template_merkle_branches: Vec::new(),
+        share_transactions: Arc::from([]),
+        merge_tokens: None,
+        payout_tree: None,
+        weak_shares: Arc::from([]),
+        weak_target: None,
+    };
+    let header = Header {
+        version: Version::from_consensus(0x2000_0000),
+        prev_blockhash: BlockHash::all_zeros(),
+        merkle_root: TxMerkleNode::all_zeros(),
+        time: mark + 1,
+        bits: CompactTarget::from_consensus(BCH_POW_LIMIT_BITS),
+        nonce: 5,
+    };
+    submit_found_block(&ctx, header, test_coinbase_transaction(1), &job)
+        .await
+        .unwrap();
+    assert!(queue.try_recv().is_err(), "nothing goes to the provider");
 }
 
 #[cfg(not(feature = "sim"))]
