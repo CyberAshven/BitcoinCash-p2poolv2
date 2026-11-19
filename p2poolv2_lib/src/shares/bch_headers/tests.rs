@@ -139,6 +139,131 @@ fn the_minimum_difficulty_gap_is_strict() {
     }
 }
 
+/// Real chipnet block 300,000 carries ASERT's nBits within 20 minutes of its
+/// parent: they are marked valid up to the mark, which the block is within.
+#[test]
+fn a_real_chipnet_block_with_asert_bits_is_within_its_mark() {
+    let rules = BchHeaderRules::for_network(BitcoinCashNetwork::Chipnet);
+    let (parent_height, parent_hex, child_hex) = CHIPNET_PAIRS[4];
+    let parent = known(parent_height, parent_hex);
+    let child = header(child_hex);
+    let mark = parent.header.time + 1_200;
+    assert_eq!(
+        rules.min_difficulty_mark(&parent, child.bits),
+        Some(MinDifficultyMark::Until(mark))
+    );
+    assert!(MinDifficultyMark::Until(mark).allows(child.time));
+}
+
+/// Real chipnet block 300,001, dated more than 20 minutes after its parent,
+/// carries the limit's nBits: they are marked valid only after the mark.
+#[test]
+fn a_real_chipnet_minimum_difficulty_block_is_after_its_mark() {
+    let rules = BchHeaderRules::for_network(BitcoinCashNetwork::Chipnet);
+    let (parent_height, parent_hex, child_hex) = CHIPNET_PAIRS[5];
+    let parent = known(parent_height, parent_hex);
+    let child = header(child_hex);
+    assert_eq!(child.bits.to_consensus(), BCH_POW_LIMIT_BITS);
+    let mark = parent.header.time + 1_200;
+    assert_eq!(
+        rules.min_difficulty_mark(&parent, child.bits),
+        Some(MinDifficultyMark::After(mark))
+    );
+    assert!(MinDifficultyMark::After(mark).allows(child.time));
+}
+
+/// On a one-minute chipnet parent the mark is two minutes on. ASERT's nBits
+/// are allowed at the mark and not a second later, the limit's the other
+/// way round, exactly as `required_bits` decides them.
+#[test]
+fn a_one_minute_chipnet_parents_mark_is_two_minutes_on() {
+    let rules = BchHeaderRules::for_network(BitcoinCashNetwork::Chipnet);
+    let times: HashMap<u32, u32> = chipnet_times_around_activation().into_iter().collect();
+    let tick_info = rules.tick_schedule().tick_info(332_455);
+    let parent = KnownBchHeader {
+        height: 332_455,
+        header: linked_headers(
+            BlockHash::all_zeros(),
+            &[(times[&332_455], 0x1a21_8c7e)],
+            0x22,
+        )[0],
+        ticks: tick_info.ticks,
+        next_interval: tick_info.next_interval,
+    };
+    let mark = parent.header.time + 120;
+    let asert = rules.required_bits(&parent, mark).unwrap();
+    let limit = CompactTarget::from_consensus(BCH_POW_LIMIT_BITS);
+    assert_eq!(rules.required_bits(&parent, mark + 1), Some(limit));
+
+    let until = rules.min_difficulty_mark(&parent, asert).unwrap();
+    assert_eq!(until, MinDifficultyMark::Until(mark));
+    assert!(until.allows(mark));
+    assert!(!until.allows(mark + 1));
+
+    let after = rules.min_difficulty_mark(&parent, limit).unwrap();
+    assert_eq!(after, MinDifficultyMark::After(mark));
+    assert!(!after.allows(mark));
+    assert!(after.allows(mark + 1));
+}
+
+/// A job's time moves to the nearest one its nBits allow: back to the mark
+/// for ASERT's, on to the second after it for the limit's.
+#[test]
+fn a_time_moves_to_the_nearest_one_the_mark_allows() {
+    assert_eq!(MinDifficultyMark::Until(1_000).nearest_allowed(990), 990);
+    assert_eq!(
+        MinDifficultyMark::Until(1_000).nearest_allowed(1_005),
+        1_000
+    );
+    assert_eq!(
+        MinDifficultyMark::After(1_000).nearest_allowed(1_000),
+        1_001
+    );
+    assert_eq!(
+        MinDifficultyMark::After(1_000).nearest_allowed(1_010),
+        1_010
+    );
+}
+
+/// Chipnet nBits that are neither ASERT's nor the limit's have no mark.
+#[test]
+fn chipnet_bits_that_are_neither_have_no_mark() {
+    let rules = BchHeaderRules::for_network(BitcoinCashNetwork::Chipnet);
+    let (parent_height, parent_hex, child_hex) = CHIPNET_PAIRS[4];
+    let parent = known(parent_height, parent_hex);
+    let other = CompactTarget::from_consensus(header(child_hex).bits.to_consensus() + 1);
+    assert_eq!(rules.min_difficulty_mark(&parent, other), None);
+}
+
+/// Mainnet has no minimum-difficulty rule, so its nBits have no mark and a
+/// job on it is never bounded.
+#[test]
+fn mainnet_bits_have_no_minimum_difficulty_mark() {
+    let rules = BchHeaderRules::for_network(BitcoinCashNetwork::Mainnet);
+    let (parent_height, parent_hex, child_hex) = MAINNET_PAIRS[4];
+    let parent = known(parent_height, parent_hex);
+    assert_eq!(
+        rules.min_difficulty_mark(&parent, header(child_hex).bits),
+        None
+    );
+}
+
+/// Regtest never retargets, and scalenet's nBits are not checked here: no
+/// mark on either.
+#[test]
+fn regtest_and_scalenet_bits_have_no_minimum_difficulty_mark() {
+    let parent = known(10, MAINNET_PAIRS[0].1);
+    let limit = CompactTarget::from_consensus(BCH_POW_LIMIT_BITS);
+    let regtest = BchHeaderRules::for_network(BitcoinCashNetwork::Regtest);
+    assert_eq!(
+        regtest.min_difficulty_mark(&parent, parent.header.bits),
+        None
+    );
+    assert_eq!(regtest.min_difficulty_mark(&parent, limit), None);
+    let scalenet = BchHeaderRules::for_network(BitcoinCashNetwork::Scalenet);
+    assert_eq!(scalenet.min_difficulty_mark(&parent, limit), None);
+}
+
 /// Mainnet never allows the minimum difficulty, whatever the gap.
 #[test]
 fn mainnet_requires_asert_bits_even_after_a_long_gap() {

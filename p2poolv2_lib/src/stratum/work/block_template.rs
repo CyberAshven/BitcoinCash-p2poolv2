@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
+use crate::shares::bch_headers::MinDifficultyMark;
 use crate::shares::coinbase_proof::MAX_COINBASE_MERKLE_BRANCH_LENGTH;
 use crate::stratum::sv2::ProvidedTemplate;
 use crate::stratum::work::error::WorkError;
@@ -101,6 +102,12 @@ pub struct BlockTemplate<T = TemplateTransaction> {
     /// of a node's JSON template.
     #[serde(skip)]
     pub light: Option<LightJob>,
+    /// Set by P2Pool on a test network whose minimum-difficulty rule ties
+    /// `bits` to the block's time, from the template's known previous block
+    /// ([`Self::bound_by_min_difficulty_mark`]). Never part of a node's JSON
+    /// template; `None` on mainnet.
+    #[serde(skip)]
+    pub min_difficulty_mark: Option<MinDifficultyMark>,
 }
 
 impl TryFrom<&TemplateTransaction> for Transaction {
@@ -131,6 +138,23 @@ impl BlockTemplate {
             .iter()
             .map(Transaction::try_from)
             .collect()
+    }
+
+    /// Bound this template's block times by `mark`: a block on it may then
+    /// carry only the times its `bits` allow ([`Self::allows_ntime`]), and
+    /// `curtime`, the time its jobs carry, moves to the nearest of them,
+    /// never below `mintime`.
+    pub fn bound_by_min_difficulty_mark(&mut self, mark: MinDifficultyMark) {
+        self.curtime = mark.nearest_allowed(self.curtime).max(self.mintime);
+        self.min_difficulty_mark = Some(mark);
+    }
+
+    /// Whether a block on this template may be dated `ntime` with its
+    /// `bits`: always, unless a test network's minimum-difficulty rule bounds
+    /// them ([`Self::bound_by_min_difficulty_mark`]).
+    pub fn allows_ntime(&self, ntime: u32) -> bool {
+        self.min_difficulty_mark
+            .is_none_or(|mark| mark.allows(ntime))
     }
 
     /// Check BCH template data before computing merkle branches or issuing jobs.
@@ -330,6 +354,52 @@ mod tests {
         template.validate_bch().unwrap();
         assert_eq!(template.sizelimit, 32_000_000);
         assert_eq!(template.weightlimit, 0);
+    }
+
+    /// A node's template carries no mark, so it allows any time, as on
+    /// mainnet.
+    #[test]
+    fn a_template_without_a_mark_allows_any_time() {
+        let template: BlockTemplate = serde_json::from_str(BCHN_TEMPLATE).unwrap();
+        assert_eq!(template.min_difficulty_mark, None);
+        assert!(template.allows_ntime(0));
+        assert!(template.allows_ntime(u32::MAX));
+    }
+
+    /// A template with ASERT's bits whose time is past its mark is moved
+    /// back to the mark, which it then allows, and not a second later.
+    #[test]
+    fn a_template_with_asert_bits_is_moved_back_to_its_mark() {
+        let mut template: BlockTemplate = serde_json::from_str(BCHN_TEMPLATE).unwrap();
+        let mark = template.curtime - 5;
+        template.bound_by_min_difficulty_mark(MinDifficultyMark::Until(mark));
+        assert_eq!(template.curtime, mark);
+        assert!(template.allows_ntime(mark));
+        assert!(!template.allows_ntime(mark + 1));
+        template.validate_bch().unwrap();
+    }
+
+    /// A template with the limit's bits whose time is not past its mark is
+    /// moved to the second after it, which it then allows, and not the mark.
+    #[test]
+    fn a_template_with_the_limits_bits_is_moved_past_its_mark() {
+        let mut template: BlockTemplate = serde_json::from_str(BCHN_TEMPLATE).unwrap();
+        let mark = template.curtime;
+        template.bound_by_min_difficulty_mark(MinDifficultyMark::After(mark));
+        assert_eq!(template.curtime, mark + 1);
+        assert!(!template.allows_ntime(mark));
+        assert!(template.allows_ntime(mark + 1));
+    }
+
+    /// A mark below `mintime` cannot move `curtime` below it: no time is
+    /// then allowed, and every share on the template is refused.
+    #[test]
+    fn a_mark_never_moves_curtime_below_mintime() {
+        let mut template: BlockTemplate = serde_json::from_str(BCHN_TEMPLATE).unwrap();
+        let mark = template.mintime - 1;
+        template.bound_by_min_difficulty_mark(MinDifficultyMark::Until(mark));
+        assert_eq!(template.curtime, template.mintime);
+        assert!(!template.allows_ntime(template.curtime));
     }
 
     /// ABLA has no fixed maximum, so a limit past 32 bits must parse and hold.

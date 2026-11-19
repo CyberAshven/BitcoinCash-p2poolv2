@@ -63,22 +63,24 @@
 
 use crate::config::BitcoinCashNetwork;
 use crate::shares::bch_asert::{BCH_BLOCK_SPACING, MEDIAN_TIME_SPAN, TickInfo, TickSchedule};
-use crate::shares::bch_headers::{BchHeaderRules, KnownBchHeader};
+use crate::shares::bch_headers::{BchHeaderRules, KnownBchHeader, MinDifficultyMark};
 #[cfg(test)]
 #[mockall_double::double]
 use crate::shares::chain::chain_store_handle::ChainStoreHandle;
 #[cfg(not(test))]
 use crate::shares::chain::chain_store_handle::ChainStoreHandle;
+use crate::stratum::work::block_template::BlockTemplate;
 use crate::stratum::work::notify::{NotifyCmd, NotifyReceiver, NotifySender};
-use bitcoin::BlockHash;
 use bitcoin::block::Header;
 use bitcoin::hashes::Hash;
+use bitcoin::{BlockHash, CompactTarget};
 use bitcoindrpc::{BitcoindRpcClient, BlockHeaderSummary};
 use std::str::FromStr;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
-use tokio::sync::{Mutex, MutexGuard};
-use tokio::time::{MissedTickBehavior, interval, timeout};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tokio::sync::{Mutex, MutexGuard, mpsc};
+use tokio::time::{Instant, MissedTickBehavior, interval, sleep_until, timeout};
 use tracing::{debug, error, info, warn};
 
 /// How often the feeder asks BCHN for its best block.
@@ -780,6 +782,64 @@ impl BchHeaderFeeder {
             .get_bch_header(hash)
             .map_err(|error| format!("reading header {hash}: {error}"))
     }
+
+    /// Get `template` ready for the notifier: learn its previous block when
+    /// it is not `learned`, which then remembers it, and bound it by its
+    /// minimum-difficulty mark ([`Self::bound_by_min_difficulty`]). Returns
+    /// that bound's refresh delay.
+    async fn prepare_template(
+        &self,
+        learned: &mut Option<BlockHash>,
+        template: &mut Arc<BlockTemplate>,
+    ) -> Option<Duration> {
+        let prev = BlockHash::from_str(&template.previousblockhash).ok()?;
+        if *learned != Some(prev) {
+            match self.learn_from(prev).await {
+                Ok(_) => *learned = Some(prev),
+                Err(error) => warn!("Cannot learn template parent {prev} from the node: {error}"),
+            }
+        }
+        self.bound_by_min_difficulty(prev, template)
+    }
+
+    /// Bound `template`, on `prev`, by the minimum-difficulty mark its
+    /// `bits` belong to on a test network
+    /// ([`BlockTemplate::bound_by_min_difficulty_mark`]), where `prev` is
+    /// known and the rule ties its `bits` to the block's time. Returns how
+    /// long until the node gives the proof-of-work limit's nBits on `prev`
+    /// ([`min_difficulty_refresh_delay`]).
+    fn bound_by_min_difficulty(
+        &self,
+        prev: BlockHash,
+        template: &mut Arc<BlockTemplate>,
+    ) -> Option<Duration> {
+        let rules = self.rules?;
+        let parent = match self.known(&prev) {
+            Ok(parent) => parent?,
+            Err(error) => {
+                warn!("Cannot bound the template's times by its parent: {error}");
+                return None;
+            }
+        };
+        let bits = CompactTarget::from_unprefixed_hex(&template.bits).ok()?;
+        let mark = rules.min_difficulty_mark(&parent, bits)?;
+        Arc::make_mut(template).bound_by_min_difficulty_mark(mark);
+        min_difficulty_refresh_delay(mark, SystemTime::now())
+    }
+}
+
+/// How long from `now` until a second after `mark`, when the node gives the
+/// proof-of-work limit's nBits on the parent: for ASERT's nBits whose mark is
+/// still ahead, `None` otherwise.
+fn min_difficulty_refresh_delay(mark: MinDifficultyMark, now: SystemTime) -> Option<Duration> {
+    let MinDifficultyMark::Until(mark) = mark else {
+        return None;
+    };
+    let refresh_at = UNIX_EPOCH + Duration::from_secs(u64::from(mark) + 1);
+    refresh_at
+        .duration_since(now)
+        .ok()
+        .filter(|delay| !delay.is_zero())
 }
 
 /// Relay block templates from `input` to the notifier on `output`, first
@@ -790,27 +850,51 @@ impl BchHeaderFeeder {
 ///
 /// A template whose previous block cannot be learned is still relayed: the
 /// feeder's next round retries, and holding work back would idle miners.
+///
+/// On a test network the minimum-difficulty rule ties a block's nBits to its
+/// time: ASERT's up to twice the parent's next interval after the parent,
+/// the proof-of-work limit's after that. Each template whose `bits` it ties
+/// is bounded by that mark, so no job on it carries, and no share on it is
+/// taken with, a time the node would refuse as `bad-diffbits`. While the
+/// latest template carries ASERT's `bits` and its mark is ahead, the relay
+/// asks for a new template through `template_refresh_tx` a second after the
+/// mark, when the node gives the limit's: miners move to the easier work at
+/// once instead of at the next poll. Mainnet has no such rule.
 pub async fn relay_templates_learning_prevs(
     client: BitcoindRpcClient,
     store: ChainStoreHandle,
     network: Option<BitcoinCashNetwork>,
     mut input: NotifyReceiver,
     output: NotifySender,
+    template_refresh_tx: Option<mpsc::Sender<()>>,
 ) {
     let feeder = BchHeaderFeeder::new(client, store, network);
     let mut learned: Option<BlockHash> = None;
-    while let Some(command) = input.recv().await {
-        if let NotifyCmd::SendToAll { template } = &command
-            && let Ok(prev) = BlockHash::from_str(&template.previousblockhash)
-            && learned != Some(prev)
-        {
-            match feeder.learn_from(prev).await {
-                Ok(_) => learned = Some(prev),
-                Err(error) => warn!("Cannot learn template parent {prev} from the node: {error}"),
+    let mut refresh_at: Option<Instant> = None;
+    let mut relaying = true;
+    while relaying {
+        tokio::select! {
+            command = input.recv() => {
+                relaying = match command {
+                    Some(NotifyCmd::SendToAll { mut template }) => {
+                        let refresh_in = feeder.prepare_template(&mut learned, &mut template).await;
+                        refresh_at = template_refresh_tx
+                            .as_ref()
+                            .and(refresh_in)
+                            .map(|delay| Instant::now() + delay);
+                        output.send(NotifyCmd::SendToAll { template }).await.is_ok()
+                    }
+                    Some(command) => output.send(command).await.is_ok(),
+                    None => false,
+                };
             }
-        }
-        if output.send(command).await.is_err() {
-            break;
+            () = sleep_until(refresh_at.unwrap_or_else(Instant::now)), if refresh_at.is_some() => {
+                refresh_at = None;
+                if let Some(template_refresh_tx) = &template_refresh_tx {
+                    debug!("Past the minimum-difficulty mark; asking for a new template");
+                    let _ = template_refresh_tx.try_send(());
+                }
+            }
         }
     }
 }

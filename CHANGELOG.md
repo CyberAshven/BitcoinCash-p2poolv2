@@ -363,6 +363,9 @@ format and genesis re-pin.
 
 ### Fixed
 
+- Chipnet blocks are no longer lost as `bad-diffbits` at the
+  minimum-difficulty mark: a share's time must suit its job's nBits, and a
+  new template is fetched a second after the mark (#155).
 - An SV1 miner's first job on a new previous block is always sent with
   `clean_jobs`, even when a second template replaced the clean one (#153).
 - The sim swarm's nodes connect again: since #142 they all read one node key
