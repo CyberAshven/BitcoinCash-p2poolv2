@@ -1279,6 +1279,120 @@ mod tests {
         assert!(node_a.nostr_announcer.is_none());
     }
 
+    /// End to end on loopback, one connection allowed per peer: B dials A,
+    /// dials A again, and B's connection limits refuse the second connection.
+    /// Every request B then sends A is answered. With request-response asked
+    /// before the limits, it kept the refused connection, and each request it
+    /// routed there got no answer, no timeout and no failure (swarm run
+    /// 44468164275, where restarted nodes lost most of their requests so).
+    #[tokio::test]
+    async fn every_request_is_answered_after_the_limits_refuse_a_connection() {
+        use crate::node::messages::{GetData, Message};
+        use libp2p::request_response;
+        use libp2p::swarm::dial_opts::{DialOpts, PeerCondition};
+        use std::collections::HashSet;
+
+        const REQUESTS: usize = 20;
+        let listener_a = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address_a = format!(
+            "/ip4/127.0.0.1/tcp/{}",
+            listener_a.local_addr().unwrap().port()
+        );
+        drop(listener_a);
+        let mut config_a = build_test_config(&address_a, None);
+        config_a.network.max_established_per_peer = 1;
+        let mut node_a = build_test_node(config_a);
+        let mut config_b = build_test_config("/ip4/127.0.0.1/tcp/0", None);
+        config_b.network.max_established_per_peer = 1;
+        let mut node_b = build_test_node(config_b);
+        let peer_a = *node_a.swarm.local_peer_id();
+        let address_a: Multiaddr = address_a.parse().unwrap();
+        let dial_a = || {
+            DialOpts::peer_id(peer_a)
+                .addresses(vec![address_a.clone()])
+                .condition(PeerCondition::Always)
+                .allocate_new_port()
+                .build()
+        };
+
+        let mut second_dial_refused = false;
+        let mut pending: HashSet<request_response::OutboundRequestId> = HashSet::new();
+        let mut answered = 0;
+        let outcome = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                tokio::select! {
+                    event = node_a.swarm.select_next_some() => match event {
+                        SwarmEvent::NewListenAddr { .. } => node_b.swarm.dial(dial_a()).unwrap(),
+                        SwarmEvent::Behaviour(P2PoolBehaviourEvent::RequestResponse(
+                            request_response::Event::Message {
+                                message: request_response::Message::Request { channel, .. },
+                                ..
+                            },
+                        )) => {
+                            let _ = node_a
+                                .swarm
+                                .behaviour_mut()
+                                .request_response
+                                .send_response(channel, Message::Ack);
+                        }
+                        _ => {}
+                    },
+                    event = node_b.swarm.select_next_some() => match event {
+                        SwarmEvent::ConnectionEstablished { peer_id, .. } if peer_id == peer_a => {
+                            node_b.swarm.dial(dial_a()).unwrap();
+                        }
+                        SwarmEvent::OutgoingConnectionError {
+                            error: DialError::Denied { .. },
+                            ..
+                        } => {
+                            second_dial_refused = true;
+                            for _ in 0..REQUESTS {
+                                let request = Message::GetData(GetData::Block(BlockHash::all_zeros()));
+                                pending.insert(
+                                    node_b
+                                        .swarm
+                                        .behaviour_mut()
+                                        .request_response
+                                        .send_request(&peer_a, request),
+                                );
+                            }
+                        }
+                        SwarmEvent::Behaviour(P2PoolBehaviourEvent::RequestResponse(
+                            request_response::Event::Message {
+                                message: request_response::Message::Response { request_id, .. },
+                                ..
+                            },
+                        )) => {
+                            pending.remove(&request_id);
+                            answered += 1;
+                        }
+                        SwarmEvent::Behaviour(P2PoolBehaviourEvent::RequestResponse(
+                            request_response::Event::OutboundFailure { request_id, .. },
+                        )) => {
+                            pending.remove(&request_id);
+                        }
+                        _ => {}
+                    },
+                }
+                if second_dial_refused && pending.is_empty() {
+                    return;
+                }
+            }
+        })
+        .await;
+
+        assert!(
+            second_dial_refused,
+            "B's limits refuse the second connection"
+        );
+        assert!(
+            outcome.is_ok(),
+            "{} of {REQUESTS} requests got no answer, timeout or failure",
+            pending.len()
+        );
+        assert_eq!(answered, REQUESTS, "every request is answered");
+    }
+
     /// A node saves the peers it knows beside its store, and a node started
     /// again on that store knows them; an ephemeral node writes no book.
     #[tokio::test]
