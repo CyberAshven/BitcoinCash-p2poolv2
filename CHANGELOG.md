@@ -97,6 +97,9 @@ format and genesis re-pin.
 
 ### Added
 
+- `/metrics` counts the connections the connection limits refused,
+  incoming and outgoing (`p2p_connections_refused_total`); the node had
+  ignored refused incoming connections.
 - The dashboard, server-rendered and WASM, gains a Sharechain chart tab
   (served as JSON at `/sharechain`), income tiles and weak share detail on
   the miner pages. The miner report shows each share's weak count; payouts
