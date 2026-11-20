@@ -32,7 +32,6 @@ pub mod messages;
 pub mod p2p_message_handlers;
 
 use crate::accounting::payout::simple_pplns::SimplePplnsShare;
-use crate::config::Chain;
 use crate::monitoring_events::{MonitoringEvent, MonitoringEventSender, PeerResponse, PeerStatus};
 use crate::node::messages::Message;
 use crate::node::p2p_health::P2pHealth;
@@ -377,12 +376,19 @@ impl Node {
         let (swarm_tx, swarm_rx) = mpsc::channel(100);
 
         let dns_seeds = if config.network.dns_seed {
-            dns_seeds::dns_seeds_for_chain(config.stratum.chain, config.stratum.network)
+            dns_seeds::dns_seeds_for_chain(
+                config.stratum.chain,
+                config.stratum.network,
+                config.stratum.bitcoin_cash_network,
+                &config.network.dns_seed_hosts,
+            )
         } else {
             None
         };
-        if config.stratum.chain == Chain::BitcoinCash {
-            info!("DNS seeds are off on Bitcoin Cash, which has none yet; dialing dial_peers only");
+        if dns_seeds.is_none() {
+            info!(
+                "No DNS seeds for this network; finding peers through dial_peers, Nostr and saved peers"
+            );
         }
 
         let request_response_handler = RequestResponseHandler::new(
@@ -479,10 +485,10 @@ impl Node {
     /// dns_seeds::dns_seed_delay.
     fn query_dns_seeds_if_isolated(&self) {
         let connected_peer_count = self.connection_tracker.connected_peer_count();
-        match self.dns_seeds {
+        match &self.dns_seeds {
             Some(seeds) if connected_peer_count == 0 => {
                 info!("No peers connected, querying DNS seeds");
-                dns_seeds::spawn_dns_seed_dials(seeds, self.swarm_tx.clone());
+                dns_seeds::spawn_dns_seed_dials(seeds.clone(), self.swarm_tx.clone());
             }
             Some(_) => {
                 info!("Skipping DNS seeds, {connected_peer_count} peers already connected");

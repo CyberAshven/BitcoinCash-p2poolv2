@@ -12,11 +12,13 @@
 //! the noise handshake with the network protocol prologue still decides
 //! whether a peer is on our network.
 //!
-//! The seeds are Bitcoin P2Poolv2 nodes. Bitcoin Cash has none yet, so a
-//! Bitcoin Cash node never queries them (`dns_seeds_for_chain`).
+//! Bitcoin's seeds are picked by Bitcoin network and Bitcoin Cash's by
+//! Bitcoin Cash network, so a Bitcoin Cash node never gets Bitcoin's
+//! (`dns_seeds_for_chain`). `network.dns_seed_hosts` replaces the built-in
+//! list, so a new seed can be used before a release names it.
 
 use super::{SwarmSend, address_filter};
-use crate::config::Chain;
+use crate::config::{BitcoinCashNetwork, Chain};
 use libp2p::Multiaddr;
 use libp2p::multiaddr::Protocol;
 use std::collections::HashSet;
@@ -44,11 +46,37 @@ const TESTNET4_P2P_PORT: u16 = 46884;
 /// Seed hostnames for testnet4.
 const TESTNET4_SEED_HOSTNAMES: &[&str] = &["seed.testnet4.p2poolv2.org"];
 
+/// The port of every sample config's `listen_address`. Bitcoin Cash nodes
+/// listen on it on every network, and so do Bitcoin nodes on a network
+/// without a seed port of its own.
+const DEFAULT_P2P_PORT: u16 = 6884;
+
+/// Seed hostnames for Bitcoin Cash mainnet. Each is run by a different
+/// operator; its A/AAAA records list long-running mainnet nodes on
+/// `DEFAULT_P2P_PORT`.
+const BITCOIN_CASH_MAINNET_SEED_HOSTNAMES: &[&str] = &[];
+
+/// Seed hostnames for Bitcoin Cash chipnet, as for mainnet.
+const BITCOIN_CASH_CHIPNET_SEED_HOSTNAMES: &[&str] = &[];
+
 /// The DNS seeds for one network and the port their nodes listen on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DnsSeeds {
-    pub(crate) hostnames: &'static [&'static str],
+    pub(crate) hostnames: Vec<String>,
     pub(crate) port: u16,
+}
+
+impl DnsSeeds {
+    /// The seeds `hostnames` on `port`, or None when there are none.
+    fn new<S: AsRef<str>>(hostnames: &[S], port: u16) -> Option<Self> {
+        (!hostnames.is_empty()).then(|| Self {
+            hostnames: hostnames
+                .iter()
+                .map(|host| host.as_ref().to_string())
+                .collect(),
+            port,
+        })
+    }
 }
 
 /// Returns the built-in DNS seeds for a bitcoin network, or None when the
@@ -59,29 +87,49 @@ pub(crate) struct DnsSeeds {
 /// dns_seed to false in their configs.
 pub(crate) fn dns_seeds_for_network(network: bitcoin::Network) -> Option<DnsSeeds> {
     match network {
-        bitcoin::Network::Testnet4 => Some(DnsSeeds {
-            hostnames: TESTNET4_SEED_HOSTNAMES,
-            port: TESTNET4_P2P_PORT,
-        }),
+        bitcoin::Network::Testnet4 => DnsSeeds::new(TESTNET4_SEED_HOSTNAMES, TESTNET4_P2P_PORT),
         _ => None,
     }
 }
 
-/// Returns the built-in DNS seeds a node on `chain` may query, or None.
-///
-/// Bitcoin looks them up by network (`dns_seeds_for_network`). Bitcoin Cash
-/// has no DNS seeds yet and always gets None. Every built-in seed lists
-/// Bitcoin P2Poolv2 nodes, and a Bitcoin Cash node's `stratum.network` is a
-/// Bitcoin network (`BitcoinCashNetwork::legacy_network`: mainnet is
-/// `Bitcoin`, chipnet `Testnet`), so a lookup by network alone would have a
-/// Bitcoin Cash node dial Bitcoin nodes as soon as seeds exist for those
-/// networks. Config loading also turns `dns_seed` off on Bitcoin Cash; this
-/// keeps the rule for a config built any other way.
-pub(crate) fn dns_seeds_for_chain(chain: Chain, network: bitcoin::Network) -> Option<DnsSeeds> {
-    match chain {
-        Chain::Bitcoin => dns_seeds_for_network(network),
-        Chain::BitcoinCash => None,
+/// Returns the built-in DNS seeds for a Bitcoin Cash network, or None when
+/// the network has none.
+pub(crate) fn dns_seeds_for_bitcoin_cash(network: BitcoinCashNetwork) -> Option<DnsSeeds> {
+    match network {
+        BitcoinCashNetwork::Mainnet => {
+            DnsSeeds::new(BITCOIN_CASH_MAINNET_SEED_HOSTNAMES, DEFAULT_P2P_PORT)
+        }
+        BitcoinCashNetwork::Chipnet => {
+            DnsSeeds::new(BITCOIN_CASH_CHIPNET_SEED_HOSTNAMES, DEFAULT_P2P_PORT)
+        }
+        _ => None,
     }
+}
+
+/// Returns the DNS seeds a node on `chain` may query, or None.
+///
+/// `configured` (`network.dns_seed_hosts`), when not empty, replaces the
+/// built-in hostnames; their nodes listen on the network's seed port.
+/// Otherwise Bitcoin looks the seeds up by `network` and Bitcoin Cash by
+/// `bitcoin_cash_network`. A Bitcoin Cash node's `stratum.network` is a
+/// Bitcoin network (`BitcoinCashNetwork::legacy_network`: mainnet is
+/// `Bitcoin`, chipnet `Testnet`), so a lookup by that field would hand it
+/// Bitcoin P2Poolv2 nodes.
+pub(crate) fn dns_seeds_for_chain(
+    chain: Chain,
+    network: bitcoin::Network,
+    bitcoin_cash_network: Option<BitcoinCashNetwork>,
+    configured: &[String],
+) -> Option<DnsSeeds> {
+    let built_in = match chain {
+        Chain::Bitcoin => dns_seeds_for_network(network),
+        Chain::BitcoinCash => bitcoin_cash_network.and_then(dns_seeds_for_bitcoin_cash),
+    };
+    if configured.is_empty() {
+        return built_in;
+    }
+    let port = built_in.map_or(DEFAULT_P2P_PORT, |seeds| seeds.port);
+    DnsSeeds::new(configured, port)
 }
 
 /// How long to wait before querying DNS seeds. Without dial_peers the seeds
@@ -119,7 +167,7 @@ pub(crate) fn spawn_dns_seed_dials<C: Send + 'static>(
 /// one bad seed does not stop the others.
 pub(crate) async fn resolve_dns_seeds(seeds: DnsSeeds) -> HashSet<Multiaddr> {
     let mut dial_addresses = HashSet::with_capacity(seeds.hostnames.len() * MAX_ADDRESSES_PER_SEED);
-    for hostname in seeds.hostnames {
+    for hostname in &seeds.hostnames {
         dial_addresses.extend(resolve_dns_seed(hostname, seeds.port).await);
     }
     dial_addresses
@@ -251,45 +299,86 @@ mod tests {
     #[test]
     fn dns_seeds_for_chain_bitcoin_testnet4_has_the_network_seeds() {
         assert_eq!(
-            dns_seeds_for_chain(Chain::Bitcoin, bitcoin::Network::Testnet4),
+            dns_seeds_for_chain(Chain::Bitcoin, bitcoin::Network::Testnet4, None, &[]),
             dns_seeds_for_network(bitcoin::Network::Testnet4)
         );
-        assert!(dns_seeds_for_chain(Chain::Bitcoin, bitcoin::Network::Testnet4).is_some());
+        assert!(
+            dns_seeds_for_chain(Chain::Bitcoin, bitcoin::Network::Testnet4, None, &[]).is_some()
+        );
     }
 
     /// Testnet4 is the network with Bitcoin seeds: a Bitcoin Cash node must
-    /// not get them even there.
+    /// not get them even with `stratum.network` set to it.
     #[test]
-    fn dns_seeds_for_chain_bitcoin_cash_on_testnet4_is_none() {
+    fn a_bitcoin_cash_node_never_gets_bitcoin_seeds() {
+        for bitcoin_cash_network in [
+            None,
+            Some(BitcoinCashNetwork::Mainnet),
+            Some(BitcoinCashNetwork::Chipnet),
+            Some(BitcoinCashNetwork::Regtest),
+        ] {
+            assert_eq!(
+                dns_seeds_for_chain(
+                    Chain::BitcoinCash,
+                    bitcoin::Network::Testnet4,
+                    bitcoin_cash_network,
+                    &[]
+                ),
+                bitcoin_cash_network.and_then(dns_seeds_for_bitcoin_cash)
+            );
+        }
+    }
+
+    /// Mainnet and chipnet have seed lists, empty until operators run seeds;
+    /// regtest and scalenet never have any.
+    #[test]
+    fn bitcoin_cash_seeds_are_picked_by_bitcoin_cash_network() {
         assert_eq!(
-            dns_seeds_for_chain(Chain::BitcoinCash, bitcoin::Network::Testnet4),
+            dns_seeds_for_bitcoin_cash(BitcoinCashNetwork::Mainnet),
+            DnsSeeds::new(BITCOIN_CASH_MAINNET_SEED_HOSTNAMES, DEFAULT_P2P_PORT)
+        );
+        assert_eq!(
+            dns_seeds_for_bitcoin_cash(BitcoinCashNetwork::Chipnet),
+            DnsSeeds::new(BITCOIN_CASH_CHIPNET_SEED_HOSTNAMES, DEFAULT_P2P_PORT)
+        );
+        assert_eq!(
+            dns_seeds_for_bitcoin_cash(BitcoinCashNetwork::Regtest),
+            None
+        );
+        assert_eq!(
+            dns_seeds_for_bitcoin_cash(BitcoinCashNetwork::Scalenet),
             None
         );
     }
 
-    /// Bitcoin Cash mainnet runs with `stratum.network` `Bitcoin`.
+    /// `dns_seed_hosts` replaces the built-in list, on the network's seed
+    /// port.
     #[test]
-    fn dns_seeds_for_chain_bitcoin_cash_mainnet_is_none() {
+    fn configured_seed_hosts_replace_the_built_in_ones() {
+        let configured = vec!["seed.example.org".to_string()];
         assert_eq!(
-            dns_seeds_for_chain(Chain::BitcoinCash, bitcoin::Network::Bitcoin),
-            None
+            dns_seeds_for_chain(
+                Chain::BitcoinCash,
+                bitcoin::Network::Testnet,
+                Some(BitcoinCashNetwork::Chipnet),
+                &configured
+            ),
+            Some(DnsSeeds {
+                hostnames: configured.clone(),
+                port: DEFAULT_P2P_PORT,
+            })
         );
-    }
-
-    /// Bitcoin Cash chipnet runs with `stratum.network` `Testnet`.
-    #[test]
-    fn dns_seeds_for_chain_bitcoin_cash_chipnet_is_none() {
         assert_eq!(
-            dns_seeds_for_chain(Chain::BitcoinCash, bitcoin::Network::Testnet),
-            None
-        );
-    }
-
-    #[test]
-    fn dns_seeds_for_chain_bitcoin_cash_regtest_is_none() {
-        assert_eq!(
-            dns_seeds_for_chain(Chain::BitcoinCash, bitcoin::Network::Regtest),
-            None
+            dns_seeds_for_chain(
+                Chain::Bitcoin,
+                bitcoin::Network::Testnet4,
+                None,
+                &configured
+            ),
+            Some(DnsSeeds {
+                hostnames: configured,
+                port: TESTNET4_P2P_PORT,
+            })
         );
     }
 }
