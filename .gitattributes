@@ -17,3 +17,6 @@ website/donate-*.svg text eol=lf
 
 # Generated CashAssembly is compared byte for byte with the Rust assembler.
 p2poolv2_photon_payout/*.cash text eol=lf
+
+# The supply-chain scanner runs under bash on every OS, Git Bash included.
+.agents/skills/**/*.sh text eol=lf
