@@ -97,6 +97,10 @@ format and genesis re-pin.
 
 ### Added
 
+- Onion peers: with `[network] tor_proxy`, the node dials
+  `/onion3/<address>:<port>` peers through a Tor SOCKS5 proxy, as Bitcoin
+  Cash Node's `-onion` does, and learns onion addresses from peers. Without
+  it, onion addresses are ignored.
 - The dashboard, server-rendered and WASM, gains a Sharechain chart tab
   (served as JSON at `/sharechain`), income tiles and weak share detail on
   the miner pages. The miner report shows each share's weak count; payouts

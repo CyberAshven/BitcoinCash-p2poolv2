@@ -1389,6 +1389,12 @@ pub struct NetworkConfig {
     // (`Config::with_bitcoin_cash_dns_seed_off`).
     #[serde(default = "default_dns_seed")]
     pub dns_seed: bool,
+    /// A Tor SOCKS5 proxy, `host:port` (Tor's default is `127.0.0.1:9050`),
+    /// through which the node dials `/onion3` peers, as Bitcoin Cash Node's
+    /// `-onion` does. Unset, the node neither dials nor learns onion
+    /// addresses. Other addresses are dialed directly either way.
+    #[serde(default)]
+    pub tor_proxy: Option<String>,
     /// File holding this node's libp2p identity, whose public key is its
     /// peer ID. Created on the first start and read on every start after,
     /// so peers, saved peer lists and announcements keep finding the node
@@ -1519,6 +1525,7 @@ impl Default for NetworkConfig {
             blocked_ips: vec![],
             external_address: None,
             dns_seed: true,
+            tor_proxy: None,
             node_key_path: None,
             ephemeral_node_key: false,
             nostr_relays: default_nostr_relays(),

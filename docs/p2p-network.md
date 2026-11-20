@@ -114,6 +114,23 @@ store sits in the same directory stops at start instead of taking the same
 peer ID, which would keep the two from ever connecting. Give each node its
 own directory.
 
+### Onion peers
+
+With `[network] tor_proxy` set to a Tor daemon's SOCKS5 port (Tor's default
+is `127.0.0.1:9050`), the node dials `/onion3/<address>:<port>` peers through
+it, as Bitcoin Cash Node's `-onion` does (`node/onion.rs`). The onion name
+goes to the proxy unresolved. Every other address is dialed directly, as
+before. An onion address can be a `dial_peers` entry; one a peer reports
+through Identify enters Kademlia and the target's book only on a node with a
+`tor_proxy`, so a node without Tor never tries one. An onion address's
+network group is the first 4 bits of its key, as in Bitcoin Cash Node.
+
+To be reachable as an onion service today, point a torrc
+`HiddenServicePort 6884 127.0.0.1:6884` at the node and set
+`external_address` to the service's `/onion3/<address>:6884`. Creating the
+service through Tor's control port, onion-only mode and onion announcements
+on Nostr come next.
+
 ### Finding peers through Nostr
 
 Reachable nodes announce themselves on public Nostr relays, and a node short

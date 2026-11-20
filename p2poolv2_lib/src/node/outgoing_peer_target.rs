@@ -176,6 +176,9 @@ pub(crate) struct OutgoingPeerTarget {
     lookup_settle: Duration,
     /// Dials started toward the target since start, for P2P health metrics.
     dials_attempted_total: u64,
+    /// Whether the node dials through Tor (`tor_proxy`), so onion addresses
+    /// are worth keeping and dialing.
+    onion_reachable: bool,
 }
 
 impl OutgoingPeerTarget {
@@ -219,6 +222,7 @@ impl OutgoingPeerTarget {
             closing_lookups: HashSet::new(),
             lookup_settle: Duration::from_secs(LOOKUP_SETTLE_SECS),
             dials_attempted_total: 0,
+            onion_reachable: config.tor_proxy.is_some(),
         }
     }
 
@@ -230,6 +234,11 @@ impl OutgoingPeerTarget {
     /// False when `target_outgoing_peers` is 0, which turns the target off.
     pub(crate) fn has_target(&self) -> bool {
         self.target > 0
+    }
+
+    /// Whether the node dials through Tor, so onion addresses are reachable.
+    pub(crate) fn onion_reachable(&self) -> bool {
+        self.onion_reachable
     }
 
     /// Peers with at least one established outgoing connection, lookups
@@ -268,7 +277,7 @@ impl OutgoingPeerTarget {
         peer_id: PeerId,
         addresses: impl IntoIterator<Item = &'a Multiaddr>,
     ) {
-        let dialable = dialable_addresses(addresses);
+        let dialable = dialable_addresses(addresses, self.onion_reachable);
         if dialable.is_empty() || self.dial_peer_ids.contains(&peer_id) {
             return;
         }
@@ -635,7 +644,7 @@ impl OutgoingPeerTarget {
                 .iter()
                 .filter_map(|address| address.parse().ok())
                 .collect();
-            let addresses = dialable_addresses(&parsed);
+            let addresses = dialable_addresses(&parsed, self.onion_reachable);
             if addresses.is_empty() || self.dial_peer_ids.contains(&peer_id) {
                 continue;
             }
@@ -686,13 +695,17 @@ fn backoff_delay(failures: u32) -> Duration {
 }
 
 /// The addresses the target may dial, without `/p2p`, de-duplicated and at
-/// most MAX_ADDRESSES_PER_PEER of them.
-fn dialable_addresses<'a>(addresses: impl IntoIterator<Item = &'a Multiaddr>) -> Vec<Multiaddr> {
+/// most MAX_ADDRESSES_PER_PEER of them. Onion addresses count only when the
+/// node dials through Tor (`onion`).
+fn dialable_addresses<'a>(
+    addresses: impl IntoIterator<Item = &'a Multiaddr>,
+    onion: bool,
+) -> Vec<Multiaddr> {
     let mut dialable = Vec::with_capacity(MAX_ADDRESSES_PER_PEER);
     for address in addresses {
         let address = without_p2p_suffix(address.clone());
         if dialable.len() < MAX_ADDRESSES_PER_PEER
-            && is_dialable(&address)
+            && is_dialable(&address, onion)
             && !dialable.contains(&address)
         {
             dialable.push(address);
@@ -702,18 +715,16 @@ fn dialable_addresses<'a>(addresses: impl IntoIterator<Item = &'a Multiaddr>) ->
 }
 
 /// A globally routable IPv4 or IPv6 address followed by a TCP port and
-/// nothing else: what the node's TCP transport dials.
-fn is_dialable(address: &Multiaddr) -> bool {
+/// nothing else, what the node's TCP transport dials; or, when the node dials
+/// through Tor (`onion`), a v3 onion address alone.
+fn is_dialable(address: &Multiaddr, onion: bool) -> bool {
     let mut protocols = address.iter();
-    let ip_then_tcp = matches!(
-        (protocols.next(), protocols.next(), protocols.next()),
-        (
-            Some(Protocol::Ip4(_) | Protocol::Ip6(_)),
-            Some(Protocol::Tcp(port)),
-            None
-        ) if port > 0
-    );
-    ip_then_tcp && network_group(address).is_some()
+    let dialable_form = match (protocols.next(), protocols.next(), protocols.next()) {
+        (Some(Protocol::Ip4(_) | Protocol::Ip6(_)), Some(Protocol::Tcp(port)), None) => port > 0,
+        (Some(Protocol::Onion3(onion3)), None, None) => onion && onion3.port() > 0,
+        _ => false,
+    };
+    dialable_form && network_group(address).is_some()
 }
 
 #[cfg(test)]
@@ -1085,6 +1096,35 @@ mod tests {
             dial.map(|dial| dial.address),
             Some("/ip4/1.2.3.4/tcp/6884".parse().unwrap())
         );
+    }
+
+    /// An onion address is learned and dialed only by a node with a Tor
+    /// proxy, and holds an onion network group.
+    #[tokio::test(start_paused = true)]
+    async fn test_learns_onion_addresses_only_with_tor() {
+        let onion: Multiaddr =
+            "/onion3/2gzyxa5ihm7nsggfxnu52rck2vv4rvmdlkiu3zzui5du4xyclen53wid:6884"
+                .parse()
+                .unwrap();
+        let peer = PeerId::random();
+
+        let mut without_tor =
+            OutgoingPeerTarget::new(&NetworkConfig::default(), BlockedIps::default());
+        without_tor.learn_addresses(peer, [&onion]);
+        assert!(!without_tor.knows(&peer));
+
+        let config = NetworkConfig {
+            tor_proxy: Some("127.0.0.1:9050".to_string()),
+            ..NetworkConfig::default()
+        };
+        let mut with_tor = OutgoingPeerTarget::new(&config, BlockedIps::default());
+        with_tor.learn_addresses(peer, [&onion]);
+        let dial = with_tor.next_dial(OutgoingCounts::default(), |_| false);
+        assert_eq!(dial.map(|dial| dial.address), Some(onion.clone()));
+        assert!(matches!(
+            network_group(&onion),
+            Some(NetworkGroup::Onion(_))
+        ));
     }
 
     #[tokio::test(start_paused = true)]
