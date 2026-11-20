@@ -30,9 +30,14 @@
 //! most [`MAX_NOSTR_DIALS`] of the newest peers. Announced addresses are only
 //! dial candidates: the noise handshake with the network protocol prologue
 //! decides whether a peer is on our network, as for DNS seeds.
+//!
+//! A node that opens no clearnet connection of its own (`proxy_clearnet`, or
+//! an onion-only `onlynet`) reaches its relays through `tor_proxy`, the
+//! relay's name unresolved, so neither a relay nor a resolver sees its IP.
 
 use super::SwarmSend;
 use super::address_filter;
+use crate::stratum::sv2::socks5;
 use bitcoin::hashes::{Hash, sha256};
 use bitcoin::secp256k1::{self, Keypair, Message, Secp256k1, SecretKey, XOnlyPublicKey};
 use futures::{SinkExt, StreamExt, future::join_all};
@@ -45,6 +50,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
 use tokio::time::timeout;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::http::Uri;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tracing::{debug, info, warn};
 
@@ -335,7 +342,9 @@ fn address_peer(address: &Multiaddr) -> Option<PeerId> {
 }
 
 /// The addresses of a valid announcement that a node may dial: IPv4 or IPv6
-/// TCP addresses ending in one peer ID, which `accept` allows.
+/// TCP addresses, and onion addresses, ending in one peer ID, which `accept`
+/// allows. A node lets onion addresses through only when it dials through
+/// Tor (`NostrSeeds::accepts`).
 pub(crate) fn dialable_addresses(
     event: &Event,
     accept: impl Fn(&Multiaddr) -> bool,
@@ -347,21 +356,34 @@ pub(crate) fn dialable_addresses(
         .filter_map(|tag| tag.get(1)?.parse::<Multiaddr>().ok())
         .take(MAX_ADDRESSES_PER_EVENT)
         .filter(|address| {
-            matches!(
+            let ip_with_tcp = matches!(
                 address.iter().next(),
                 Some(Protocol::Ip4(_) | Protocol::Ip6(_))
             ) && address
                 .iter()
-                .any(|protocol| matches!(protocol, Protocol::Tcp(_)))
-                && accept(address)
+                .any(|protocol| matches!(protocol, Protocol::Tcp(_)));
+            (ip_with_tcp || is_onion_with_peer(address)) && accept(address)
         })
         .filter_map(|address| Some((address_peer(&address)?, address)))
         .collect()
 }
 
-/// A relay's WebSocket connection, with a cap on what it may send.
+/// Whether `address` is an onion address followed by a peer ID and nothing
+/// else, as an onion node announces itself.
+fn is_onion_with_peer(address: &Multiaddr) -> bool {
+    let mut protocols = address.iter();
+    matches!(
+        (protocols.next(), protocols.next(), protocols.next()),
+        (Some(Protocol::Onion3(_)), Some(Protocol::P2p(_)), None)
+    )
+}
+
+/// A relay's WebSocket connection, with a cap on what it may send. With a
+/// `proxy`, the connection goes through that SOCKS5 proxy, the relay's name
+/// unresolved, and TLS and the WebSocket handshake run over it.
 async fn connect(
     relay: &str,
+    proxy: Option<&str>,
 ) -> Result<
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
     String,
@@ -370,21 +392,50 @@ async fn connect(
         .max_message_size(Some(MAX_RELAY_MESSAGE_BYTES))
         .max_frame_size(Some(MAX_RELAY_MESSAGE_BYTES));
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-    let (socket, _) = tokio_tungstenite::connect_async_with_config(relay, Some(config), true)
-        .await
-        .map_err(|error| format!("{relay}: {error}"))?;
+    let (socket, _) = match proxy {
+        None => tokio_tungstenite::connect_async_with_config(relay, Some(config), true).await,
+        Some(proxy) => {
+            let request = relay
+                .into_client_request()
+                .map_err(|error| format!("{relay}: {error}"))?;
+            let stream = socks5::connect(proxy, &relay_host_port(relay, request.uri())?)
+                .await
+                .map_err(|error| format!("{relay}: {error}"))?;
+            let _ = stream.set_nodelay(true);
+            tokio_tungstenite::client_async_tls_with_config(request, stream, Some(config), None)
+                .await
+        }
+    }
+    .map_err(|error| format!("{relay}: {error}"))?;
     Ok(socket)
 }
 
+/// The `HOST:PORT` a relay's URL names, for the SOCKS5 proxy: its port, or
+/// 443 for `wss` and 80 for `ws`. An IPv6 host keeps its brackets.
+fn relay_host_port(relay: &str, uri: &Uri) -> Result<String, String> {
+    let host = uri.host().ok_or_else(|| format!("{relay}: no host name"))?;
+    let port = uri
+        .port_u16()
+        .or_else(|| match uri.scheme_str() {
+            Some("wss") => Some(443),
+            Some("ws") => Some(80),
+            _ => None,
+        })
+        .ok_or_else(|| format!("{relay}: not a ws:// or wss:// URL"))?;
+    Ok(format!("{host}:{port}"))
+}
+
 /// The announcements `relay` holds under `tag` from the last
-/// [`ANNOUNCEMENT_LIFETIME`], at most [`MAX_EVENTS_PER_RELAY`].
+/// [`ANNOUNCEMENT_LIFETIME`], at most [`MAX_EVENTS_PER_RELAY`], asked
+/// through `proxy` when one is given.
 pub(crate) async fn fetch_announcements(
     relay: &str,
+    proxy: Option<&str>,
     tag: &str,
     now: u64,
 ) -> Result<Vec<Event>, String> {
     let exchange = async {
-        let mut socket = connect(relay).await?;
+        let mut socket = connect(relay, proxy).await?;
         let subscription = format!("p2pool-{now}");
         let filter = serde_json::json!({
             "kinds": [APP_DATA_KIND],
@@ -441,10 +492,11 @@ pub(crate) async fn fetch_announcements(
         .map_err(|_| format!("{relay}: no answer in {} s", RELAY_TIMEOUT.as_secs()))?
 }
 
-/// Publish `event` on `relay` and wait for the relay's `OK`.
-pub(crate) async fn publish(relay: &str, event: &Event) -> Result<(), String> {
+/// Publish `event` on `relay`, through `proxy` when one is given, and wait
+/// for the relay's `OK`.
+pub(crate) async fn publish(relay: &str, proxy: Option<&str>, event: &Event) -> Result<(), String> {
     let exchange = async {
-        let mut socket = connect(relay).await?;
+        let mut socket = connect(relay, proxy).await?;
         socket
             .send(WsMessage::Text(
                 serde_json::json!(["EVENT", event]).to_string().into(),
@@ -500,11 +552,24 @@ pub(crate) struct NostrSeeds {
     /// Proof of work an announcement needs, and this node's carry:
     /// [`MIN_POW_BITS`].
     pub(crate) pow_bits: u32,
+    /// The networks this node dials (`onlynet`, and onion only with a
+    /// `tor_proxy`); announced addresses on others are skipped.
+    reachable: address_filter::Reachable,
+    /// The SOCKS5 proxy the relays are reached through (`tor_proxy`) when
+    /// the node opens no clearnet connection of its own; None to reach them
+    /// directly.
+    relay_proxy: Option<String>,
 }
 
 impl NostrSeeds {
+    /// Whether to dial an announced `address`: on a network this node
+    /// dials, at a routable IP or an onion address, or at any IP on regtest.
     fn accepts(&self, address: &Multiaddr) -> bool {
-        self.accept_local || address_filter::is_routable_multiaddr(address)
+        if self.accept_local {
+            self.reachable.allows(address)
+        } else {
+            address_filter::is_reachable(address, self.reachable)
+        }
     }
 
     /// The newest valid announcement per peer from `events`, newest first,
@@ -557,7 +622,9 @@ fn with_peer(mut address: Multiaddr, peer: PeerId) -> Multiaddr {
 
 /// The Nostr setup `config` asks for, or `None` without relays. The node
 /// announces its `external_address` when `nostr_announce` is on; on regtest
-/// it dials loopback and private addresses too.
+/// it dials loopback and private addresses too. A node that opens no
+/// clearnet connection of its own reaches the relays through `tor_proxy`,
+/// and stays off Nostr without one.
 pub(crate) fn from_config(
     config: &crate::config::Config,
     node_key: &libp2p::identity::Keypair,
@@ -567,6 +634,17 @@ pub(crate) fn from_config(
     if config.network.nostr_relays.is_empty() {
         return Ok(None);
     }
+    let relay_proxy = if config.network.dials_clearnet_directly() {
+        None
+    } else {
+        let Some(proxy) = &config.network.tor_proxy else {
+            info!(
+                "Nostr is off: this node opens no clearnet connection of its own and has no tor_proxy to reach the relays through"
+            );
+            return Ok(None);
+        };
+        Some(proxy.clone())
+    };
     let own_peer = node_key.public().to_peer_id();
     let (network_name, regtest) = match (config.stratum.chain, config.stratum.bitcoin_cash_network)
     {
@@ -599,6 +677,8 @@ pub(crate) fn from_config(
         announce,
         accept_local: regtest,
         pow_bits: MIN_POW_BITS,
+        reachable: address_filter::Reachable::from_config(&config.network),
+        relay_proxy,
     }))
 }
 
@@ -611,12 +691,9 @@ pub(crate) fn spawn_lookup<C: Send + 'static>(
 ) {
     tokio::spawn(async move {
         let now = unix_now();
-        let answers = join_all(
-            seeds
-                .relays
-                .iter()
-                .map(|relay| fetch_announcements(relay, &seeds.tag, now)),
-        )
+        let answers = join_all(seeds.relays.iter().map(|relay| {
+            fetch_announcements(relay, seeds.relay_proxy.as_deref(), &seeds.tag, now)
+        }))
         .await;
         let mut events = Vec::new();
         for answer in answers {
@@ -662,7 +739,13 @@ pub(crate) fn spawn_announcer(seeds: Arc<NostrSeeds>) -> tokio::task::JoinHandle
                     }
                 }
             };
-            let results = join_all(seeds.relays.iter().map(|relay| publish(relay, &event))).await;
+            let results = join_all(
+                seeds
+                    .relays
+                    .iter()
+                    .map(|relay| publish(relay, seeds.relay_proxy.as_deref(), &event)),
+            )
+            .await;
             let accepted = results.iter().filter(|result| result.is_ok()).count();
             for error in results.into_iter().filter_map(Result::err) {
                 debug!("Nostr announcement not published: {error}");

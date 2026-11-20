@@ -12,6 +12,7 @@ pub mod emission_worker;
 mod found_block_verifier;
 mod node_key;
 pub(crate) mod nostr_seeds;
+mod onion;
 pub mod organise_worker;
 mod outgoing_peer_target;
 pub mod p2p_health;
@@ -32,7 +33,7 @@ pub mod messages;
 pub mod p2p_message_handlers;
 
 use crate::accounting::payout::simple_pplns::SimplePplnsShare;
-use crate::config::Chain;
+use crate::config::{Chain, NetworkConfig};
 use crate::monitoring_events::{MonitoringEvent, MonitoringEventSender, PeerResponse, PeerStatus};
 use crate::node::messages::Message;
 use crate::node::p2p_health::P2pHealth;
@@ -130,39 +131,68 @@ use outgoing_peer_target::{OutgoingCounts, OutgoingPeerTarget};
 const IDLE_CONNECTION_TIMEOUT_SECS: u64 = 600;
 
 /// The transport below the noise and yamux upgrade. A dial passes through
-/// three layers, in this order:
+/// four layers, in this order:
 ///
-/// 1. A `/dns`, `/dns4`, `/dns6` or `/dnsaddr` address is refused unless it
-///    is a configured dial_peer, so hostnames learned from peers (Kademlia)
-///    are never resolved or dialed. IP addresses pass through.
-/// 2. DNS resolves the hostname to IP addresses, using the system's
+/// 1. Refused before anything is dialed or resolved: an address on a network
+///    the node does not dial (`address_filter::Reachable`: `onlynet`, and
+///    onion only with a `tor_proxy`); a `/dns`, `/dns4`, `/dns6` or
+///    `/dnsaddr` address that is not a configured dial_peer, so hostnames
+///    learned from peers (Kademlia) are never resolved or dialed; and an IP
+///    on the blocklist, for the dials that go through Tor.
+/// 2. With `tor_proxy`, an `/onion3` address is dialed through that Tor
+///    SOCKS5 proxy (`onion::OnionTransport`), and with `proxy_clearnet` an IP
+///    or host-name address too, the name unresolved. Every other address
+///    goes on unchanged.
+/// 3. DNS resolves the hostname to IP addresses, using the system's
 ///    resolv.conf. IP addresses pass through unchanged.
-/// 3. Each resolved IP is refused if it is on the blocklist, otherwise TCP
-///    connects to it. The blocklist check sits after DNS because only there
-///    is the IP behind a hostname known.
+/// 4. Each resolved IP is refused if it is on the blocklist or on a network
+///    the node does not dial, otherwise TCP connects to it. These checks sit
+///    after DNS because only there is the IP behind a hostname known.
+///
+/// A node that opens no clearnet connection of its own (`proxy_clearnet`, or
+/// an `onlynet` without IPv4 and IPv6) has no layers 3 and 4: its TCP only
+/// listens, and nothing reaches the system's resolver.
 fn base_transport(
     tcp_config: TcpConfig,
-    dial_peers: &[String],
+    network: &NetworkConfig,
     blocked_ips: BlockedIps,
 ) -> Boxed<TcpStream> {
-    let tcp_for_dns_transport = blocked_ip_filtered_tcp(tcp_config.clone(), blocked_ips.clone());
-    let fallback_tcp = blocked_ip_filtered_tcp(tcp_config, blocked_ips);
-    let dns_or_tcp =
-        dns_or_tcp_transport(DnsTransport::system(tcp_for_dns_transport), fallback_tcp);
-    let configured_dns = dial_filter::configured_dns_addresses(dial_peers);
-    DialFilter::new(dns_or_tcp, move |address: &Multiaddr| {
-        dial_filter::is_configured_or_not_dns(address, &configured_dns)
+    let reachable = address_filter::Reachable::from_config(network);
+    let direct = if network.dials_clearnet_directly() {
+        let tcp_for_dns_transport =
+            blocked_ip_filtered_tcp(tcp_config.clone(), blocked_ips.clone(), reachable);
+        let fallback_tcp = blocked_ip_filtered_tcp(tcp_config, blocked_ips.clone(), reachable);
+        dns_or_tcp_transport(DnsTransport::system(tcp_for_dns_transport), fallback_tcp)
+    } else {
+        DialFilter::new(TcpTransport::new(tcp_config), |_: &Multiaddr| false).boxed()
+    };
+    let tor_or_direct = match &network.tor_proxy {
+        Some(proxy) => onion::OnionTransport::new(proxy.clone())
+            .with_clearnet(network.proxy_clearnet)
+            .or_transport(direct)
+            .map(|stream, _| stream.into_inner())
+            .map_err(|error| error.into_inner())
+            .boxed(),
+        None => direct,
+    };
+    let configured_dns = dial_filter::configured_dns_addresses(&network.dial_peers);
+    DialFilter::new(tor_or_direct, move |address: &Multiaddr| {
+        reachable.allows(address)
+            && dial_filter::is_configured_or_not_dns(address, &configured_dns)
+            && dial_filter::is_not_blocked(address, &blocked_ips)
     })
     .boxed()
 }
 
-/// TCP that refuses to dial IPs on the blocklist.
+/// TCP that refuses to dial IPs on the blocklist, and IPs on a network the
+/// node does not dial (`reachable`), which a host name may resolve to.
 fn blocked_ip_filtered_tcp(
     tcp_config: TcpConfig,
     blocked_ips: BlockedIps,
+    reachable: address_filter::Reachable,
 ) -> DialFilter<TcpTransport, impl Fn(&Multiaddr) -> bool + Send + Sync + Unpin + 'static> {
     DialFilter::new(TcpTransport::new(tcp_config), move |address: &Multiaddr| {
-        dial_filter::is_not_blocked(address, &blocked_ips)
+        reachable.allows(address) && dial_filter::is_not_blocked(address, &blocked_ips)
     })
 }
 
@@ -301,7 +331,7 @@ impl Node {
         }
         let blocked_ips = BlockedIps::new(blocked_ips);
 
-        let transport = base_transport(tcp_config, &config.network.dial_peers, blocked_ips.clone())
+        let transport = base_transport(tcp_config, &config.network, blocked_ips.clone())
             .upgrade(libp2p::core::upgrade::Version::V1)
             .authenticate(noise_config)
             .multiplex(libp2p::yamux::Config::default())
@@ -376,10 +406,15 @@ impl Node {
 
         let (swarm_tx, swarm_rx) = mpsc::channel(100);
 
-        let dns_seeds = if config.network.dns_seed {
-            dns_seeds::dns_seeds_for_chain(config.stratum.chain, config.stratum.network)
-        } else {
+        let dns_seeds = if !config.network.dns_seed {
             None
+        } else if !config.network.dials_clearnet_directly() {
+            info!(
+                "DNS seeds are off: this node resolves no host name itself (proxy_clearnet or onlynet)"
+            );
+            None
+        } else {
+            dns_seeds::dns_seeds_for_chain(config.stratum.chain, config.stratum.network)
         };
         if config.stratum.chain == Chain::BitcoinCash {
             info!("DNS seeds are off on Bitcoin Cash, which has none yet; dialing dial_peers only");
@@ -900,9 +935,11 @@ impl Node {
                     .record_identified(&peer_id, info.agent_version.clone());
                 self.outgoing_peer_target
                     .learn_addresses(peer_id, &info.listen_addrs);
-                // Add the peer's routable advertised addresses to Kademlia
+                // Add the peer's reachable advertised addresses to Kademlia:
+                // routable IPs, and onion addresses when the node has Tor.
+                let reachable = self.outgoing_peer_target.reachable();
                 for addr in info.listen_addrs {
-                    if address_filter::is_routable_multiaddr(&addr) {
+                    if address_filter::is_reachable(&addr, reachable) {
                         self.swarm
                             .behaviour_mut()
                             .kademlia
@@ -1126,6 +1163,9 @@ mod tests {
             blocked_ips: vec![],
             external_address: None,
             dns_seed: false,
+            tor_proxy: None,
+            proxy_clearnet: false,
+            onlynet: None,
             node_key_path: None,
             ephemeral_node_key: true,
             nostr_relays: vec![],
@@ -1256,6 +1296,9 @@ mod tests {
                 blocked_ips: vec![],
                 external_address,
                 dns_seed: false,
+                tor_proxy: None,
+                proxy_clearnet: false,
+                onlynet: None,
                 node_key_path: None,
                 ephemeral_node_key: true,
                 nostr_relays: vec![],

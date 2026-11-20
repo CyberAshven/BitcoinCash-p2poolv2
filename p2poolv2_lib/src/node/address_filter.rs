@@ -2,6 +2,8 @@
 //
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
+use super::onion::is_valid_onion3;
+use crate::config::{NetworkConfig, PeerNetwork};
 use libp2p::Multiaddr;
 use libp2p::multiaddr::Protocol;
 
@@ -108,18 +110,65 @@ pub fn is_routable_multiaddr(address: &Multiaddr) -> bool {
     false
 }
 
+/// The networks the node dials peers on (`NetworkConfig::dials`): those
+/// `onlynet` lists, or IPv4, IPv6 and, through a `tor_proxy`, onion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Reachable {
+    ipv4: bool,
+    ipv6: bool,
+    onion: bool,
+}
+
+impl Reachable {
+    pub(crate) fn from_config(config: &NetworkConfig) -> Self {
+        Self {
+            ipv4: config.dials(PeerNetwork::Ipv4),
+            ipv6: config.dials(PeerNetwork::Ipv6),
+            onion: config.dials(PeerNetwork::Onion),
+        }
+    }
+
+    /// Whether `address` is on a network the node dials, by its first
+    /// component. A host name is clearnet: `/dns4` is IPv4, `/dns6` IPv6,
+    /// and `/dns` or `/dnsaddr` either. No other address is dialable.
+    pub(crate) fn allows(self, address: &Multiaddr) -> bool {
+        match address.iter().next() {
+            Some(Protocol::Ip4(_) | Protocol::Dns4(_)) => self.ipv4,
+            Some(Protocol::Ip6(_) | Protocol::Dns6(_)) => self.ipv6,
+            Some(Protocol::Dns(_) | Protocol::Dnsaddr(_)) => self.ipv4 || self.ipv6,
+            Some(Protocol::Onion3(_)) => self.onion,
+            _ => false,
+        }
+    }
+}
+
+/// Whether the node can reach `address`: one on a network it dials
+/// (`Reachable::allows`), at a globally routable IP or a v3 onion address.
+/// A node without Tor neither learns nor dials onion addresses, and an
+/// onion-only node no IP.
+pub(crate) fn is_reachable(address: &Multiaddr, reachable: Reachable) -> bool {
+    reachable.allows(address)
+        && (is_routable_multiaddr(address)
+            || address.iter().any(
+                |protocol| matches!(protocol, Protocol::Onion3(onion3) if is_valid_onion3(onion3.hash())),
+            ))
+}
+
 /// A network group as Bitcoin Cash Node draws one (`CNetAddr::GetGroup` in
 /// `src/netaddress.cpp`): the first 16 bits of an IPv4 address or the first
 /// 32 bits of an IPv6 address. Addresses in one group are cheap to get in
-/// bulk; many groups are not, so outgoing peers are spread over groups.
+/// bulk; many groups are not, so outgoing peers are spread over groups. An
+/// onion address's group is the first 4 bits of its key, as in Bitcoin Cash
+/// Node; onion keys are cheap to make, so these groups spread peers less.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum NetworkGroup {
     Ipv4([u8; 2]),
     Ipv6([u16; 2]),
+    Onion(u8),
 }
 
-/// The network group of the globally routable IP address in `address`, or
-/// None when the address has no IP or its IP is not globally routable.
+/// The network group of the globally routable IP address or v3 onion
+/// address in `address`, or None when it has neither.
 pub(crate) fn network_group(address: &Multiaddr) -> Option<NetworkGroup> {
     for protocol in address.iter() {
         match protocol {
@@ -131,6 +180,10 @@ pub(crate) fn network_group(address: &Multiaddr) -> Option<NetworkGroup> {
                 let segments = ip.segments();
                 return is_ipv6_global(&ip)
                     .then_some(NetworkGroup::Ipv6([segments[0], segments[1]]));
+            }
+            Protocol::Onion3(onion) => {
+                let key = onion.hash();
+                return is_valid_onion3(key).then_some(NetworkGroup::Onion(key[0] >> 4));
             }
             _ => {}
         }
