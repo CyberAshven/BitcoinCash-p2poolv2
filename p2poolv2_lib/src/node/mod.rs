@@ -12,6 +12,7 @@ pub mod emission_worker;
 mod found_block_verifier;
 mod node_key;
 pub(crate) mod nostr_seeds;
+mod onion;
 pub mod organise_worker;
 mod outgoing_peer_target;
 pub mod p2p_health;
@@ -140,20 +141,33 @@ const IDLE_CONNECTION_TIMEOUT_SECS: u64 = 600;
 /// 3. Each resolved IP is refused if it is on the blocklist, otherwise TCP
 ///    connects to it. The blocklist check sits after DNS because only there
 ///    is the IP behind a hostname known.
+///
+/// With `tor_proxy`, an `/onion3` address is dialed through that Tor SOCKS5
+/// proxy first (`onion::OnionTransport`); every other address goes on to the
+/// layers above unchanged.
 fn base_transport(
     tcp_config: TcpConfig,
     dial_peers: &[String],
     blocked_ips: BlockedIps,
+    tor_proxy: Option<&str>,
 ) -> Boxed<TcpStream> {
     let tcp_for_dns_transport = blocked_ip_filtered_tcp(tcp_config.clone(), blocked_ips.clone());
     let fallback_tcp = blocked_ip_filtered_tcp(tcp_config, blocked_ips);
     let dns_or_tcp =
         dns_or_tcp_transport(DnsTransport::system(tcp_for_dns_transport), fallback_tcp);
     let configured_dns = dial_filter::configured_dns_addresses(dial_peers);
-    DialFilter::new(dns_or_tcp, move |address: &Multiaddr| {
+    let clearnet = DialFilter::new(dns_or_tcp, move |address: &Multiaddr| {
         dial_filter::is_configured_or_not_dns(address, &configured_dns)
     })
-    .boxed()
+    .boxed();
+    match tor_proxy {
+        Some(proxy) => onion::OnionTransport::new(proxy.to_string())
+            .or_transport(clearnet)
+            .map(|stream, _| stream.into_inner())
+            .map_err(|error| error.into_inner())
+            .boxed(),
+        None => clearnet,
+    }
 }
 
 /// TCP that refuses to dial IPs on the blocklist.
@@ -301,12 +315,17 @@ impl Node {
         }
         let blocked_ips = BlockedIps::new(blocked_ips);
 
-        let transport = base_transport(tcp_config, &config.network.dial_peers, blocked_ips.clone())
-            .upgrade(libp2p::core::upgrade::Version::V1)
-            .authenticate(noise_config)
-            .multiplex(libp2p::yamux::Config::default())
-            .timeout(Duration::from_secs(dial_timeout_secs))
-            .boxed();
+        let transport = base_transport(
+            tcp_config,
+            &config.network.dial_peers,
+            blocked_ips.clone(),
+            config.network.tor_proxy.as_deref(),
+        )
+        .upgrade(libp2p::core::upgrade::Version::V1)
+        .authenticate(noise_config)
+        .multiplex(libp2p::yamux::Config::default())
+        .timeout(Duration::from_secs(dial_timeout_secs))
+        .boxed();
 
         let mut swarm = SwarmBuilder::with_existing_identity(id_keys)
             .with_tokio()
@@ -900,9 +919,11 @@ impl Node {
                     .record_identified(&peer_id, info.agent_version.clone());
                 self.outgoing_peer_target
                     .learn_addresses(peer_id, &info.listen_addrs);
-                // Add the peer's routable advertised addresses to Kademlia
+                // Add the peer's reachable advertised addresses to Kademlia:
+                // routable IPs, and onion addresses when the node has Tor.
+                let onion = self.outgoing_peer_target.onion_reachable();
                 for addr in info.listen_addrs {
-                    if address_filter::is_routable_multiaddr(&addr) {
+                    if address_filter::is_reachable(&addr, onion) {
                         self.swarm
                             .behaviour_mut()
                             .kademlia
@@ -1126,6 +1147,7 @@ mod tests {
             blocked_ips: vec![],
             external_address: None,
             dns_seed: false,
+            tor_proxy: None,
             node_key_path: None,
             ephemeral_node_key: true,
             nostr_relays: vec![],
@@ -1256,6 +1278,7 @@ mod tests {
                 blocked_ips: vec![],
                 external_address,
                 dns_seed: false,
+                tor_proxy: None,
                 node_key_path: None,
                 ephemeral_node_key: true,
                 nostr_relays: vec![],

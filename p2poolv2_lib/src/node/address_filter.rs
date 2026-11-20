@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
+use super::onion::is_valid_onion3;
 use libp2p::Multiaddr;
 use libp2p::multiaddr::Protocol;
 
@@ -108,18 +109,32 @@ pub fn is_routable_multiaddr(address: &Multiaddr) -> bool {
     false
 }
 
+/// Whether the node can reach `address`: a globally routable IP, or, when it
+/// dials through Tor (`onion`), a v3 onion address. A node without Tor
+/// neither learns nor dials onion addresses.
+pub(crate) fn is_reachable(address: &Multiaddr, onion: bool) -> bool {
+    is_routable_multiaddr(address)
+        || (onion
+            && address.iter().any(
+                |protocol| matches!(protocol, Protocol::Onion3(onion3) if is_valid_onion3(onion3.hash())),
+            ))
+}
+
 /// A network group as Bitcoin Cash Node draws one (`CNetAddr::GetGroup` in
 /// `src/netaddress.cpp`): the first 16 bits of an IPv4 address or the first
 /// 32 bits of an IPv6 address. Addresses in one group are cheap to get in
-/// bulk; many groups are not, so outgoing peers are spread over groups.
+/// bulk; many groups are not, so outgoing peers are spread over groups. An
+/// onion address's group is the first 4 bits of its key, as in Bitcoin Cash
+/// Node; onion keys are cheap to make, so these groups spread peers less.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum NetworkGroup {
     Ipv4([u8; 2]),
     Ipv6([u16; 2]),
+    Onion(u8),
 }
 
-/// The network group of the globally routable IP address in `address`, or
-/// None when the address has no IP or its IP is not globally routable.
+/// The network group of the globally routable IP address or v3 onion
+/// address in `address`, or None when it has neither.
 pub(crate) fn network_group(address: &Multiaddr) -> Option<NetworkGroup> {
     for protocol in address.iter() {
         match protocol {
@@ -131,6 +146,10 @@ pub(crate) fn network_group(address: &Multiaddr) -> Option<NetworkGroup> {
                 let segments = ip.segments();
                 return is_ipv6_global(&ip)
                     .then_some(NetworkGroup::Ipv6([segments[0], segments[1]]));
+            }
+            Protocol::Onion3(onion) => {
+                let key = onion.hash();
+                return is_valid_onion3(key).then_some(NetworkGroup::Onion(key[0] >> 4));
             }
             _ => {}
         }
