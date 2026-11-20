@@ -35,6 +35,8 @@ pub struct P2pHealth {
     pub ping_failures_total: u64,
     /// Connections closed because they kept failing ping.
     pub connections_closed_unresponsive_total: u64,
+    /// Connections, incoming or outgoing, the connection limits refused.
+    pub connections_refused_total: u64,
     /// Requests this node sent that failed (timeout, connection closed, ...).
     pub outbound_failures_total: u64,
     /// Requests from peers that this node failed to answer.
@@ -54,7 +56,7 @@ pub struct P2pHealth {
 impl P2pHealth {
     /// Render as Prometheus exposition text.
     pub fn exposition(&self) -> String {
-        let series: [(&str, &str, &str, u64); 19] = [
+        let series: [(&str, &str, &str, u64); 20] = [
             (
                 "p2p_connected_peers",
                 "gauge",
@@ -96,6 +98,12 @@ impl P2pHealth {
                 "counter",
                 "Connections closed because they kept failing ping",
                 self.connections_closed_unresponsive_total,
+            ),
+            (
+                "p2p_connections_refused_total",
+                "counter",
+                "Connections the connection limits refused since start",
+                self.connections_refused_total,
             ),
             (
                 "p2p_outbound_failures_total",
@@ -195,6 +203,7 @@ mod tests {
             connections_total: 5,
             ping_failures_total: 7,
             connections_closed_unresponsive_total: 1,
+            connections_refused_total: 18,
             outbound_failures_total: 3,
             inbound_failures_total: 4,
             responses_dropped_total: 6,
@@ -223,6 +232,9 @@ mod tests {
         ));
         assert!(exposition.contains(
             "# TYPE p2p_connections_closed_unresponsive_total counter\np2p_connections_closed_unresponsive_total 1\n"
+        ));
+        assert!(exposition.contains(
+            "# TYPE p2p_connections_refused_total counter\np2p_connections_refused_total 18\n"
         ));
         assert!(exposition.contains("p2p_outbound_failures_total 3\n"));
         assert!(exposition.contains("p2p_responses_dropped_total 6\n"));
