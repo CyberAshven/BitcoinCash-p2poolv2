@@ -18,6 +18,7 @@ use crate::constants::{
     MAX_UNCLES, NO_TOKEN_COINBASE_LIMIT_BYTES, P2PKH_OUTPUT_BYTES, P2SH32_OUTPUT_BYTES,
     SHARE_BODY_LIMIT_BYTES, SHARE_COINBASE_BYTES, SHARE_HEADER_BASE_BYTES,
     SHARE_HEADER_BYTES_PER_UNCLE, SV2_COINBASE_FIELD_BYTES, TOKEN_COINBASE_THRESHOLD_BYTES,
+    WEAK_SHARE_ROOM_BYTES,
 };
 use serde::Serialize;
 
@@ -330,6 +331,7 @@ impl ShareSizes {
             share_body_within_pre_hybrid_limit: share_body <= SHARE_BODY_LIMIT_BYTES,
             share_body_within_hybrid_limit: share_body <= HYBRID_SHARE_BODY_LIMIT_BYTES,
             message_within_p2p_limit: self.message_payload_bytes(MAX_UNCLES)
+                + WEAK_SHARE_ROOM_BYTES
                 <= MAX_P2P_MESSAGE_BYTES,
             coinbase_within_sv2_extended_fields: coinbase.saturating_sub(COINBASE_PREFIX_BYTES)
                 <= SV2_COINBASE_FIELD_BYTES,
@@ -356,9 +358,9 @@ pub struct LimitCheck {
     /// (`BCH_SHARE_BODY_SIZE_LIMIT`), a P2Pool share-chain rule: peers
     /// reject a larger share.
     pub share_body_within_hybrid_limit: bool,
-    /// The `ShareBlock` message, with three uncles, fits the 1.25 MiB P2P
-    /// message limit, an implementation limit of this node: a larger share
-    /// cannot be relayed at all.
+    /// The `ShareBlock` message, with three uncles and 960 KiB of carried
+    /// weak shares, fits the 2,144 KiB P2P message limit, an implementation
+    /// limit of this node: a larger share cannot be relayed at all.
     pub message_within_p2p_limit: bool,
     /// The coinbase after the extranonce fits one 65,535-byte field of a
     /// Stratum V2 extended job or declared job.
@@ -384,7 +386,7 @@ impl LimitCheck {
             broken.push("hybrid 1,204,800-byte share body");
         }
         if !self.message_within_p2p_limit {
-            broken.push("1.25 MiB P2P message");
+            broken.push("2,144 KiB P2P message");
         }
         if !self.share_body_within_pre_hybrid_limit {
             broken.push("pre-hybrid 200 KiB share body");
