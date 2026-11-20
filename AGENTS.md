@@ -59,6 +59,9 @@ Besides upstream's `nl-outlines`, this fork has:
   after it
 - `bch-upstream-sync` -- look upstream first, and bring its changes in by
   merge or cherry-pick
+- `supply-chain-guard` -- scan any branch, PR head, package or download
+  not written in the session, and every commit and push, for injected
+  loaders before anything runs; a hit stops the work
 
 Read the matching skill before working in its area. A new skill gets its
 own directory and a relative link, `.claude/skills/<name>` ->
