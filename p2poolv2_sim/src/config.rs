@@ -39,10 +39,7 @@ impl SimNodeConfig {
             .build()?
             .try_deserialize()?;
         Ok(Self {
-            node: loaded
-                .node
-                .with_bitcoin_cash_network_derived()
-                .with_bitcoin_cash_dns_seed_off(),
+            node: loaded.node.with_bitcoin_cash_network_derived(),
             sim: loaded.sim,
         })
     }
