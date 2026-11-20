@@ -1376,7 +1376,8 @@ pub struct NetworkConfig {
     pub blocked_ips: Vec<String>,
     /// Optional external address override for nodes behind NAT.
     /// If set, this address is advertised to peers via the identify protocol.
-    /// Format: Multiaddr string, e.g. "/ip4/203.0.113.1/tcp/6884"
+    /// Format: Multiaddr string, e.g. "/ip4/203.0.113.1/tcp/6884", or a Tor
+    /// onion service's "/onion3/<address>:6884".
     #[serde(default)]
     pub external_address: Option<String>,
     // Fall back to the built-in DNS seeds for this network when no peer is
@@ -1395,6 +1396,16 @@ pub struct NetworkConfig {
     /// addresses. Other addresses are dialed directly either way.
     #[serde(default)]
     pub tor_proxy: Option<String>,
+    /// Announce this node only as a Tor onion service, as Bitcoin Cash
+    /// Node's `-discover=0` with an onion `-externalip`: peers learn only an
+    /// `/onion3` `external_address`. The node takes no address from what
+    /// peers observe, never makes a listen address its external one, sends
+    /// no listen addresses through Identify, and does not announce on Nostr,
+    /// whose relays it reaches directly. A non-onion `external_address`
+    /// stops it at start. Its own dials to IP addresses still go out
+    /// directly. Default false.
+    #[serde(default)]
+    pub onion_only: bool,
     /// File holding this node's libp2p identity, whose public key is its
     /// peer ID. Created on the first start and read on every start after,
     /// so peers, saved peer lists and announcements keep finding the node
@@ -1414,7 +1425,8 @@ pub struct NetworkConfig {
     pub nostr_relays: Vec<String>,
     /// Publish `external_address` on the relays so nodes short of peers can
     /// dial this one. Only a node with an `external_address`, which its
-    /// operator says is reachable, announces. Default true.
+    /// operator says is reachable, announces, and never an `onion_only` one.
+    /// Default true.
     #[serde(default = "default_nostr_announce")]
     pub nostr_announce: bool,
     /// Outgoing peers the node keeps. While it has fewer, it dials a peer it
@@ -1526,6 +1538,7 @@ impl Default for NetworkConfig {
             external_address: None,
             dns_seed: true,
             tor_proxy: None,
+            onion_only: false,
             node_key_path: None,
             ephemeral_node_key: false,
             nostr_relays: default_nostr_relays(),

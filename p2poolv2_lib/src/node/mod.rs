@@ -225,6 +225,10 @@ struct Node {
     connection_tracker: ConnectionTracker,
     /// Whether an external address has been confirmed and advertised
     external_address_confirmed: bool,
+    /// Whether the node announces itself only as an onion service
+    /// (`onion_only`): it then takes no external address from observations
+    /// or listen addresses.
+    onion_only: bool,
     /// Cached TCP listen port extracted from config
     listen_port: Option<u16>,
     /// Whether kademlia bootstrap has been triggered at least once
@@ -341,6 +345,24 @@ impl Node {
 
         let listen_port = address_filter::extract_listen_port(&config.network.listen_address);
 
+        let onion_only = config.network.onion_only;
+        if onion_only {
+            // Announcing an IP address would give away what an onion-only
+            // node hides.
+            if let Some(external_address) = &config.network.external_address
+                && let Ok(external_address) = external_address.parse::<Multiaddr>()
+                && onion::onion3_target(&external_address).is_none()
+            {
+                return Err(format!(
+                    "external_address {external_address} is not an /onion3 address, and an onion_only node announces only an onion address"
+                )
+                .into());
+            }
+            info!(
+                "onion_only: this node announces only an onion address, takes none from peers' observations and hides its listen addresses"
+            );
+        }
+
         let external_address_confirmed =
             if let Some(ref external_addr_str) = config.network.external_address {
                 match external_addr_str.parse::<Multiaddr>() {
@@ -436,6 +458,7 @@ impl Node {
             peer_book_path,
             connection_tracker: ConnectionTracker::new(blocked_ips),
             external_address_confirmed,
+            onion_only,
             listen_port,
             has_bootstrapped_kad: false,
             dns_seeds,
@@ -722,7 +745,10 @@ impl Node {
                     info!("Resolved actual listen port: {port}");
                     self.listen_port = Some(port);
                 }
+                // An onion-only node never announces an address it listens
+                // on, as Bitcoin Cash Node with -discover=0.
                 if !self.external_address_confirmed
+                    && !self.onion_only
                     && address_filter::is_routable_multiaddr(&address)
                 {
                     self.swarm.add_external_address(address.clone());
@@ -961,9 +987,10 @@ impl Node {
     }
 
     /// Attempts to derive and confirm an external address from an identify
-    /// observation. Uses the observed IP combined with our listen port.
+    /// observation. Uses the observed IP combined with our listen port. An
+    /// onion-only node takes none: the IP a peer saw is the one it hides.
     fn try_confirm_external_address(&mut self, observed_addr: &Multiaddr) {
-        if self.external_address_confirmed {
+        if self.external_address_confirmed || self.onion_only {
             return;
         }
         let listen_port = match self.listen_port {
@@ -1148,6 +1175,7 @@ mod tests {
             external_address: None,
             dns_seed: false,
             tor_proxy: None,
+            onion_only: false,
             node_key_path: None,
             ephemeral_node_key: true,
             nostr_relays: vec![],
@@ -1279,6 +1307,7 @@ mod tests {
                 external_address,
                 dns_seed: false,
                 tor_proxy: None,
+                onion_only: false,
                 node_key_path: None,
                 ephemeral_node_key: true,
                 nostr_relays: vec![],
@@ -1749,6 +1778,112 @@ mod tests {
             "Expected external address {expected} not found in {external_addrs:?}"
         );
         assert!(node.external_address_confirmed);
+    }
+
+    /// The Tor Project's own v3 onion service.
+    const TOR_PROJECT_ONION: &str = "2gzyxa5ihm7nsggfxnu52rck2vv4rvmdlkiu3zzui5du4xyclen53wid";
+
+    /// An onion-only node stops at start on an IP `external_address`, which
+    /// would announce what it hides, and starts on an onion one.
+    #[tokio::test]
+    async fn an_onion_only_node_refuses_an_ip_external_address() {
+        let mut config = build_test_config(
+            "/ip4/127.0.0.1/tcp/0",
+            Some("/ip4/203.0.113.5/tcp/6884".to_string()),
+        );
+        config.network.onion_only = true;
+        let error = match try_build_test_node(config.clone()) {
+            Ok(_) => panic!("an onion-only node started with an IP external_address"),
+            Err(error) => error.to_string(),
+        };
+        assert!(error.contains("not an /onion3 address"), "{error}");
+
+        config.network.external_address = Some(format!("/onion3/{TOR_PROJECT_ONION}:6884"));
+        let node = build_test_node(config);
+        assert!(node.external_address_confirmed);
+    }
+
+    /// A node makes an IP its external address from a peer's observation or
+    /// from a routable listen address; an onion-only node from neither.
+    #[tokio::test]
+    async fn an_onion_only_node_takes_no_ip_as_its_external_address() {
+        let observed: Multiaddr = "/ip4/93.184.216.34/tcp/54321".parse().unwrap();
+        let listening: Multiaddr = "/ip4/93.184.216.34/tcp/6884".parse().unwrap();
+        for onion_only in [false, true] {
+            let mut config = build_test_config("/ip4/127.0.0.1/tcp/0", None);
+            config.network.onion_only = onion_only;
+
+            let mut observed_node = build_test_node(config.clone());
+            observed_node.listen_port = Some(6884);
+            observed_node.try_confirm_external_address(&observed);
+
+            let mut listening_node = build_test_node(config);
+            listening_node
+                .handle_swarm_event(SwarmEvent::NewListenAddr {
+                    listener_id: libp2p::core::transport::ListenerId::next(),
+                    address: listening.clone(),
+                })
+                .unwrap();
+
+            for node in [&observed_node, &listening_node] {
+                assert_eq!(
+                    node.swarm.external_addresses().count(),
+                    usize::from(!onion_only),
+                    "onion_only {onion_only}"
+                );
+                assert_eq!(node.external_address_confirmed, !onion_only);
+            }
+        }
+    }
+
+    /// End to end on loopback: B dials A and reads A's addresses from
+    /// Identify. An onion-only A sends its onion address alone; any other
+    /// node sends its listen address too.
+    #[tokio::test]
+    async fn an_onion_only_node_sends_only_its_onion_address_through_identify() {
+        let onion: Multiaddr = format!("/onion3/{TOR_PROJECT_ONION}:6884").parse().unwrap();
+        for onion_only in [false, true] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let address_a = format!(
+                "/ip4/127.0.0.1/tcp/{}",
+                listener.local_addr().unwrap().port()
+            );
+            drop(listener);
+            let mut config_a = build_test_config(&address_a, Some(onion.to_string()));
+            config_a.network.onion_only = onion_only;
+            let mut node_a = build_test_node(config_a);
+            let mut config_b = build_test_config("/ip4/127.0.0.1/tcp/0", None);
+            config_b.network.dial_peers = vec![address_a.clone()];
+            let mut node_b = build_test_node(config_b);
+            let peer_a = *node_a.swarm.local_peer_id();
+
+            let sent = tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    tokio::select! {
+                        _ = node_a.swarm.select_next_some() => {}
+                        event = node_b.swarm.select_next_some() => {
+                            if let SwarmEvent::Behaviour(P2PoolBehaviourEvent::Identify(
+                                identify::Event::Received { peer_id, info, .. },
+                            )) = event
+                                && peer_id == peer_a
+                            {
+                                return info.listen_addrs;
+                            }
+                        }
+                    }
+                }
+            })
+            .await
+            .expect("B never identified A");
+
+            assert!(sent.contains(&onion), "{sent:?}");
+            let listen_address: Multiaddr = address_a.parse().unwrap();
+            assert_eq!(
+                sent.contains(&listen_address),
+                !onion_only,
+                "onion_only {onion_only}: {sent:?}"
+            );
+        }
     }
 
     #[tokio::test]

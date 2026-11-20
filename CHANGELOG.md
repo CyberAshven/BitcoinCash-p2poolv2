@@ -101,6 +101,10 @@ format and genesis re-pin.
   `/onion3/<address>:<port>` peers through a Tor SOCKS5 proxy, as Bitcoin
   Cash Node's `-onion` does, and learns onion addresses from peers. Without
   it, onion addresses are ignored.
+- Onion services set up by hand: `external_address` may be the service's
+  `/onion3/<address>:6884`. With `[network] onion_only`, the node announces
+  only that address: no address from peers' observations or its listen
+  addresses, no listen addresses in Identify, and no Nostr announcement.
 - The dashboard, server-rendered and WASM, gains a Sharechain chart tab
   (served as JSON at `/sharechain`), income tiles and weak share detail on
   the miner pages. The miner report shows each share's weak count; payouts

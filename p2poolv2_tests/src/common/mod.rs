@@ -32,6 +32,7 @@ pub fn default_test_config() -> Config {
             external_address: None,
             dns_seed: false,
             tor_proxy: None,
+            onion_only: false,
             node_key_path: None,
             ephemeral_node_key: true,
             nostr_relays: vec![],

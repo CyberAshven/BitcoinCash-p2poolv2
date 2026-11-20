@@ -556,8 +556,10 @@ fn with_peer(mut address: Multiaddr, peer: PeerId) -> Multiaddr {
 }
 
 /// The Nostr setup `config` asks for, or `None` without relays. The node
-/// announces its `external_address` when `nostr_announce` is on; on regtest
-/// it dials loopback and private addresses too.
+/// announces its `external_address` when `nostr_announce` is on, unless it
+/// is `onion_only`: it reaches the relays directly, so a relay would see its
+/// IP beside its onion address. On regtest it dials loopback and private
+/// addresses too.
 pub(crate) fn from_config(
     config: &crate::config::Config,
     node_key: &libp2p::identity::Keypair,
@@ -579,7 +581,12 @@ pub(crate) fn from_config(
             config.stratum.network == bitcoin::Network::Regtest,
         ),
     };
-    let announce = if config.network.nostr_announce {
+    if config.network.nostr_announce && config.network.onion_only {
+        info!(
+            "Not announcing on Nostr: an onion_only node reaches the relays directly, which would show them its IP beside its onion address"
+        );
+    }
+    let announce = if config.network.nostr_announce && !config.network.onion_only {
         config
             .network
             .external_address

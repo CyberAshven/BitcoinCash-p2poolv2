@@ -125,11 +125,40 @@ through Identify enters Kademlia and the target's book only on a node with a
 `tor_proxy`, so a node without Tor never tries one. An onion address's
 network group is the first 4 bits of its key, as in Bitcoin Cash Node.
 
-To be reachable as an onion service today, point a torrc
-`HiddenServicePort 6884 127.0.0.1:6884` at the node and set
-`external_address` to the service's `/onion3/<address>:6884`. Creating the
-service through Tor's control port, onion-only mode and onion announcements
-on Nostr come next.
+To be reachable as an onion service, set one up in the torrc, as Bitcoin
+Cash Node's `doc/tor.md` describes:
+
+```
+HiddenServiceDir /var/lib/tor/p2pool/
+HiddenServicePort 6884 127.0.0.1:6884
+```
+
+Tor writes the service's name to `hostname` in that directory and keeps its
+key there. Set `external_address = "/onion3/<the name without .onion>:6884"`:
+Identify sends it to every peer, and peers with a `tor_proxy` keep and dial
+it. The first port, the one peers dial, stays 6884 whatever the node listens
+on, as Bitcoin Cash Node keeps its default port for every onion service, so
+the port tells nothing about the node. The second address is the node's
+`listen_address`; `127.0.0.1` reaches a node listening on `0.0.0.0`. A node
+that has an IP address as well announces both, and its peer ID links them.
+
+With `onion_only = true` the node announces only its onion address:
+
+- An `external_address` that is not `/onion3` stops it at start.
+- It takes no external address from what peers observe, and never makes a
+  routable listen address its external one, as Bitcoin Cash Node with
+  `-discover=0`.
+- Identify sends no listen addresses, only the onion one.
+- It does not announce on Nostr: it reaches the relays directly, so a relay
+  would see its IP beside its onion address.
+
+Listen on `127.0.0.1`, so only Tor reaches the node. `onion_only` governs what
+the node announces, not what it dials: dials to IP addresses, from
+`dial_peers`, the outgoing target or Kademlia, still go out directly and show
+those peers its IP and peer ID. A node that was reachable by IP before needs
+a new node key and an empty peer list, or peers that knew it can link its IP
+to the onion. Inbound onion connections all come from the Tor daemon, so
+blocking `127.0.0.1` cuts every onion peer.
 
 ### Finding peers through Nostr
 

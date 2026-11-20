@@ -403,6 +403,20 @@ fn the_config_decides_what_a_node_announces() {
         vec![address_of(&key, "/ip4/1.2.3.4/tcp/6890")]
     );
 
+    // A relay would see an onion-only node's IP beside its onion address.
+    let mut onion_only = config.clone();
+    onion_only.network.onion_only = true;
+    onion_only.network.external_address =
+        Some("/onion3/2gzyxa5ihm7nsggfxnu52rck2vv4rvmdlkiu3zzui5du4xyclen53wid:6884".into());
+    assert!(
+        from_config(&onion_only, &key, protocol)
+            .unwrap()
+            .unwrap()
+            .announce
+            .is_empty(),
+        "an onion_only node does not announce"
+    );
+
     config.network.nostr_announce = false;
     assert!(
         from_config(&config, &key, protocol)
