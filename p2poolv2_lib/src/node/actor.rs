@@ -207,6 +207,18 @@ impl NodeHandle {
         }
     }
 
+    /// Get the connected peers share-chain traffic goes to: each sent a
+    /// handshake and is not reached only through this node's lookup.
+    pub async fn get_share_chain_peers(
+        &self,
+    ) -> Result<Vec<libp2p::PeerId>, Box<dyn Error + Send + Sync>> {
+        let (tx, rx) = oneshot::channel();
+        self.command_tx
+            .send(Command::GetShareChainPeers(tx))
+            .await?;
+        Ok(rx.await?)
+    }
+
     /// Shutdown the node
     pub async fn shutdown(&self) -> Result<(), Box<dyn Error + Send + Sync>> {
         let (tx, rx) = oneshot::channel();
@@ -282,7 +294,7 @@ impl NodeHandle {
         tokio::spawn(async move {
             while let Some(command) = command_rx.recv().await {
                 match command {
-                    Command::GetPeers(reply) => {
+                    Command::GetPeers(reply) | Command::GetShareChainPeers(reply) => {
                         let _ = reply.send(Vec::new());
                     }
                     Command::Shutdown(reply) => {
@@ -370,7 +382,7 @@ impl NodeHandle {
         tokio::spawn(async move {
             while let Some(command) = command_rx.recv().await {
                 match command {
-                    Command::GetPeers(reply) => {
+                    Command::GetPeers(reply) | Command::GetShareChainPeers(reply) => {
                         let _ = reply.send(peer_ids.clone());
                     }
                     Command::Shutdown(reply) => {
@@ -420,6 +432,7 @@ mock! {
     pub NodeHandle {
         pub async fn new(config: Config, chain_store_handle: ChainStoreHandle) -> Result<(Self, oneshot::Receiver<()>), Box<dyn Error>>;
         pub async fn get_peers(&self) -> Result<Vec<libp2p::PeerId>, Box<dyn Error>>;
+        pub async fn get_share_chain_peers(&self) -> Result<Vec<libp2p::PeerId>, Box<dyn Error>>;
         pub async fn shutdown(&self) -> Result<(), Box<dyn Error>>;
         pub async fn send_to_peer(&self, peer_id: libp2p::PeerId, message: Message) -> Result<(), Box<dyn Error>>;
     }
@@ -1209,6 +1222,11 @@ impl NodeActor {
                     .collect::<Vec<_>>();
                 if tx.send(peers).is_err() {
                     error!("Failed to send GetPeers response - receiver dropped");
+                }
+            }
+            Command::GetShareChainPeers(tx) => {
+                if tx.send(self.node.share_chain_peers()).is_err() {
+                    error!("Failed to send GetShareChainPeers response - receiver dropped");
                 }
             }
             Command::SendToPeer(peer_id, message, tx) => {
