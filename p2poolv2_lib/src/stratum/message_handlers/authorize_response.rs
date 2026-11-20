@@ -40,6 +40,107 @@ async fn register_user<D: DifficultyAdjusterTrait>(
     Ok(())
 }
 
+/// The longest auto-assigned worker suffix, in characters. A device name
+/// plus a numeric tail stays inside the 128-character username limit
+/// whatever the payout address in front of it.
+const MAX_AUTO_WORKER_NAME_LEN: usize = 32;
+
+/// The longest device-name prefix taken from a user agent, in characters.
+const MAX_USER_AGENT_PREFIX_LEN: usize = 24;
+
+/// The most candidates one allocation probes before giving up. Exceeding it
+/// means a thousand names under one address are all live at once, which is
+/// a resource problem, not a naming one.
+const MAX_AUTO_WORKER_ATTEMPTS: u32 = 1_000;
+
+/// The worker-name prefix taken from a miner's `mining.subscribe` user
+/// agent: its first run of allowed characters, lowercased, at most
+/// `MAX_USER_AGENT_PREFIX_LEN` of them. `bitaxe/24.4.0` becomes `bitaxe`
+/// and `braiins-os/3.0` becomes `braiins-os`. User agents are
+/// miner-supplied strings that end up in dashboard keys and Prometheus
+/// labels, so nothing outside `[a-z0-9_-]` survives, and an agent with
+/// nothing nameable yields an empty prefix, which falls back to the
+/// numeric scheme.
+fn user_agent_prefix(user_agent: &str) -> String {
+    let first_run = user_agent
+        .split(|character: char| {
+            !(character.is_ascii_alphanumeric() || character == '_' || character == '-')
+        })
+        .find(|run| !run.is_empty())
+        .unwrap_or_default();
+    first_run
+        .chars()
+        .take(MAX_USER_AGENT_PREFIX_LEN)
+        .map(|character| character.to_ascii_lowercase())
+        .collect()
+}
+
+/// The candidate for `ordinal` of an allocation: the bare device prefix the
+/// first time, then `prefix2`, `prefix3`, ... for a device prefix, and
+/// `worker1`, `worker2`, ... when there is none. Both start at 1, and both
+/// are checked against the live roster before they are issued.
+fn candidate_worker_name(prefix: Option<&str>, ordinal: u32) -> String {
+    match prefix {
+        Some(prefix) if ordinal == 1 => prefix.to_string(),
+        Some(prefix) => format!("{prefix}{ordinal}"),
+        None => format!("worker{ordinal}"),
+    }
+}
+
+/// Name the worker of a bare-address miner: an auto-assignment with the
+/// device in front of the number.
+///
+/// A username without a `.worker` part (cashaddrs never contain dots) would
+/// otherwise key every connection of that address into one anonymous bucket:
+/// one dashboard row, one worker in every count, and a blank name in the
+/// worker table. So each bare-address connection gets its own name here,
+/// once, at authorize time:
+///
+/// - the sanitized `mining.subscribe` user agent first, so a bitaxe logs in
+///   as `addr.bitaxe` and a second one as `addr.bitaxe2`;
+/// - no usable user agent falls back to `addr.worker1`, `addr.worker2`,
+///   ... by number.
+///
+/// An explicit `addr.rig` never reaches this function, and each candidate
+/// is checked *and claimed* in one step at the metrics actor, which serializes
+/// every session's messages: no name is handed out twice while its holder is
+/// connected, not even when several miners of one address reconnect at once,
+/// and never over an explicit worker either. The claim counts this session's
+/// connection under the name it wins, and a disconnect releases it, so a
+/// rebooted miner gets its name back.
+async fn allocate_worker_name(
+    ctx: &StratumContext,
+    btcaddress: &str,
+    user_agent: Option<&str>,
+) -> Result<String, Error> {
+    let prefix = user_agent
+        .map(user_agent_prefix)
+        .filter(|prefix| !prefix.is_empty());
+    let mut ordinal: u32 = 1;
+    while ordinal <= MAX_AUTO_WORKER_ATTEMPTS {
+        let candidate = candidate_worker_name(prefix.as_deref(), ordinal);
+        // Belt and braces: the prefix cap and the attempt cap keep every
+        // candidate inside the username limit, and this says so in code.
+        if candidate.len() > MAX_AUTO_WORKER_NAME_LEN {
+            break;
+        }
+        let claimed = ctx
+            .metrics
+            .reserve_worker_name(btcaddress.to_string(), candidate.clone())
+            .await
+            .map_err(|error| {
+                Error::AuthorizationFailure(format!("Metrics actor unavailable: {error}"))
+            })?;
+        if claimed {
+            return Ok(candidate);
+        }
+        ordinal += 1;
+    }
+    Err(Error::AuthorizationFailure(format!(
+        "No free worker name for {btcaddress}"
+    )))
+}
+
 /// Resolve which share chain address owns this miner's shares.
 ///
 /// The node's configured address wins: when set, it owns every share on the
@@ -295,22 +396,49 @@ pub(crate) async fn handle_authorize<'a, D: DifficultyAdjusterTrait>(
     session.donation = donation;
     session.payout_level = payout_level;
 
-    // Register user in the store
-    register_user(session, &parsed_username.user_key, ctx.chain_store_handle).await?;
+    // Register user in the store. The handle is cloned rather than moved so
+    // `ctx` stays whole for the allocation below.
+    register_user(
+        session,
+        &parsed_username.user_key,
+        ctx.chain_store_handle.clone(),
+    )
+    .await?;
 
-    match ctx
-        .metrics
-        .increment_worker_count(
-            session.btcaddress.clone().unwrap_or_default(),
-            session.workername.clone().unwrap_or_default(),
-        )
-        .await
-    {
-        Ok(_) => {}
-        Err(error) => {
-            tracing::error!("Failed to send increment worker count message: {}", error);
+    // An explicit `<address>.<worker>` stands as sent, and counts this
+    // connection under it as it always has. A bare address gets a name of
+    // its own -- from the device's user agent, then a number -- so each
+    // physical miner has its own key in every worker count and dashboard
+    // row instead of joining one anonymous bucket. Allocation comes after
+    // the store write: it claims the name in the same metrics step that
+    // checks it, so a login that fails before this point claims nothing.
+    match parsed_username.worker_name {
+        Some(_) => {
+            match ctx
+                .metrics
+                .increment_worker_count(
+                    session.btcaddress.clone().unwrap_or_default(),
+                    session.workername.clone().unwrap_or_default(),
+                )
+                .await
+            {
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::error!("Failed to send increment worker count message: {}", error);
+                }
+            }
         }
-    };
+        None => {
+            session.workername = Some(
+                allocate_worker_name(
+                    &ctx,
+                    parsed_username.user_key.as_ref(),
+                    session.user_agent.as_deref(),
+                )
+                .await?,
+            );
+        }
+    }
 
     let start_difficulty = match parsed_password.and_then(|parsed| parsed.difficulty) {
         Some(requested_difficulty) => {
@@ -438,6 +566,9 @@ mod tests {
             session.btcaddress.unwrap(),
             "tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx"
         );
+        // A bare address still authorizes, and now carries a worker name of
+        // its own instead of the empty string that rendered a blank row.
+        assert_eq!(session.workername.as_deref(), Some("worker1"));
         assert_eq!(session.password, Some("x".to_string()));
 
         // Check that user_id was stored in session
@@ -1830,3 +1961,5 @@ mod resolve_cash_share_tests {
 
 #[cfg(test)]
 mod donation_tests;
+#[cfg(test)]
+mod worker_naming_tests;
