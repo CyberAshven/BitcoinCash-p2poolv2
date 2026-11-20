@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! The requested payout outputs extension (`0x5052`), section 7 of
+//! The requested payout outputs extension (`0x5052`), described in
 //! `docs/architecture/sv2-payout-extension.md`: a standard Job Declaration
 //! client asks its Job Declaration connection for the exact coinbase outputs
 //! of the job it is about to declare, instead of calling `/jd_prepare`.

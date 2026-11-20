@@ -1,7 +1,8 @@
 # Architecture
 
-These notes describe the node and its share-chain rules. Proposals are
-marked separately from implemented behavior.
+The architecture files are LLM generated. The goal is make it easier
+for new comers to the code base and other LLMs to quickly understand
+the design and remain consistent with the design choices.
 
 - [Share processing pipeline](share-processing-pipeline.md)
 - [Async flow and concurrency](async-flow.md)
@@ -13,5 +14,6 @@ marked separately from implemented behavior.
 - [Metrics](metrics.md)
 - [Share chain address format](address-format.md)
 - [Mine on the current chain](mine-on-bitcoin-chain.md)
+- [SV2 payouts for standard Job Declaration clients](sv2-payout-extension.md)
+- [SV2 large templates extension](sv2-large-templates-extension.md)
 - [Proposal: a decentralized PHOTON GPU pool](photon-pool.md)
-- [Proposal: P2Pool payouts for standard SV2 Job Declaration clients](sv2-payout-extension.md)

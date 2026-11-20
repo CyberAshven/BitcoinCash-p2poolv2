@@ -45,17 +45,13 @@ rpc() {
 
 ## 1. Prerequisites: the BCHN regtest node
 
-The sim talks to one local **BCHN regtest** node (RPC + ZMQ). Install BCHN
-from its release tarball
-(<https://github.com/bitcoin-cash-node/bitcoin-cash-node/releases>; the
-version and SHA-256 sums CI uses are pinned in `docker/bchn/Dockerfile`), so
-its `bitcoind` and `bitcoin-cli` are on your `PATH`. BCHN's daemon is called
-`bitcoind` like Bitcoin Core's; a Bitcoin Core node will not do, and the
-harness refuses one.
-
-The harness also runs on Windows with BCHN's Windows release (`bitcoind.exe`
-and `bitcoin-cli.exe` on `PATH`). On Windows, nodes are stopped with a forced
-`taskkill` rather than a graceful TERM.
+The sim talks to one local **BCHN regtest** node (RPC + ZMQ). Put BCHN's
+`bitcoind` and `bitcoin-cli` on your `PATH` from its release tarball
+(<https://github.com/bitcoin-cash-node/bitcoin-cash-node/releases>; CI's
+version and SHA-256 sums are pinned in `docker/bchn/Dockerfile`). The
+harness refuses a Bitcoin Core node. On Windows it runs with BCHN's Windows
+release (`bitcoind.exe` and `bitcoin-cli.exe` on `PATH`) and stops nodes
+with a forced `taskkill`.
 
 Check it's up:
 
@@ -76,15 +72,13 @@ ADDR=$(W getnewaddress)
 B generatetoaddress 101 "$ADDR"     # spendable coinbase + a chain to build on
 ```
 
-`-allowunconnectedmining` matters: BCHN's `getblocktemplate` refuses work
-with "Bitcoin is not connected!" while the node has no peers, on regtest
-too, and a lone regtest node has none. BCHN also creates and loads a default
-wallet, so wallet calls name the `p2pool` wallet (`W`, or the
-`/wallet/p2pool` RPC path the harness uses). A node restarted after its tip
-is more than a day old counts itself in initial block download and refuses
-templates until a new block arrives: mine one (`B generatetoaddress 1
-"$ADDR"`), or start it with `-maxtipage=2000000000` as the Docker regtest
-config does.
+`-allowunconnectedmining` is needed: without peers BCHN's
+`getblocktemplate` refuses work ("Bitcoin is not connected!"), on regtest
+too. BCHN also loads a default wallet, so wallet calls name the `p2pool`
+wallet (`W`, or the `/wallet/p2pool` RPC path the harness uses). A node
+whose tip is more than a day old refuses templates until a new block
+arrives: mine one (`B generatetoaddress 1 "$ADDR"`), or start it with
+`-maxtipage=2000000000` as the Docker regtest config does.
 
 Sanity:
 
@@ -523,12 +517,13 @@ make it:
 bitcoin-cli -regtest -rpcwallet=p2pool generatetoaddress 1800 "$(bitcoin-cli -regtest -rpcwallet=p2pool getnewaddress)"
 IDEAL_BLOCK_TIME=3 SHARES_PER_BLOCK=20 HASHRATE=1e15 LATENCY_MS=50 LOG_LEVEL=info \
 WEAK_SHARES=1 VIRTUAL_MINERS=100 MERGE_TOKENS=/path/to/tokens.json \
-PAYOUT_LEVELS=5,5,5,5,3,3,3,3,0,0,0,0 \
+PAYOUT_LEVELS=5,5,5,5,3,3,3,3,1,1,1,1 \
   cargo sim run-swarm 12
 ```
 
 Leave `MERGE_TOKENS` out for the control: every payee then fits the
-coinbase and no tree is built.
+coinbase and no tree is built. A level below 1 (`MIN_PAYOUT_LEVEL`) is
+refused.
 
 What to read afterwards:
 
@@ -542,62 +537,41 @@ What to read afterwards:
   hash is `0x76`, its node's seed (index + 1, 8 bytes little endian) and its
   own number, so a P2PKH script names the node it belongs to.
 
-Three runs on 2026-11-12, 12 nodes each: token shares with the smallest
-four nodes at level 0 (3 hours 23 minutes, 4,134 shares, 226 regtest
-blocks); the same without tokens (38 minutes, 797 shares, 50 blocks); and
-token shares with those four nodes at level 1 instead of 0 (41 minutes, 855
-shares, 55 blocks, of which the node still served the trees of the last
-22). The table below is of the first two.
+What it showed, 12 nodes, 3-second shares, 50 ms latency, under earlier
+rules: a chain started at `R` = 256 (now 32, `GENESIS_WEAK_RATIO_MULTIPLE`),
+a share carried at most 64 weak shares, and the four smallest nodes ran at
+level 0 (now refused; a third run put them at level 1):
 
-| What | Token shares, level 0 | No tokens, level 0 |
-|---|---|---|
-| Tips | all 12 nodes on the same tip at the end; in 48 samples of the first 25 minutes, equal in 30, within one share in 45, never more than 4 apart | all 12 on the same tip at the end |
-| Shares marked invalid, shares dropped as unresolvable, disconnects | 0, 0, 0 | 0, 0, 0 |
-| Full shares found, and on the chain | 4,309 and 4,134: 4.1% off the chain at 3-second shares and 50 ms | |
-| `R` (the logged `weak_ratio` over 1,024) | starts at 256, 105 after 10 minutes, 33.8 after 30 minutes, 34.1 at the end (the payout simulator settles at 34.7) | 103 after 10 minutes, 33.4 after 30 minutes, 34.1 at the end |
-| Weak shares in the first half hour | 42,188 expired: a new chain finds them 256 times as fast as shares, and a share carries 64 | 36,178 expired |
-| Weak shares after the first hour | 101,212 carried, none expired | |
-| Dropped request streams on the biggest node | 4,535 `at capacity` and 6,894 `max sub-streams reached`, all in the first 10 minutes; none in the 3 hours after | 4,720 and 6,021, all in the first minute |
-| Weak shares from peers, all nodes | | 719,915 taken, 7,122,362 refused as duplicates, 4,432 refused at the peer's rate |
-| Payout trees | 181 built, about 176 payees each at the full reward; 65 paid out on regtest by the nodes once 100 blocks deep | none |
+- All 12 nodes ended on the same tip, with no shares marked invalid, none
+  dropped as unresolvable and no disconnects; 4.1% of full shares were off
+  the chain. `R` (the logged `weak_ratio` over 1,024) settled at 34.1 (the
+  payout simulator settles at 34.7). While `R` was high at the start of
+  the chain, weak shares expired, since a share carried at most 64; after
+  the first hour none did.
+- Each node sends every weak share whole to each peer but the one it came
+  from, so in this mesh a node takes each from all 11 peers (719,915 taken,
+  7,122,362 refused as duplicates). At the start of the chain, with `R` at
+  256, that was more requests than a node's streams hold: thousands of
+  `at capacity` and `max sub-streams reached` drops in the first minutes,
+  none after.
+- Token shares built 181 payout trees of about 176 payees each, paid out on
+  regtest by the nodes once 100 blocks deep.
+- Each node's miners were paid against their part of the hashrate:
 
-Each node sends every weak share whole to each peer but the one it came
-from, so in this mesh a node receives it from all 11 peers: ten duplicates
-for each one it takes. At the start of a chain, with `R` at 256 and the
-share difficulty still below the hashrate, that is more requests than a
-node's streams hold.
+| Nodes | Level | Token shares | No tokens | Token shares, level 1 in place of 0 |
+|---|---:|---:|---:|---:|
+| 0 to 3 (67% of the hashrate) | 5 | 1.01 to 1.05 | 0.96 to 1.02 | 0.96 to 1.04 |
+| 4 to 7 (20%) | 3 | 1.03 to 1.05 | 1.02 to 1.06 | 1.00 to 1.07 |
+| 8 to 11 (12%) | 0 | 0.79 to 0.82 | 1.02 to 1.05 | 0.96 to 1.08 |
 
-What each node's miners were paid against their part of the hashrate
-(token shares: the 83 blocks at the full reward whose tree the node still
-served; no tokens: all 50 blocks):
-
-| Node | Part of the hashrate | Level | Paid over hashrate part, token shares | Paid over hashrate part, no tokens | Paid over hashrate part, token shares, level 1 in place of 0 |
-|---:|---:|---:|---:|---:|---:|
-| 0 | 32.2% | 5 | 1.01 | 0.96 | 0.96 |
-| 1 | 16.1% | 5 | 1.05 | 1.02 | 1.04 |
-| 2 | 10.7% | 5 | 1.04 | 0.98 | 1.01 |
-| 3 | 8.1% | 5 | 1.03 | 0.98 | 0.99 |
-| 4 | 6.4% | 3 | 1.03 | 1.03 | 1.00 |
-| 5 | 5.4% | 3 | 1.03 | 1.02 | 1.02 |
-| 6 | 4.6% | 3 | 1.05 | 1.06 | 1.07 |
-| 7 | 4.0% | 3 | 1.04 | 1.04 | 1.05 |
-| 8 | 3.6% | 0 | 0.82 | 1.03 | 0.96 |
-| 9 | 3.2% | 0 | 0.80 | 1.05 | 0.99 |
-| 10 | 2.9% | 0 | 0.80 | 1.02 | 1.08 |
-| 11 | 2.7% | 0 | 0.79 | 1.02 | 0.97 |
-
-With level 1 in place of level 0 the four smallest nodes' miners were paid
-1.00 of their part together (1.03 in an earlier run of 16 blocks), and the
+A level 0 draw paid 546 satoshis, which in the payout tree was below dust
+once the tree's fee was taken, so the tree handed it to its largest payee:
+44,978 satoshis a block, where its work earned about 3,900. Without tokens
+every payee fits the coinbase and is paid there. At level 1 the four
+smallest nodes' miners were paid 1.00 of their part together, and the
 tree's largest payee received 17,648 satoshis a block, one level 5 payment.
-
-The level 0 miners lose a fifth on token shares, and more as slices
-shrink: after the regtest halving to 610,351 satoshis they were paid 0.60
-to 0.67. A level 0 draw pays 546 satoshis, which in the payout tree is
-below dust once the tree's fee is taken, so the tree hands it to its
-largest payee. That payee received 44,978 satoshis a block on average,
-where its work earned about 3,900. Without tokens every payee fits the
-coinbase and is paid there. `docs/sharechain/small-miners-design.md`,
-"Still open", has the rule and the candidate fixes.
+That is why the lowest level is 1
+([Payout levels](../sharechain/small-miners-design.md#4-payout-levels)).
 
 ---
 
@@ -653,6 +627,8 @@ curl -s :7600/chain_info | jq            # tip/candidate heights (prefer logs fo
 | `DIAL_FANOUT`                        | 3               | how many earlier peers each node dials                                                                             |
 | `PAYOUT_LEVELS`                      | unset           | each node's `[stratum] payout_level`, in node order, such as `5,7,7`; a node past the list keeps the default 5     |
 | `WEAK_SHARES`                        | 0               | `1` makes every node's miners send weak shares (`[sim] weak_shares`)                                               |
+| `WEAK_ASKS`                          | unset           | which nodes' weak shares ask for an easier weak target (`[sim] weak_asks`), in node order, such as `1,0,0` |
+| `KEEP_WHOLE_WEAK_SHARES`             | unset           | which nodes keep whole weak shares until their share's body is pruned (`[store] keep_whole_weak_shares`), in node order, such as `1,0` |
 | `VIRTUAL_MINERS`                     | unset           | miners each node models (`[sim] virtual_miners`), each with its own payout address, so a small swarm has many payees |
 | `MERGE_TOKENS`                       | unset           | a token file every node merge-mines (`[stratum] merge_mining_tokens`), which makes every share a token share      |
 | `LOG_LEVEL`                          | debug           | the nodes' log level; a long run with weak shares writes gigabytes at `debug`, so use `info`                        |

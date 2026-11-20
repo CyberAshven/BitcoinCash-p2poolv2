@@ -12,14 +12,10 @@ spendability, and deleting old block bodies.
 - Implemented: header sync, body fetch, two-zone validation, output
   spendability, the confirmation pipeline, block body deletion, the
   missing-input marker ("Missing Input at Write Time") and the reorg depth
-  limit at `PAYOUT_DEPTH` below the confirmed tip ("Reorg Depth Limit"). The
-  marker and the tighter limit landed on 2026-10-23, after share
-  transactions (2026-10-22) made them necessary.
-- Bitcoin Cash, 2026-11-16: whole weak shares are pruned one payout depth
-  below the confirmed tip, their leaf root and summary kept with the body
-  ("Weak Shares").
-- Open: the reorg depth limit redoes its refusal on every announcement of a
-  refused block (see "Reorg Depth Limit").
+  limit at `PAYOUT_DEPTH` below the confirmed tip ("Reorg Depth Limit").
+- Bitcoin Cash: whole weak shares are pruned one payout depth below the
+  confirmed tip, their leaf root and summary kept with the body ("Weak
+  Shares").
 
 ## Overview
 
@@ -56,9 +52,8 @@ Defined in `accounting/payout/sharechain_pplns/pplns_window.rs`.
 
 ### Bitcoin Cash
 
-The constants above are Bitcoin's (upstream's). Since the share-chain rule
-batch of 2026-10-24 (audit A12), Bitcoin Cash derives its own from its
-100-share maturity instead of Bitcoin's 6,048 (`ChainDepths::BITCOIN_CASH`):
+The constants above are Bitcoin's (upstream's). Bitcoin Cash derives its own
+from its 100-share maturity (`ChainDepths::BITCOIN_CASH`):
 
 | Constant | Value | Derivation |
 |---|---|---|
@@ -71,46 +66,24 @@ batch of 2026-10-24 (audit A12), Bitcoin Cash derives its own from its
 | Block bodies kept below the confirmed tip | 242,534 | `BCH_PRUNE_DEPTH + PRUNE_INTERVAL` |
 | Whole weak shares kept below the confirmed tip | 121,423 | `BCH_PAYOUT_DEPTH + PRUNE_INTERVAL`; their summary stays with the body ("Weak Shares") |
 
-- `BCH_PAYOUT_DEPTH` is a share-chain rule: a Bitcoin Cash share coinbase
-  output can be spent from depth 100 and expires 121,063 shares below the
-  spending share. It also sizes the full-validation zone, so every share a
-  coinbase near the tip pays is fully validated, and the reorg depth limit
-  ("Reorg Depth Limit"), 121,063 shares below the confirmed tip.
-- Doubled, it is the prune depth, for the same reason as on Bitcoin: a
-  spend at the bottom of the zone may use outputs down to two payout depths
-  below the tip. Bitcoin Cash adds `WEAK_DEPTH` (48 shares,
-  `ChainDepths::weak_anchor_depth`): a weak share carried by a share at the
-  bottom of the zone may have its parent that much lower, and is paid from a
-  window anchored there.
-- The window walk reads headers (`PplnsWindow` caches confirmed headers and
-  their uncles), which are never pruned, and on Bitcoin Cash the summary of
-  the weak shares each share carries (`WeakSummaries`), which is body data.
-  A payout reads at most one payout depth below the share it pays for, and
-  the deepest share a node fully checks, at the bottom of a syncing node's
-  zone or on the deepest fork it follows, sits one payout depth below the
-  tip: payouts read summaries down to two payout depths, and a weak share
-  carried at the bottom of the zone `WEAK_DEPTH` lower, to the prune height.
-  The body keeps them, so pruning cannot remove anything a payout needs.
-  Until 2026-11-16 the prune depth was two payout depths alone: a syncing
-  node never fetched the bodies the weak share payouts read up to 46 shares
-  below it, credited those shares without their weak shares, and could mark
-  an honest share invalid (the alpha side of run 43851198602 did). A confirmed share
-  whose summary is missing is credited without its weak shares, which is
-  right only for a share confirmed from its header below the prune height.
-- Every chain's depths are asserted at compile time: the walk plus its
-  uncles fits the payout depth, and the deepest followed fork with its
-  uncles stays above the prune target. The store, the block receiver, the
-  organise and validation workers and the share transaction pool all read
-  the node's chain's depths (`Store::with_chain`, `ChainDepths::for_chain`).
-- The sim build shortens the window to 80 shares; Bitcoin Cash's maturity
-  stays 100 there, so the sim's `BCH_PAYOUT_DEPTH` is 183 and its prune
-  depth 414 (2 x 183 + 48).
-- Bitcoin Cash nodes relay share transactions and mine them in their shares
-  (since 2026-10-22, `shares/transaction_pool.rs`, `handle_stratum_share.rs`),
-  so a block may spend an output this node never fetched. Both rules that
-  makes necessary are in place, on Bitcoin Cash and Bitcoin alike: the
-  missing-input marker ("Missing Input at Write Time") and the reorg depth
-  limit at one payout depth below the confirmed tip ("Reorg Depth Limit").
+- `BCH_PAYOUT_DEPTH` is a share-chain rule: a share coinbase output can be
+  spent from depth 100 and expires 121,063 shares below the spending share.
+  It also sizes the full-validation zone and the reorg depth limit.
+- Doubled, it is the prune depth, as on Bitcoin, plus `WEAK_DEPTH` (48
+  shares, `ChainDepths::weak_anchor_depth`): a weak share carried at the
+  bottom of the zone is paid from a window anchored that much lower, which
+  reads weak share summaries, body data ("Weak Shares"). Earlier depths:
+  [Rule history](../sharechain/rule-history.md).
+- Every chain's depths are asserted at compile time (the walk plus its
+  uncles fits the payout depth; the deepest followed fork with its uncles
+  stays above the prune target), and every component reads the node's
+  chain's depths (`Store::with_chain`, `ChainDepths::for_chain`).
+- The sim build shortens the window to 80 shares; maturity stays 100, so
+  the sim's `BCH_PAYOUT_DEPTH` is 183 and its prune depth 414
+  (2 x 183 + 48).
+- Share transactions (`shares/transaction_pool.rs`) let a block spend an
+  output this node never fetched; the missing-input marker and the reorg
+  depth limit cover that, on both chains.
 
 ## Model: Rules for Validity, Boundaries for Storage
 
@@ -371,8 +344,8 @@ Relevant code:
 | `FoundBlocks` | kept forever | Never pruned (`metrics.md`) |
 | `Uncles` | kept | Small, and derived from headers |
 | `BlockTxids`, `BitcoinTxids`, `BitcoinCoinbase` | deleted below the prune target | Body data. Nothing writes `BitcoinTxids` yet; its key is deleted anyway so a future writer cannot leak data |
-| `WeakShares` | deleted below the weak share prune target, one payout depth and one `PRUNE_INTERVAL` below the confirmed tip, unless `store.keep_whole_weak_shares`; then below the prune target | The weak shares a Bitcoin Cash share carries, whole. Read only to check a share inside the payout depth, to serve them to a peer whose zone holds that share, and to show them ("Weak Shares") |
-| `WeakSummaries` | deleted below the prune target | Body data: the leaf root and summary of a share's weak shares (`PrunedWeakShares`), their hashes and credit, which the PPLNS window and the carried-once rule read. Payouts read them down to the prune height, two payout depths and `WEAK_DEPTH`; a pruned block is below every window, so nothing reads its summary again |
+| `WeakShares` | deleted below the weak share prune target (one payout depth and one `PRUNE_INTERVAL` below the confirmed tip), or below the prune target with `store.keep_whole_weak_shares` | Bitcoin Cash: the weak shares a share carries, whole ("Weak Shares") |
+| `WeakSummaries` | deleted below the prune target | Body data: the leaf root and summary of a share's weak shares (`PrunedWeakShares`), which the PPLNS window and the carried-once rule read down to the prune height |
 | `Tx`, `Inputs`, `Outputs`, `TxidsBlocks`, `SpendsIndex` | deleted below the prune target, unless a kept block still includes the txid | Body data that can be shared between blocks |
 | candidate `BlockHeight` entries | deleted at every height below the prune target | Far below the confirmed tip they duplicate the confirmed entries |
 
@@ -561,10 +534,9 @@ At 6 hours a run deletes about 2,160 heights, and the node holds between
   - `organise_block`, `detach_candidate_branch` and
     `reorg_candidate_from_candidate` read only above the confirmed tip.
 - **Parent-wait buffer.** `BlockReceiver`'s pending buffer is bounded
-  (`PendingLimits`: 1,024 blocks, 32 MiB, 10 minutes, oldest evicted first;
-  `share-processing-pipeline.md`, "BlockReceiver ancestry gate"). An entry
-  waiting on a parent below `prune_height` is released by the ancestry gate,
-  which exempts that parent, or expires.
+  ([ancestry gate](share-processing-pipeline.md#blockreceiver-ancestry-gate)).
+  An entry waiting on a parent below `prune_height` is released by the
+  ancestry gate, which exempts that parent, or expires.
 
 ### Weak Shares
 
@@ -575,95 +547,72 @@ family): the proof-of-work hashes the carried-once rule reads and the
 credit groups the PPLNS window reads, at most 156 bytes a weak share. Whole
 weak shares are deleted at the weak share prune target, one payout depth
 and one `PRUNE_INTERVAL` below the confirmed tip; the leaf root and summary
-go with the body at the prune target.
-
-**What reads them**, and what each needs:
+go with the body at the prune target. A confirmed share whose summary is
+missing is credited without its weak shares, which is right only for a
+share confirmed from its header below the prune height.
 
 | Reader | Reads | Deepest it reads |
 |---|---|---|
-| PPLNS window: payouts and the coinbase check (`weak_credit.rs`) | summaries | One payout depth below the share paid for. The deepest share a node fully checks, at the bottom of a syncing node's zone or on a branch forking at the reorg floor, sits one payout depth below the tip, so two payout depths; a weak share it carries is paid from up to `WEAK_DEPTH` lower, the prune height |
-| Carried-once rule (`weak_shares_carried_by_ancestors`), weak pool (`carried_by_chain`) | summary proof-of-work hashes | `WEAK_DEPTH - 1` shares |
-| Body check (`check_weak_shares_match_header`) | the weak shares the body carries, or their leaf root and summary | every body received |
-| Full validation (`validate_carried_weak_headers`, `validate_carried_weak_coinbases`) | whole weak shares | a share within the payout depth of the candidate tip, or on a branch forking at most `MAX_REORG_DEPTH` below the confirmed tip |
-| `getdata` (sync and fetch) | whole weak shares, or their leaf root and summary | every body down to the requester's prune height |
-| `GetCarriedWeakShares` | whole weak shares | shares just relayed |
-| Validation by hash from the store (`validation_worker`) | the stored body | a block not yet `BlockValid` |
-| API `/share`, the dashboard and web share pages, `db_query` | whole weak shares, else the summary | any |
+| PPLNS window: payouts and the coinbase check (`weak_credit.rs`) | summaries | the prune height: one payout depth below a share that may sit one payout depth below the tip (a syncing node's zone bottom, a fork at the reorg floor), plus `WEAK_DEPTH` for a weak share it carries |
+| Carried-once rule (`weak_shares_carried_by_ancestors`), weak pool (`carried_by_chain`) | summary hashes | `WEAK_DEPTH - 1` shares |
+| Full validation (`validate_carried_weak_headers`, `validate_carried_weak_coinbases`) | whole weak shares | within the payout depth of the candidate tip, or a fork at most `MAX_REORG_DEPTH` below the confirmed tip |
+| `getdata` (sync and fetch) | whole weak shares, or leaf root and summary | every body down to the requester's prune height |
 
-**The bound is in shares.** The weak share prune target is
-`BCH_PAYOUT_DEPTH + PRUNE_INTERVAL` below the confirmed tip:
-`BCH_COINBASE_MATURITY + PPLNS_WINDOW_SHARES + MAX_UNCLES_DEPTH`, plus the
-pruner's lag. A window is sized by work, the paying header's difficulty
-times three blocks, but never past `PPLNS_WINDOW_SHARES` shares; a pool
-that is small, a difficulty that rises, or a paying header claiming more
-difficulty than Bitcoin Cash requires only lengthens it to that cap. No
-difficulty, time span or day count moves the bound: 121,423 shares is 14
-days at 10-second shares and 1.4 days at 1-second shares, and the window's
-cap is the same 120,960 shares in both.
+Other readers take the stored body as it is, whole weak shares or the leaf
+root and summary: the body check (`check_weak_shares_match_header`, every
+body received), `GetCarriedWeakShares` (shares just relayed), validation by
+hash (`validation_worker`, a block not yet `BlockValid`), and the API
+`/share`, the dashboard and web share pages and `db_query`.
 
-**Why the summary is committed.** A syncing node fetches bodies down to its
-prune height, two payout depths and `WEAK_DEPTH` below the tip, and pays
-from summaries down there. Under `weak4` alone a summary could be checked only by the whole weak
-shares it came from, so every node would have had to keep them two payout
-depths. Since `-summary` (`BCH_WEAK_SHARE_RULE_TAG`) the weak root is
-`SHA-256d(leaf root || SHA-256d(summary))`, so a body served with the leaf
-root and summary in place of its weak shares is checked against the
-header like any other body part, and a summary altered by the serving peer
-is a bad copy.
+**The bound is in shares:** `BCH_PAYOUT_DEPTH + PRUNE_INTERVAL` (121,423)
+below the confirmed tip. A window is sized by work but never passes
+`PPLNS_WINDOW_SHARES`, so no difficulty or share rate moves the bound: it
+is 14 days at 10-second shares and 1.4 days at 1-second shares.
 
-**Serving and receiving.** `get_share` returns a body whose whole weak
-shares were pruned with `pruned_weak_shares` set, and `getdata` sends it as
-is: a zero weak share count, then a form byte and the leaf root and
-summary. The receiver checks it (`check_pruned_weak_shares_match_header`)
-and stores it only for a share at least one payout depth below its
-candidate tip (`BlockReceiver::below_payout_depth`). A serving node prunes
-an hour below its own payout depth, so a node whose headers are synced
-always finds such a body below its zone; one whose tip lags further drops
+**The summary is committed** in the weak root (`BCH_WEAK_SHARE_RULE_TAG`;
+[How a share carries them](../sharechain/small-miners-design.md#how-a-share-carries-them)),
+so a body served with the leaf root and summary in place of its weak shares
+is checked against the header like any other body part, and an altered
+summary is a bad copy. Without it every node would keep whole weak shares
+two payout depths.
+
+**Serving and receiving.** `get_share` returns such a body with
+`pruned_weak_shares` set, and `getdata` sends it as is: a zero weak share
+count, then a form byte and the leaf root and summary. The receiver checks
+it (`check_pruned_weak_shares_match_header`) and stores it only for a share
+at least one payout depth below its candidate tip
+(`BlockReceiver::below_payout_depth`); a node whose tip lags further drops
 it and the hash stays fetchable. Full validation of a pruned body ends
-without a verdict (`FailureKind::Unresolvable`), never with a root mismatch:
-it happens only after the candidate tip fell back across the payout depth.
+without a verdict (`FailureKind::Unresolvable`), never with a root
+mismatch.
 
-**Writer.** A whole body stored below the weak share prune target keeps
-only its leaf root and summary, since the pruner has passed it.
-
-**Pruner.** `prune_weak_shares_if_due` runs after `prune_block_bodies_if_due`
-in the same background task, gated the same way, one writer command
-(`PruneWeakSharesChunk`) per `PRUNE_INTERVAL` heights, deleting only keys
-present. Its start is held in memory; after a restart it begins at the body
-prune target, below which no body is left.
+**Writer and pruner.** A whole body stored below the weak share prune
+target keeps only its leaf root and summary. `prune_weak_shares_if_due`
+runs after `prune_block_bodies_if_due` in the same task, gated the same
+way, one `PruneWeakSharesChunk` writer command per `PRUNE_INTERVAL`
+heights, deleting only present keys. After a restart it starts at the body
+prune target.
 
 **Setting.** `store.keep_whole_weak_shares = true`, for an explorer or an
-archive, keeps them whole until the body is pruned. It keeps what it
-receives: an archive that syncs late gets the weak shares of shares more
-than one payout depth deep whole only from a peer that still holds them,
-and otherwise their leaf root and summary. Every node, pruned or not,
-serves every body a syncing peer asks for.
+archive, keeps them whole until the body is pruned, as received: an archive
+that syncs late gets them whole only from a peer that still holds them.
+Every node serves every body a syncing peer asks for.
 
 ### Reorg Depth Limit
 
 Pruning makes the prune target an implicit checkpoint. A heavier branch
 forking below it needs the fork point's body, which every node has deleted,
 so following it would stall confirmation for as long as the attacker keeps
-the work lead. Share transactions tighten that further, to
+the work lead. Share transactions tighten the limit to
 `MAX_REORG_DEPTH = PAYOUT_DEPTH` (127,008 shares, ~14.7 days) below the
-confirmed tip (`store/prune_blocks.rs`):
-
-- A block on a branch forking at height `f` may validly spend outputs whose
-  coinbase root is above `f - PAYOUT_DEPTH`.
-- With `f` at least `tip - PAYOUT_DEPTH`, every such output is above the
-  tip's `prune_height`: its body was fetched and never deleted, and its root
-  was stamped from stored inputs, never `Unknown`.
-- A deeper fork onto a heavier but lower branch (a majority that slows its
-  timestamps so ASERT raises its difficulty) could put a fully validated
-  block above an output this node never fetched or stamped `Unknown`, and
-  this node would reject a valid block.
-
-Upstream's design note said "about `PAYOUT_DEPTH + PRUNE_INTERVAL`". That
-bound covers deleted bodies only. A node that synced within the last
-`PRUNE_INTERVAL` never fetched the bodies in the extra interval, and an
-output stamped `Unknown` may have its true root anywhere below the
-`prune_height` of its write time, that interval included. `PAYOUT_DEPTH`
-covers both, at the cost of one hour of depth.
+confirmed tip (`store/prune_blocks.rs`). A block on a branch forking at `f`
+may spend outputs rooted above `f - PAYOUT_DEPTH`; with `f` at least
+`tip - PAYOUT_DEPTH` each is above the tip's `prune_height`, so its body was
+fetched and its root is never `Unknown`. A deeper fork onto a heavier but
+lower branch (a majority slowing its timestamps so ASERT raises its
+difficulty) could make this node reject a valid block. Upstream's "about
+`PAYOUT_DEPTH + PRUNE_INTERVAL`" covers deleted bodies only, not bodies a
+recently synced node never fetched, nor an `Unknown` root.
 
 `organise_header` therefore refuses to reorg the candidate chain onto a
 branch whose fork point is below `reorg_floor_for_tip(confirmed tip)`,
@@ -675,13 +624,10 @@ MAX_REORG_DEPTH below the confirmed tip` at info and returns `Ok(None)`, as
 the invalid-branch refusal does. The walk stops on chain membership, not on
 the candidate index, so deleting candidate entries does not affect it.
 
-The floor follows the confirmed tip, not the candidate tip, as the prune
-target does. During a sync the candidate tip runs far ahead of the confirmed
-one, and a fresh node whose candidate chain first follows a tall but light
-branch must still be able to reorg onto the heavier one. The floor is a
-whole `PAYOUT_DEPTH` above the prune height, so the old margin for uncles
-below the fork point is implied; a compile-time assertion in
-`prune_blocks.rs` holds `MAX_REORG_DEPTH + MAX_UNCLES_DEPTH` within
+The floor follows the confirmed tip, as the prune target does, so a fresh
+node whose candidate chain first follows a tall but light branch can still
+reorg onto the heavier one. A compile-time assertion in `prune_blocks.rs`
+holds `MAX_REORG_DEPTH + MAX_UNCLES_DEPTH` within
 `PRUNE_DEPTH + PRUNE_INTERVAL`.
 
 What different attacks achieve:
@@ -702,21 +648,18 @@ within the limit, can still drop the tip far enough to reach an `Unknown`
 root. A node partitioned from the pool for more than 14.7 days cannot rejoin
 by itself and needs a fresh store.
 
-**The refusal is remembered.** Without memory the node redid it on every
-announcement of a block on the refused branch: it sent `getheaders`, got
-the branch's headers back from height 1, and refused each one again with a
-walk to the fork point. The sim `deep-fork-refused` run logged about 10,000
+**The refusal is remembered.** Without memory the node redid the refusal,
+with a walk to the fork point, for every header of the refused branch on
+every announcement. The sim `deep-fork-refused` run logged about 10,000
 refusals in 90 seconds over 474 headers. At production depth that cost is
-quadratic in the fork depth, and a peer holding such a branch could trigger
-it with made-up announcements at no extra work, once a majority attack had
-built the branch. The store now keeps each refused block in memory with the
-height its branch forks from (`reorg_refused_before`): a repeat costs a
-lookup, and a child of a refused block is refused by its parent's entry
-without a walk. A remembered fork point is used only while it is below the
-reorg floor, every candidate reorg forgets them all, and the memory holds at
+quadratic in the fork depth, and free for a peer to trigger once a majority
+had built the branch. The store keeps each refused
+block with the height its branch forks from (`reorg_refused_before`): a
+repeat costs a lookup, and a child of a refused block is refused by its
+parent's entry. An entry is used only while its fork point is below the
+reorg floor, every candidate reorg clears them, and the memory holds at
 most 65,536 blocks and starts empty on restart, so it refuses only what the
-walk would refuse. The node still answers the peer and stays connected;
-disconnecting a peer whose chain is refused is left for later.
+walk would. The node still answers the peer and stays connected.
 
 ### Tests
 
@@ -731,18 +674,14 @@ disconnecting a peer whose chain is refused is left for later.
   refused, exactly that deep followed, the old prune-target margin now
   refused, the floor following the confirmed tip), and `prune_blocks.rs`
   tests of `reorg_floor_for_tip`.
-- Weak shares (`p2poolv2_tests/src/weak_share_pruning_test.rs`): a pruned
-  node serves the leaf root and summary and a syncing node checks and
-  stores them; a tampered summary is a bad copy; whole weak shares go below
-  the target and not one share sooner; a restart after pruning; a window at
-  its share cap at the bottom of the zone pays from kept summaries; the
-  deepest reorg reads summaries just above the body prune target; a paying
-  header claiming more difficulty is still capped. `prune_blocks.rs` checks
-  the bound in shares at the production depths and in every build.
-- Missing input: `share_store.rs`, `transaction_store.rs` (the marker, its
-  encoding, propagation, `UnknownCoinbaseRoot`, the confirmation re-check of
-  unheld sources) and `p2poolv2_tests/src/missing_input_test.rs` (cases (a)
-  and (b) through the real store and validator).
+- Weak shares (`p2poolv2_tests/src/weak_share_pruning_test.rs`): serving
+  and checking the leaf root and summary, a tampered summary, the exact
+  prune bound, a restart, and windows at the bottom of the zone and on the
+  deepest reorg paying from kept summaries. `prune_blocks.rs` checks the
+  bound in shares at the production depths and in every build.
+- Missing input: `share_store.rs`, `transaction_store.rs` and
+  `p2poolv2_tests/src/missing_input_test.rs` (see "Missing Input at Write
+  Time").
 - Sim (`load-tests/sim`, RUNBOOK Tests H and I). The sim build compiles
   short depths (prune depth 200, interval 20, background interval 30s; see
   `docs/simulation/overview.md`), so every scenario prunes:
@@ -767,8 +706,7 @@ disconnecting a peer whose chain is refused is left for later.
 
 ## Missing Input at Write Time
 
-**Status.** Implemented 2026-10-23, the day after share transactions
-shipped, on Bitcoin Cash and Bitcoin alike.
+Applies on Bitcoin Cash and Bitcoin alike.
 
 **Problem (before the fix).** `add_sharechain_txs` computes root heights at
 write time, before validation, for every block. The old
@@ -790,9 +728,8 @@ then neither stored nor marked Invalid. Two cases hit this:
   - The block is valid. The input is within the block's own window,
     `>= h - PAYOUT_DEPTH`, but below `tip - PRUNE_DEPTH`, so this node
     never fetched it. Marking the block invalid would split nodes.
-  - Since share transactions shipped (2026-10-22) this can happen to a
-    syncing node: a valid block on the best chain was unstorable, and that
-    stall did not heal.
+  - With share transactions this can happen to a syncing node: a valid
+    block on the best chain was unstorable, and that stall did not heal.
 
 **Fix.** `StoredTxOut` has `coinbase_root: CoinbaseRoot`, `enum CoinbaseRoot
 { Height(u32), Unknown }` (`store/transaction_store.rs`).
@@ -804,12 +741,11 @@ then neither stored nor marked Invalid. Two cases hit this:
   `PrevoutRejection::UnknownCoinbaseRoot`.
 - **Confirm.** `recheck_block_prevouts_with_overlay` asks whether each
   source txid is confirmed only for the sources this node holds
-  (`are_held_txids_confirmed_with_overlay`). A spender of an output this node
-  never held can only have had a proof-of-work-only verdict, because full
-  validation fails on a missing output; asking would mark the block of case
-  (b) Invalid at confirmation, on this node only. Its outpoints are still
-  checked for a double spend. The transaction pool keeps refusing unknown
-  sources (`are_all_txids_confirmed`).
+  (`are_held_txids_confirmed_with_overlay`). A spender of an output never
+  held can only have had a proof-of-work-only verdict; asking would mark
+  the block of case (b) Invalid at confirmation, on this node only. Its
+  outpoints are still checked for a double spend. The transaction pool
+  keeps refusing unknown sources (`are_all_txids_confirmed`).
 - **Display.** No API shows `StoredTxOut` today. A wallet or outputs
   endpoint must show such outputs as unknown or expired.
 
@@ -884,14 +820,15 @@ never matter.
 
 ## Decisions (2026-10-23, share transactions)
 
-- **The missing-input marker is in,** as designed on 2026-10-15, plus the
-  confirmation re-check skipping sources this node never held, without
-  which case (b) was marked Invalid at confirmation instead of stalling.
+These replace the matching items above.
+
+- **The missing-input marker is in,** with the confirmation re-check
+  skipping sources this node never held.
 - **The reorg depth limit is `PAYOUT_DEPTH` below the confirmed tip,** not
-  the prune target and not `PAYOUT_DEPTH + PRUNE_INTERVAL` (see "Reorg Depth
-  Limit").
-- **Still open:** the repeated refusal, and the corner of two successive
-  heavier-but-lower majority reorgs.
+  the prune target, and refused fork points are remembered (see "Reorg
+  Depth Limit").
+- **Still open:** the corner of two successive heavier-but-lower majority
+  reorgs.
 
 ## Alternatives Rejected
 
@@ -909,22 +846,17 @@ never matter.
 
 ## Appendix: Growth of Data Kept Forever
 
-### BCH estimate, 2026-10-30
+### Bitcoin Cash estimate
 
 At one stored share per 10 seconds there are 3,153,600 shares per year.
-These are raw-size planning estimates, not measured database growth.
-GB uses decimal bytes. Candidate index entries are assumed to be pruned.
-Extra fork records, payout-tree data, `FoundBlocks`, RocksDB overhead and
-compaction space are excluded.
-
-For a pool-built no-token BCH header with a P2PKH payee, no donation or
-fee address, and no uncles, `ShareHeader` encodes to 260 bytes. Each uncle
-adds 32 bytes. Allow about 310 bytes including the 32-byte key at an
-assumed average of half an uncle per stored share. Token commitments,
-declared jobs, other payout scripts and optional addresses add bytes.
-This is a sample header size, not a maximum. See
-`shares/share_block/mod.rs`, `shares/coinbase_proof.rs` and
-`p2poolv2_wallet/src/share_owner.rs`.
+These are raw-size planning estimates in decimal GB, not measured growth;
+candidate index entries are assumed pruned, and fork records, payout-tree
+data, `FoundBlocks` and RocksDB overhead are excluded. The header sample is
+a pool-built no-token header with a P2PKH payee and no donation or fee
+address: 260 bytes, plus 32 an uncle, about 310 with the key at half an
+uncle a share (`shares/share_block/mod.rs`, `shares/coinbase_proof.rs`,
+`p2poolv2_wallet/src/share_owner.rs`); token commitments, declared jobs and
+other scripts add bytes.
 
 | Permanent records | Estimated bytes per stored share | Estimated GB per year |
 |---|---|---|
@@ -932,12 +864,9 @@ This is a sample header size, not a maximum. See
 | `BlockMetadata`, known height and 32-byte key | 71 | 0.22 |
 | Parent, height and uncle indexes, planning allowance | 200 | 0.63 |
 
-A stored coinbase branch adds `33 + 32 * depth` bytes: a 32-byte key,
-one-byte count and the hashes. Its depth grows with template transaction
-count, not directly with block bytes. For illustration, assume an average
-serialized transaction size of 250 bytes and filled templates. BCH has
-no witness bytes to discount. These are workload assumptions, not an
-observed transaction mix or a claimed block-size limit.
+A stored coinbase branch adds `33 + 32 * depth` bytes (key, count,
+hashes), its depth set by the template's transaction count; the scenarios
+assume full templates of 250-byte transactions.
 
 | BCH template scenario | Approximate transaction count | Branch depth | Branch bytes per share | Total permanent GB per year, using the allowances above |
 |---|---|---|---|---|
@@ -946,18 +875,15 @@ observed transaction mix or a claimed block-size limit.
 | 1 GB | 4,000,000 | 22 | 737 | 4.16 |
 | BCH share-chain branch limit | up to 2^32 | 32 | 1,057 | 5.17 |
 
-The last row is this implementation's branch limit, not a BCH block-size
-limit. Mainnet ABLA starts at a 32 MB floor and adjusts with demand. BCHN
-currently has a temporary 2 GB guard. The
-[ABLA specification](https://gitlab.com/0353F40E/ebaa/-/blob/main/README.md#32-bit-implementation-limitation)
-calls for removing it by May 2028. Use BCHN's current template limit when
-planning capacity. Do not assume every block fills it.
+The last row is this implementation's branch limit, not a block-size
+limit. ABLA starts at a 32 MB floor and adjusts with demand; BCHN's
+temporary 2 GB guard is to go by May 2028
+([ABLA specification](https://gitlab.com/0353F40E/ebaa/-/blob/main/README.md#32-bit-implementation-limitation)).
+Plan with BCHN's current template limit.
 
-The BCH coinbase is body data and is pruned. A conservative direct-payout
-budget is `367 + 34 * payees` bytes for P2PKH outputs. P2SH20 outputs
-take 32 bytes; P2SH32 outputs take 44. The 367-byte allowance includes a
-tree output and all other fields at their largest sizes. There is no BCH
-witness commitment. See `accounting/payout/coinbase_budget.rs`.
+The coinbase is body data and is pruned. Its direct-payout budget is
+`367 + 34 * payees` bytes for P2PKH outputs (P2SH20 32, P2SH32 44 bytes;
+`accounting/payout/coinbase_budget.rs`).
 
 | No-token P2PKH payees | Coinbase budget | GB per year if kept | GB for 242,174 retained coinbases |
 |---|---|---|---|
@@ -968,9 +894,8 @@ witness commitment. See `accounting/payout/coinbase_budget.rs`.
 `BCH_PRUNE_DEPTH` is 242,174 shares, about 28 days at this rate. Token
 shares cap their coinbase at 3,072 bytes and use a payout tree as needed.
 No-token coinbases may reach the 1,000,000-byte
-[BCH transaction maximum](https://github.com/bitcoin-cash-node/bitcoin-cash-node/blob/master/src/consensus/consensus.h).
-At that size, the retained coinbases alone take 242.13 GB of raw bytes.
-The separate 204,800-byte share-transaction allowance raises the body-byte
-estimate to 291.71 GB if every share fills both allowances. This excludes
-body indexes and the other costs above. Prune intervals and task lag also
-increase the retained set. These figures are not disk-space upper bounds.
+[BCH transaction maximum](https://github.com/bitcoin-cash-node/bitcoin-cash-node/blob/master/src/consensus/consensus.h):
+the retained coinbases alone then take 242.13 GB of raw bytes, and with
+the 204,800-byte share-transaction allowance full too, 291.71 GB of bodies,
+before body indexes, prune lag and the other costs above. These figures
+are not disk-space upper bounds.
