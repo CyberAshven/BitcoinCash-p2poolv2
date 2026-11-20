@@ -35,6 +35,7 @@ use bitcoin::{BlockHash, Target};
 use chart::ChartBlock;
 use history::{HashrateHistory, is_block, pool_hashrate};
 use maud::Markup;
+use p2poolv2_lib::accounting::stats::metrics::PoolMetrics;
 use p2poolv2_lib::address::bch_share::BchShareNetwork;
 use p2poolv2_lib::address_display::ShareInfoDisplay;
 use p2poolv2_lib::address_display::payout_address_string;
@@ -397,6 +398,25 @@ pub(crate) fn online_counts(miners: &[MinerRow]) -> (usize, usize) {
     let workers_online = miners
         .iter()
         .map(|miner| miner.workers.iter().filter(|worker| worker.active).count())
+        .sum();
+    (miners_online, workers_online)
+}
+
+/// The same two counts straight off the metrics actor's snapshot, for
+/// callers that fetched it for other fields too (the hashrate sampler
+/// and the `/hashrate` response): a miner is one with any worker
+/// `active`, a worker is one `active`, exactly as [`online_counts`]
+/// counts them off the miner rows.
+pub(crate) fn online_counts_from_metrics(metrics: &PoolMetrics) -> (usize, usize) {
+    let miners_online = metrics
+        .users
+        .values()
+        .filter(|user| user.workers.values().any(|worker| worker.active))
+        .count();
+    let workers_online = metrics
+        .users
+        .values()
+        .map(|user| user.workers.values().filter(|worker| worker.active).count())
         .sum();
     (miners_online, workers_online)
 }

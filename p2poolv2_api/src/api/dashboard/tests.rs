@@ -4,6 +4,8 @@ use axum::body::Body;
 use axum::http::{HeaderMap, Request, header};
 use p2poolv2_lib::accounting::payout::simple_pplns::SimplePplnsShare;
 use p2poolv2_lib::accounting::stats::metrics;
+use p2poolv2_lib::accounting::stats::user::User;
+use p2poolv2_lib::accounting::stats::worker::Worker;
 use p2poolv2_lib::monitoring_events::create_monitoring_event_channel;
 use p2poolv2_lib::node::actor::NodeHandle;
 use p2poolv2_lib::stratum::work::tracker::start_tracker_actor;
@@ -688,6 +690,57 @@ fn online_counts_count_active_workers() {
     };
     let miners = [miner(&[true, false, true]), miner(&[false]), miner(&[])];
     assert_eq!(online_counts(&miners), (1, 2));
+}
+
+#[test]
+fn online_counts_from_metrics_counts_the_same_way_as_online_counts() {
+    // One miner with two workers, one of them active, and one miner whose
+    // only worker is idle: the metrics-side counts must read (1, 1) as
+    // the row-based counts do.
+    let active_worker = Worker {
+        active: true,
+        ..Worker::default()
+    };
+    let idle_worker = Worker {
+        active: false,
+        ..Worker::default()
+    };
+    let mut busy_user = User::default();
+    busy_user.workers.insert("rig-a".to_string(), active_worker);
+    busy_user.workers.insert("rig-b".to_string(), idle_worker);
+    let mut quiet_user = User::default();
+    quiet_user
+        .workers
+        .insert("rig-c".to_string(), Worker::default());
+    let mut metrics = metrics::PoolMetrics::default();
+    metrics.users.insert("miner1".to_string(), busy_user);
+    metrics.users.insert("miner2".to_string(), quiet_user);
+
+    // The same two miners as rows: the first with an active and an idle
+    // worker, the second with only an idle one.
+    let miner = |active: &[bool]| MinerRow {
+        address: "bchtest:q".to_string(),
+        workers: active
+            .iter()
+            .enumerate()
+            .map(|(index, active)| WorkerRow {
+                name: format!("rig-{index}"),
+                active: *active,
+                accepted_work: 1,
+                best_share: 1,
+                last_share_at: 1,
+                hashrate: None,
+            })
+            .collect(),
+        accepted_work: 1,
+        best_share: 1,
+        last_share_at: 1,
+        payout_fraction: None,
+        hashrate: None,
+    };
+    let rows = [miner(&[true, false]), miner(&[false])];
+    assert_eq!(online_counts(&rows), (1, 1));
+    assert_eq!(online_counts_from_metrics(&metrics), online_counts(&rows));
 }
 
 #[test]

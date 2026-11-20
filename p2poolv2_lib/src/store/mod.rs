@@ -1168,6 +1168,8 @@ mod tests {
             pool: Some(1.5),
             local: None,
             network: Some(2.5),
+            miners: Some(4),
+            workers: Some(9),
         };
         store.add_hashrate_sample(&original).unwrap();
         let loaded = store.load_hashrate_samples(original.time);
@@ -1184,6 +1186,8 @@ mod tests {
                 pool: Some(1.0),
                 local: None,
                 network: None,
+                miners: None,
+                workers: None,
             })
             .unwrap();
         store
@@ -1192,6 +1196,8 @@ mod tests {
                 pool: Some(2.0),
                 local: None,
                 network: None,
+                miners: None,
+                workers: None,
             })
             .unwrap();
         store.evict_hashrate_samples_before(2_000).unwrap();
@@ -1209,6 +1215,8 @@ mod tests {
             pool: Some(1.0),
             local: None,
             network: Some(2.0),
+            miners: Some(2),
+            workers: Some(3),
         };
         {
             let store = Store::new(path.clone(), false).unwrap();
@@ -1227,6 +1235,8 @@ mod tests {
             pool: Some(1.0),
             local: None,
             network: Some(2.0),
+            miners: None,
+            workers: None,
         };
         {
             let store = Store::new(path.clone(), false).unwrap();

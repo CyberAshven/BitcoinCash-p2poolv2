@@ -2497,12 +2497,16 @@ mod tests {
                 pool: Some(100.0),
                 local: Some(50.0),
                 network: Some(4.0e6),
+                miners: Some(2),
+                workers: Some(3),
             },
             Sample {
                 time: 1_060,
                 pool: Some(200.0),
                 local: Some(60.0),
                 network: Some(5.0e6),
+                miners: Some(2),
+                workers: Some(4),
             },
         ];
         view.network_on = true;
@@ -2524,12 +2528,16 @@ mod tests {
                 pool: Some(100.0),
                 local: Some(50.0),
                 network: None,
+                miners: None,
+                workers: None,
             },
             Sample {
                 time: 1_060,
                 pool: Some(200.0),
                 local: Some(60.0),
                 network: None,
+                miners: None,
+                workers: None,
             },
         ];
         view.pool_on = false;
@@ -2564,12 +2572,16 @@ mod tests {
                 pool: Some(100.0),
                 local: Some(50.0),
                 network: None,
+                miners: None,
+                workers: None,
             },
             Sample {
                 time: 1_060,
                 pool: Some(200.0),
                 local: Some(60.0),
                 network: None,
+                miners: None,
+                workers: None,
             },
         ];
         view.chart_blocks = vec![ChartBlock {

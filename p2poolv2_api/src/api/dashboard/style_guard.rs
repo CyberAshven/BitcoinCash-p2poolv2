@@ -596,12 +596,16 @@ fn every_page() -> String {
             pool: Some(1e12),
             local: Some(1e9),
             network: Some(1e15),
+            miners: Some(1),
+            workers: Some(1),
         },
         Sample {
             time: 60,
             pool: Some(2e12),
             local: Some(2e9),
             network: Some(1e15),
+            miners: Some(1),
+            workers: Some(1),
         },
     ];
     let miners = vec![

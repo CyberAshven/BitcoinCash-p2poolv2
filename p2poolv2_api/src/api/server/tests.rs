@@ -904,6 +904,8 @@ async fn test_hashrate_route_serves_history() {
         pool: Some(5.0),
         local: None,
         network: Some(7.0),
+        miners: Some(1),
+        workers: Some(1),
     });
     let app = build_router_with_history(
         state.clone(),

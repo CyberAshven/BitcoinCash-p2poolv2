@@ -457,17 +457,24 @@ it on the first read-write open.
 **HashrateSample Structure:**
 ```rust
 pub struct HashrateSample {
-    pub time: u64,            // Unix seconds the sample was taken
-    pub pool: Option<f64>,     // Whole pool, hashes per second
-    pub local: Option<f64>,    // This node's miners, hashes per second
-    pub network: Option<f64>,  // Bitcoin Cash network, hashes per second
+    pub time: u64,             // Unix seconds the sample was taken
+    pub pool: Option<f64>,      // Whole pool, hashes per second
+    pub local: Option<f64>,     // This node's miners, hashes per second
+    pub network: Option<f64>,   // Bitcoin Cash network, hashes per second
+    pub miners: Option<u64>,    // This node's miners with a worker online
+    pub workers: Option<u64>,   // This node's online workers in all
 }
 ```
 
-Each `Option<f64>` is a tag byte (`1` = value, `0` = `None`, anything
-else is a decode error) followed by the `f64` in little endian when
-present. Loading skips a corrupt, key-mismatched or future-dated row
-with a warning instead of failing startup.
+Each `Option` is a tag byte (`1` = value, `0` = `None`, anything
+else is a decode error) followed by the value (`f64` little endian, `u64`
+little endian) when present. A row written before the count fields
+existed ends after `network`: decode treats a clean end of input where a
+tag would sit as `None`, so old rows load with unknown counts, and a row
+from a format with more fields still decodes (the unread tail is
+ignored, as the trailing bytes of the fixed layout always were).
+Loading skips a corrupt, key-mismatched or future-dated row with a
+warning instead of failing startup.
 
 ---
 
