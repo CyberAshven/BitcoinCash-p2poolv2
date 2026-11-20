@@ -412,6 +412,9 @@ pub(crate) async fn handle_authorize<'a, D: DifficultyAdjusterTrait>(
     // row instead of joining one anonymous bucket. Allocation comes after
     // the store write: it claims the name in the same metrics step that
     // checks it, so a login that fails before this point claims nothing.
+    // The name only labels the dashboard and metrics, so a login that gets
+    // none -- every candidate live, or no answer from the metrics actor --
+    // still mines, counted in the anonymous bucket as before naming.
     match parsed_username.worker_name {
         Some(_) => {
             match ctx
@@ -429,14 +432,28 @@ pub(crate) async fn handle_authorize<'a, D: DifficultyAdjusterTrait>(
             }
         }
         None => {
-            session.workername = Some(
-                allocate_worker_name(
-                    &ctx,
-                    parsed_username.user_key.as_ref(),
-                    session.user_agent.as_deref(),
-                )
-                .await?,
-            );
+            match allocate_worker_name(
+                &ctx,
+                parsed_username.user_key.as_ref(),
+                session.user_agent.as_deref(),
+            )
+            .await
+            {
+                Ok(name) => session.workername = Some(name),
+                Err(error) => {
+                    tracing::warn!("{error}; counting the login without a worker name");
+                    if let Err(error) = ctx
+                        .metrics
+                        .increment_worker_count(
+                            session.btcaddress.clone().unwrap_or_default(),
+                            String::new(),
+                        )
+                        .await
+                    {
+                        tracing::error!("Failed to send increment worker count message: {}", error);
+                    }
+                }
+            }
         }
     }
 

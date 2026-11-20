@@ -175,6 +175,39 @@ async fn the_numeric_fallback_skips_a_live_numbered_name() {
     assert_eq!(name, "worker2");
 }
 
+/// A login that finds every candidate name live is still accepted: the name
+/// only labels the dashboard, so the login mines unnamed, counted in the
+/// anonymous bucket as it was before naming, rather than being refused.
+#[tokio::test]
+async fn a_login_with_no_free_name_left_still_mines_unnamed() {
+    let (ctx, _emissions, _dirs) = test_bch_stratum_context("http://127.0.0.1:1").await;
+    for ordinal in 1..=MAX_AUTO_WORKER_ATTEMPTS {
+        assert!(
+            ctx.metrics
+                .reserve_worker_name(payout(), candidate_worker_name(None, ordinal))
+                .await
+                .unwrap()
+        );
+    }
+
+    let session = authorize(&ctx, &payout(), None).await;
+    assert_eq!(session.workername, None);
+
+    let unnamed = ctx
+        .metrics
+        .get_metrics()
+        .await
+        .users
+        .get(&payout())
+        .cloned()
+        .expect("the miner is registered")
+        .workers
+        .get("")
+        .cloned()
+        .expect("the login is counted in the anonymous bucket");
+    assert!(unnamed.active);
+}
+
 /// The first run of allowed characters, lowercased: the device in front of
 /// the version, and only that.
 #[test]

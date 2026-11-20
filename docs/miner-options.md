@@ -44,7 +44,9 @@ A miner needs two addresses, on two different chains:
   `mining.subscribe` user agent (`bitaxe/24.4.0` gives `bitaxe`, a second
   bitaxe `bitaxe2`), or a number (`worker1`, `worker2`, ...) when there is no
   user agent. Each login of an address then has its own dashboard row and
-  metrics key. An explicit name is used as typed.
+  metrics key. An explicit name is used as typed. A login is never refused
+  for want of a name: with 1,000 names of one address live, it mines
+  unnamed.
 - Options may follow the worker name after a comma, space, tab or semicolon,
   as in the password: `bchtest:qq....rig1,donation=0.5`. They count as if
   they came first in the password. Pickaxe writes its logins this way.
