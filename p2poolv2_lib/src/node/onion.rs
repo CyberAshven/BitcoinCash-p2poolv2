@@ -12,6 +12,11 @@
 //! addresses"). Its host name is those bytes in lowercase base32 plus
 //! `.onion`. Tor checks the checksum itself and refuses a bad address before
 //! it builds a circuit; this module checks the length and the version.
+//!
+//! With `[network] proxy_clearnet`, as Bitcoin Cash Node's `-proxy`, IPv4,
+//! IPv6 and host-name TCP addresses go through the proxy too, a host name
+//! unresolved for Tor's exit to resolve, so the node neither connects to a
+//! clearnet peer nor asks a resolver itself.
 
 use crate::stratum::sv2::socks5;
 use futures::future::{BoxFuture, Pending};
@@ -50,6 +55,31 @@ pub(crate) fn onion3_target(address: &Multiaddr) -> Option<(String, u16)> {
     })
 }
 
+/// The SOCKS5 host and port of an `/ip4`, `/ip6`, `/dns`, `/dns4` or `/dns6`
+/// address with a TCP port, alone or followed by `/p2p`: an IPv6 address in
+/// brackets, and a host name as it is, for the proxy to resolve. None for any
+/// other address, `/dnsaddr` included: its TXT records would have to be
+/// looked up here.
+pub(crate) fn clearnet_target(address: &Multiaddr) -> Option<(String, u16)> {
+    let mut protocols = address.iter();
+    let host = match protocols.next()? {
+        Protocol::Ip4(ip) => ip.to_string(),
+        Protocol::Ip6(ip) => format!("[{ip}]"),
+        Protocol::Dns(name) | Protocol::Dns4(name) | Protocol::Dns6(name) => name.to_string(),
+        _ => return None,
+    };
+    let Some(Protocol::Tcp(port)) = protocols.next() else {
+        return None;
+    };
+    if port == 0
+        || !matches!(protocols.next(), None | Some(Protocol::P2p(_)))
+        || protocols.next().is_some()
+    {
+        return None;
+    }
+    Some((host, port))
+}
+
 /// RFC 4648 base32 in lowercase without padding: 35 bytes give the 56
 /// characters of an onion host name.
 fn base32_lower(bytes: &[u8]) -> String {
@@ -73,17 +103,29 @@ fn base32_lower(bytes: &[u8]) -> String {
     encoded
 }
 
-/// Dials `/onion3` addresses through the SOCKS5 proxy at `proxy` and refuses
-/// every other address with `MultiaddrNotSupported`, so `or_transport` hands
-/// it to the transport beside it. It listens on nothing: inbound onion
-/// connections reach the node's TCP listener from the Tor daemon.
+/// Dials `/onion3` addresses, and with `clearnet` IP and host-name TCP
+/// addresses too, through the SOCKS5 proxy at `proxy`, and refuses every
+/// other address with `MultiaddrNotSupported`, so `or_transport` hands it to
+/// the transport beside it. It listens on nothing: inbound onion connections
+/// reach the node's TCP listener from the Tor daemon.
 pub(crate) struct OnionTransport {
     proxy: String,
+    clearnet: bool,
 }
 
 impl OnionTransport {
     pub(crate) fn new(proxy: String) -> Self {
-        Self { proxy }
+        Self {
+            proxy,
+            clearnet: false,
+        }
+    }
+
+    /// Dial IPv4, IPv6 and host-name TCP addresses through the proxy too
+    /// (`proxy_clearnet`), names unresolved.
+    pub(crate) fn with_clearnet(mut self, clearnet: bool) -> Self {
+        self.clearnet = clearnet;
+        self
     }
 }
 
@@ -110,7 +152,11 @@ impl Transport for OnionTransport {
         address: Multiaddr,
         _opts: DialOpts,
     ) -> Result<Self::Dial, TransportError<Self::Error>> {
-        let Some((host, port)) = onion3_target(&address) else {
+        let target = match onion3_target(&address) {
+            None if self.clearnet => clearnet_target(&address),
+            target => target,
+        };
+        let Some((host, port)) = target else {
             return Err(TransportError::MultiaddrNotSupported(address));
         };
         let proxy = self.proxy.clone();

@@ -16,6 +16,16 @@ listen_address = "/ip4/0.0.0.0/tcp/6884"
 # A Tor SOCKS5 proxy for dialing onion peers, "/onion3/<address>:<port>",
 # as Bitcoin Cash Node's -onion. Unset, onion addresses are ignored.
 # tor_proxy = "127.0.0.1:9050"
+# Dial IPv4, IPv6 and host-name peers through tor_proxy too, names
+# unresolved, as Bitcoin Cash Node's -proxy. This node's TCP then only
+# listens, DNS seeds are skipped and Nostr relays are reached through Tor.
+# Needs tor_proxy.
+# proxy_clearnet = false
+# The networks to dial peers on, as Bitcoin Cash Node's -onlynet: "ipv4",
+# "ipv6", "onion". Unset, every network the node can reach. ["onion"] makes
+# an onion-only node, which opens no clearnet connection: DNS seeds are
+# skipped and Nostr relays are reached through tor_proxy, which it needs.
+# onlynet = ["onion"]
 max_pending_incoming = 10
 max_pending_outgoing = 10
 # Inbound peers. Each outgoing peer is another node's inbound one, so with

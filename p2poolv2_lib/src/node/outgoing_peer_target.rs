@@ -58,7 +58,7 @@
 //! The target changes how many connections a node keeps. It does not change
 //! which peers a share is relayed to, or how.
 
-use super::address_filter::{NetworkGroup, network_group};
+use super::address_filter::{NetworkGroup, Reachable, network_group};
 use super::behaviour::KADEMLIA_QUERY_TIMEOUT_SECS;
 use super::connection_tracker::BlockedIps;
 use super::dial_filter::{is_not_blocked, without_p2p_suffix};
@@ -176,9 +176,9 @@ pub(crate) struct OutgoingPeerTarget {
     lookup_settle: Duration,
     /// Dials started toward the target since start, for P2P health metrics.
     dials_attempted_total: u64,
-    /// Whether the node dials through Tor (`tor_proxy`), so onion addresses
-    /// are worth keeping and dialing.
-    onion_reachable: bool,
+    /// The networks the node dials (`onlynet`, `tor_proxy`): addresses on
+    /// others are not worth keeping or dialing.
+    reachable: Reachable,
 }
 
 impl OutgoingPeerTarget {
@@ -222,7 +222,7 @@ impl OutgoingPeerTarget {
             closing_lookups: HashSet::new(),
             lookup_settle: Duration::from_secs(LOOKUP_SETTLE_SECS),
             dials_attempted_total: 0,
-            onion_reachable: config.tor_proxy.is_some(),
+            reachable: Reachable::from_config(config),
         }
     }
 
@@ -236,9 +236,9 @@ impl OutgoingPeerTarget {
         self.target > 0
     }
 
-    /// Whether the node dials through Tor, so onion addresses are reachable.
-    pub(crate) fn onion_reachable(&self) -> bool {
-        self.onion_reachable
+    /// The networks the node dials, so the addresses it can reach.
+    pub(crate) fn reachable(&self) -> Reachable {
+        self.reachable
     }
 
     /// Peers with at least one established outgoing connection, lookups
@@ -277,7 +277,7 @@ impl OutgoingPeerTarget {
         peer_id: PeerId,
         addresses: impl IntoIterator<Item = &'a Multiaddr>,
     ) {
-        let dialable = dialable_addresses(addresses, self.onion_reachable);
+        let dialable = dialable_addresses(addresses, self.reachable);
         if dialable.is_empty() || self.dial_peer_ids.contains(&peer_id) {
             return;
         }
@@ -644,7 +644,7 @@ impl OutgoingPeerTarget {
                 .iter()
                 .filter_map(|address| address.parse().ok())
                 .collect();
-            let addresses = dialable_addresses(&parsed, self.onion_reachable);
+            let addresses = dialable_addresses(&parsed, self.reachable);
             if addresses.is_empty() || self.dial_peer_ids.contains(&peer_id) {
                 continue;
             }
@@ -695,17 +695,17 @@ fn backoff_delay(failures: u32) -> Duration {
 }
 
 /// The addresses the target may dial, without `/p2p`, de-duplicated and at
-/// most MAX_ADDRESSES_PER_PEER of them. Onion addresses count only when the
-/// node dials through Tor (`onion`).
+/// most MAX_ADDRESSES_PER_PEER of them. Only addresses on a network the node
+/// dials (`reachable`) count.
 fn dialable_addresses<'a>(
     addresses: impl IntoIterator<Item = &'a Multiaddr>,
-    onion: bool,
+    reachable: Reachable,
 ) -> Vec<Multiaddr> {
     let mut dialable = Vec::with_capacity(MAX_ADDRESSES_PER_PEER);
     for address in addresses {
         let address = without_p2p_suffix(address.clone());
         if dialable.len() < MAX_ADDRESSES_PER_PEER
-            && is_dialable(&address, onion)
+            && is_dialable(&address, reachable)
             && !dialable.contains(&address)
         {
             dialable.push(address);
@@ -715,16 +715,17 @@ fn dialable_addresses<'a>(
 }
 
 /// A globally routable IPv4 or IPv6 address followed by a TCP port and
-/// nothing else, what the node's TCP transport dials; or, when the node dials
-/// through Tor (`onion`), a v3 onion address alone.
-fn is_dialable(address: &Multiaddr, onion: bool) -> bool {
+/// nothing else, what the node's TCP transport dials, or a v3 onion address
+/// alone, which it dials through Tor; either on a network the node dials
+/// (`reachable`: `onlynet`, and onion only with a `tor_proxy`).
+fn is_dialable(address: &Multiaddr, reachable: Reachable) -> bool {
     let mut protocols = address.iter();
     let dialable_form = match (protocols.next(), protocols.next(), protocols.next()) {
         (Some(Protocol::Ip4(_) | Protocol::Ip6(_)), Some(Protocol::Tcp(port)), None) => port > 0,
-        (Some(Protocol::Onion3(onion3)), None, None) => onion && onion3.port() > 0,
+        (Some(Protocol::Onion3(onion3)), None, None) => onion3.port() > 0,
         _ => false,
     };
-    dialable_form && network_group(address).is_some()
+    dialable_form && reachable.allows(address) && network_group(address).is_some()
 }
 
 #[cfg(test)]

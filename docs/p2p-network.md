@@ -119,17 +119,39 @@ own directory.
 With `[network] tor_proxy` set to a Tor daemon's SOCKS5 port (Tor's default
 is `127.0.0.1:9050`), the node dials `/onion3/<address>:<port>` peers through
 it, as Bitcoin Cash Node's `-onion` does (`node/onion.rs`). The onion name
-goes to the proxy unresolved. Every other address is dialed directly, as
-before. An onion address can be a `dial_peers` entry; one a peer reports
-through Identify enters Kademlia and the target's book only on a node with a
-`tor_proxy`, so a node without Tor never tries one. An onion address's
+goes to the proxy unresolved. Every other address is dialed directly,
+unless `proxy_clearnet` is on (below). An onion address can be a
+`dial_peers` entry; one a peer reports through Identify enters Kademlia and
+the target's book, and one announced on Nostr is dialed, only on a node with
+a `tor_proxy`, so a node without Tor never tries one. An onion address's
 network group is the first 4 bits of its key, as in Bitcoin Cash Node.
+
+**Onion-only.** `onlynet = ["onion"]`, as Bitcoin Cash Node's
+`-onlynet=onion`, has the node dial onion peers alone. Every other address
+is refused before anything is dialed or resolved (`base_transport` in
+`node/mod.rs`): `OrTransport` would hand a refused address on to TCP, so the
+refusal comes first. The node's own TCP only listens, IP addresses from
+peers and announcements are not kept, DNS seeds are skipped, and the Nostr
+relays are reached through `tor_proxy`, a relay's name unresolved. Listen on
+`127.0.0.1` (`listen_address = "/ip4/127.0.0.1/tcp/6884"`), so the node
+announces no IP address of its own. `onlynet` takes `"ipv4"`, `"ipv6"` and
+`"onion"` in any mix; a host name is clearnet (`/dns4` IPv4, `/dns6` IPv6,
+`/dns` either), and `"onion"` needs `tor_proxy`.
+
+**Everything through Tor.** `proxy_clearnet = true`, as Bitcoin Cash Node's
+`-proxy`, dials IPv4, IPv6 and host-name peers through `tor_proxy` too, a
+name unresolved for Tor's exit to resolve. The node's own TCP then only
+listens and nothing reaches the system's resolver: DNS seeds are skipped and
+the Nostr relays are reached through Tor. `blocked_ips` still refuses an IP
+dial; the address behind a host name is Tor's to find, so it is not checked.
+Loading refuses `proxy_clearnet` without `tor_proxy`. Listen on `127.0.0.1`
+here too, unless peers should reach the node at its own address.
 
 To be reachable as an onion service today, point a torrc
 `HiddenServicePort 6884 127.0.0.1:6884` at the node and set
 `external_address` to the service's `/onion3/<address>:6884`. Creating the
-service through Tor's control port, onion-only mode and onion announcements
-on Nostr come next.
+service through Tor's control port, keeping a node that listens on a public
+address from announcing it, and onion announcements on Nostr come next.
 
 ### Finding peers through Nostr
 
@@ -207,9 +229,10 @@ target, or a DNS or Nostr seed. While short, it dials one more peer a second
   each failure (a failed dial, or a connection closed within 60 seconds). A
   lasting connection resets it; five failures in a row drop the peer.
 
-The share chain's P2P network runs on TCP over IPv4 and IPv6 only, with no
-onion or I2P addresses. The target sets how many connections a node keeps,
-not how shares are relayed. `/metrics` reports `p2p_outgoing_peers`,
+The share chain's P2P network runs on TCP over IPv4 and IPv6, and through
+Tor to onion addresses ([Onion peers](#onion-peers)); there are no I2P
+addresses. The target sets how many connections a node keeps, not how
+shares are relayed. `/metrics` reports `p2p_outgoing_peers`,
 `p2p_incoming_peers` and `p2p_outgoing_target_dials_total`
 ([Metrics](architecture/metrics.md)).
 

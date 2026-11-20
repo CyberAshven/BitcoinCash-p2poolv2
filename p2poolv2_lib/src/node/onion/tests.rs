@@ -3,8 +3,16 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 use super::*;
+use crate::config::{NetworkConfig, PeerNetwork};
+use crate::node::base_transport;
+use crate::node::connection_tracker::BlockedIps;
+use crate::test_utils::TestSocksProxy;
 use libp2p::core::Endpoint;
 use libp2p::core::transport::PortUse;
+use libp2p::tcp::Config as TcpConfig;
+use std::time::Duration;
+use tokio::net::TcpListener;
+use tokio::time::timeout;
 
 /// The Tor Project's own v3 onion service.
 const TOR_PROJECT_ONION: &str = "2gzyxa5ihm7nsggfxnu52rck2vv4rvmdlkiu3zzui5du4xyclen53wid";
@@ -92,4 +100,96 @@ fn the_onion_transport_refuses_other_addresses() {
     assert!(
         matches!(result, Err(TransportError::MultiaddrNotSupported(refused)) if refused == address)
     );
+}
+
+/// An onion-only node refuses an `/ip4` address and a configured `/dns4`
+/// dial_peer before anything connects or resolves: neither the peer's
+/// listener nor the Tor proxy's sees a connection. `OrTransport` passes a
+/// refused address on to the next transport, so the refusal has to come
+/// first. An onion address is still dialed.
+#[tokio::test]
+async fn onion_only_refuses_clearnet_addresses_before_connecting() {
+    let peer = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = peer.local_addr().unwrap().port();
+    let proxy = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let network = NetworkConfig {
+        dial_peers: vec![format!("/dns4/localhost/tcp/{port}")],
+        tor_proxy: Some(proxy.local_addr().unwrap().to_string()),
+        onlynet: Some(vec![PeerNetwork::Onion]),
+        ..NetworkConfig::default()
+    };
+    let mut transport = base_transport(TcpConfig::default(), &network, BlockedIps::default());
+    let dial_opts = DialOpts {
+        role: Endpoint::Dialer,
+        port_use: PortUse::New,
+    };
+
+    let ip: Multiaddr = format!("/ip4/127.0.0.1/tcp/{port}").parse().unwrap();
+    assert!(matches!(
+        transport.dial(ip, dial_opts),
+        Err(TransportError::MultiaddrNotSupported(_))
+    ));
+    let name: Multiaddr = format!("/dns4/localhost/tcp/{port}").parse().unwrap();
+    assert!(matches!(
+        transport.dial(name, dial_opts),
+        Err(TransportError::MultiaddrNotSupported(_))
+    ));
+    let onion: Multiaddr = format!("/onion3/{TOR_PROJECT_ONION}:6884").parse().unwrap();
+    assert!(transport.dial(onion, dial_opts).is_ok());
+
+    assert!(
+        timeout(Duration::from_millis(200), peer.accept())
+            .await
+            .is_err(),
+        "no TCP connection reaches the peer"
+    );
+    assert!(
+        timeout(Duration::from_millis(200), proxy.accept())
+            .await
+            .is_err(),
+        "no clearnet dial reaches the proxy"
+    );
+}
+
+/// With `proxy_clearnet`, IP addresses and a configured host name are
+/// dialed through the Tor proxy: an IP as its bytes, an IPv6 one included,
+/// and the name unresolved, for Tor's exit to resolve.
+#[tokio::test]
+async fn proxy_clearnet_sends_ip_and_name_dials_to_the_proxy() {
+    let peer = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = peer.local_addr().unwrap().port();
+    let mut proxy = TestSocksProxy::start(Some(peer.local_addr().unwrap()), true).await;
+    let network = NetworkConfig {
+        dial_peers: vec!["/dns4/peer.invalid/tcp/6884".to_string()],
+        tor_proxy: Some(proxy.address.clone()),
+        proxy_clearnet: true,
+        ..NetworkConfig::default()
+    };
+    let mut transport = base_transport(TcpConfig::default(), &network, BlockedIps::default());
+    let dial_opts = DialOpts {
+        role: Endpoint::Dialer,
+        port_use: PortUse::New,
+    };
+
+    let ip: Multiaddr = format!("/ip4/127.0.0.1/tcp/{port}").parse().unwrap();
+    let (dialed, accepted) = tokio::join!(transport.dial(ip, dial_opts).unwrap(), peer.accept());
+    dialed.unwrap();
+    accepted.unwrap();
+    let request = proxy.next_request().await;
+    assert_eq!(request.address_type, 1, "an IPv4 address");
+    assert_eq!(request.host, [127, 0, 0, 1]);
+    assert_eq!(request.port, port);
+
+    let ipv6: Multiaddr = "/ip6/2001:db8::1/tcp/6884".parse().unwrap();
+    transport.dial(ipv6, dial_opts).unwrap().await.unwrap();
+    let request = proxy.next_request().await;
+    assert_eq!(request.address_type, 4, "an IPv6 address");
+    assert_eq!(request.port, 6884);
+
+    let name: Multiaddr = "/dns4/peer.invalid/tcp/6884".parse().unwrap();
+    transport.dial(name, dial_opts).unwrap().await.unwrap();
+    let request = proxy.next_request().await;
+    assert_eq!(request.address_type, 3, "a name, not an address");
+    assert_eq!(request.host, "peer.invalid".as_bytes());
+    assert_eq!(request.port, 6884);
 }

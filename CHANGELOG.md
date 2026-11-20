@@ -101,6 +101,13 @@ format and genesis re-pin.
   `/onion3/<address>:<port>` peers through a Tor SOCKS5 proxy, as Bitcoin
   Cash Node's `-onion` does, and learns onion addresses from peers. Without
   it, onion addresses are ignored.
+- Onion-only mode and no clearnet leaks: `[network] onlynet` (Bitcoin Cash
+  Node's `-onlynet`, for example `["onion"]`) limits the networks the node
+  dials, and `proxy_clearnet` (`-proxy`) sends IPv4, IPv6 and host-name
+  dials through `tor_proxy` too, names unresolved. A node that opens no
+  clearnet connection of its own skips DNS seeds, resolves no names and
+  reaches its Nostr relays through Tor; Nostr announcements of onion
+  addresses are dialed through Tor.
 - The dashboard, server-rendered and WASM, gains a Sharechain chart tab
   (served as JSON at `/sharechain`), income tiles and weak share detail on
   the miner pages. The miner report shows each share's weak count; payouts

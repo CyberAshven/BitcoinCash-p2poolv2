@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 use super::onion::is_valid_onion3;
+use crate::config::{NetworkConfig, PeerNetwork};
 use libp2p::Multiaddr;
 use libp2p::multiaddr::Protocol;
 
@@ -109,13 +110,46 @@ pub fn is_routable_multiaddr(address: &Multiaddr) -> bool {
     false
 }
 
-/// Whether the node can reach `address`: a globally routable IP, or, when it
-/// dials through Tor (`onion`), a v3 onion address. A node without Tor
-/// neither learns nor dials onion addresses.
-pub(crate) fn is_reachable(address: &Multiaddr, onion: bool) -> bool {
-    is_routable_multiaddr(address)
-        || (onion
-            && address.iter().any(
+/// The networks the node dials peers on (`NetworkConfig::dials`): those
+/// `onlynet` lists, or IPv4, IPv6 and, through a `tor_proxy`, onion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Reachable {
+    ipv4: bool,
+    ipv6: bool,
+    onion: bool,
+}
+
+impl Reachable {
+    pub(crate) fn from_config(config: &NetworkConfig) -> Self {
+        Self {
+            ipv4: config.dials(PeerNetwork::Ipv4),
+            ipv6: config.dials(PeerNetwork::Ipv6),
+            onion: config.dials(PeerNetwork::Onion),
+        }
+    }
+
+    /// Whether `address` is on a network the node dials, by its first
+    /// component. A host name is clearnet: `/dns4` is IPv4, `/dns6` IPv6,
+    /// and `/dns` or `/dnsaddr` either. No other address is dialable.
+    pub(crate) fn allows(self, address: &Multiaddr) -> bool {
+        match address.iter().next() {
+            Some(Protocol::Ip4(_) | Protocol::Dns4(_)) => self.ipv4,
+            Some(Protocol::Ip6(_) | Protocol::Dns6(_)) => self.ipv6,
+            Some(Protocol::Dns(_) | Protocol::Dnsaddr(_)) => self.ipv4 || self.ipv6,
+            Some(Protocol::Onion3(_)) => self.onion,
+            _ => false,
+        }
+    }
+}
+
+/// Whether the node can reach `address`: one on a network it dials
+/// (`Reachable::allows`), at a globally routable IP or a v3 onion address.
+/// A node without Tor neither learns nor dials onion addresses, and an
+/// onion-only node no IP.
+pub(crate) fn is_reachable(address: &Multiaddr, reachable: Reachable) -> bool {
+    reachable.allows(address)
+        && (is_routable_multiaddr(address)
+            || address.iter().any(
                 |protocol| matches!(protocol, Protocol::Onion3(onion3) if is_valid_onion3(onion3.hash())),
             ))
 }

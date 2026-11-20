@@ -3,6 +3,9 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 use super::*;
+use crate::config::{NetworkConfig, PeerNetwork};
+use crate::test_utils::TestSocksProxy;
+use std::net::SocketAddr;
 use std::sync::Mutex;
 use tokio::net::TcpListener;
 
@@ -41,6 +44,8 @@ fn seeds(own: &libp2p::identity::Keypair, relays: Vec<String>, accept_local: boo
         announce: vec![],
         accept_local,
         pow_bits: TEST_POW_BITS,
+        reachable: address_filter::Reachable::from_config(&NetworkConfig::default()),
+        relay_proxy: None,
     }
 }
 
@@ -303,12 +308,12 @@ async fn an_announcement_goes_through_a_relay() {
     let now = unix_now();
 
     let first = announcement(&announcer, "/ip4/1.2.3.20/tcp/6890", now - 60);
-    publish(&url, &first).await.unwrap();
+    publish(&url, None, &first).await.unwrap();
     let second = announcement(&announcer, "/ip4/1.2.3.21/tcp/6890", now);
-    publish(&url, &second).await.unwrap();
+    publish(&url, None, &second).await.unwrap();
     assert_eq!(relay.events.lock().unwrap().len(), 1);
 
-    let events = fetch_announcements(&url, TAG, now).await.unwrap();
+    let events = fetch_announcements(&url, None, TAG, now).await.unwrap();
     assert_eq!(events, vec![second]);
     let reader = seeds(&node_key(), vec![url], false);
     assert_eq!(
@@ -324,7 +329,83 @@ async fn a_dead_relay_is_an_error_not_a_hang() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("ws://{}", listener.local_addr().unwrap());
     drop(listener);
-    assert!(fetch_announcements(&url, TAG, NOW).await.is_err());
+    assert!(fetch_announcements(&url, None, TAG, NOW).await.is_err());
+}
+
+/// A node that opens no clearnet connection of its own reaches its relays
+/// through Tor's SOCKS port: the relay's name goes to the proxy unresolved,
+/// so no resolver on this computer sees it, and the WebSocket exchange runs
+/// over the proxied stream.
+#[tokio::test]
+async fn a_relay_is_reached_through_the_proxy_by_name() {
+    let (url, relay) = spawn_relay().await;
+    let relay_address: SocketAddr = url.trim_start_matches("ws://").parse().unwrap();
+    let mut proxy = TestSocksProxy::start(Some(relay_address), true).await;
+    let named_relay = "ws://relay.invalid:7447";
+    let now = unix_now();
+    let event = announcement(&node_key(), "/ip4/1.2.3.22/tcp/6890", now);
+
+    publish(named_relay, Some(proxy.address.as_str()), &event)
+        .await
+        .unwrap();
+    let request = proxy.next_request().await;
+    assert_eq!(request.address_type, 3, "a name, not an address");
+    assert_eq!(request.host, "relay.invalid".as_bytes());
+    assert_eq!(request.port, 7447);
+    assert_eq!(relay.events.lock().unwrap().len(), 1);
+
+    let events = fetch_announcements(named_relay, Some(proxy.address.as_str()), TAG, now)
+        .await
+        .unwrap();
+    assert_eq!(events, vec![event]);
+}
+
+/// An announced onion address is dialed only by a node that dials through
+/// Tor, never by one without it, on regtest either; an onion-only node
+/// skips announced IP addresses.
+#[test]
+fn an_announced_onion_address_is_dialed_only_with_tor() {
+    let own = node_key();
+    let onion_node = node_key();
+    let onion = "/onion3/2gzyxa5ihm7nsggfxnu52rck2vv4rvmdlkiu3zzui5du4xyclen53wid:6884";
+    let events = vec![announcement(&onion_node, onion, NOW)];
+    let tor_proxy = Some("127.0.0.1:9050".to_string());
+
+    let without_tor = seeds(&own, vec![], false);
+    assert!(
+        without_tor
+            .pick_dials(events.clone(), &HashSet::new(), NOW)
+            .is_empty()
+    );
+    let regtest_without_tor = seeds(&own, vec![], true);
+    assert!(
+        regtest_without_tor
+            .pick_dials(events.clone(), &HashSet::new(), NOW)
+            .is_empty()
+    );
+
+    let mut with_tor = seeds(&own, vec![], false);
+    with_tor.reachable = address_filter::Reachable::from_config(&NetworkConfig {
+        tor_proxy: tor_proxy.clone(),
+        ..NetworkConfig::default()
+    });
+    assert_eq!(
+        with_tor.pick_dials(events, &HashSet::new(), NOW),
+        vec![address_of(&onion_node, onion)]
+    );
+
+    let mut onion_only = seeds(&own, vec![], false);
+    onion_only.reachable = address_filter::Reachable::from_config(&NetworkConfig {
+        tor_proxy,
+        onlynet: Some(vec![PeerNetwork::Onion]),
+        ..NetworkConfig::default()
+    });
+    let ip_event = announcement(&node_key(), "/ip4/1.2.3.30/tcp/6890", NOW);
+    assert!(
+        onion_only
+            .pick_dials(vec![ip_event], &HashSet::new(), NOW)
+            .is_empty()
+    );
 }
 
 /// A node's own announcements carry the full proof of work a reader needs.
@@ -350,7 +431,7 @@ async fn live_relays_answer_a_lookup() {
     let answers = join_all(
         CANDIDATE_RELAYS
             .iter()
-            .map(|relay| fetch_announcements(relay, TAG, now)),
+            .map(|relay| fetch_announcements(relay, None, TAG, now)),
     )
     .await;
     for (relay, answer) in CANDIDATE_RELAYS.iter().zip(answers) {
