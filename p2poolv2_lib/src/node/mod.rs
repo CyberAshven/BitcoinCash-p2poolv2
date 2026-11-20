@@ -485,10 +485,10 @@ impl Node {
     /// dns_seeds::dns_seed_delay.
     fn query_dns_seeds_if_isolated(&self) {
         let connected_peer_count = self.connection_tracker.connected_peer_count();
-        match self.dns_seeds {
+        match &self.dns_seeds {
             Some(seeds) if connected_peer_count == 0 => {
                 info!("No peers connected, querying DNS seeds");
-                dns_seeds::spawn_dns_seed_dials(seeds, self.swarm_tx.clone());
+                dns_seeds::spawn_dns_seed_dials(seeds.clone(), self.swarm_tx.clone());
             }
             Some(_) => {
                 info!("Skipping DNS seeds, {connected_peer_count} peers already connected");
