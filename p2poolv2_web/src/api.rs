@@ -155,6 +155,11 @@ pub struct SharechainSeries {
     pub diff_max: Vec<SharechainPoint>,
     pub uncles: Vec<SharechainPoint>,
     pub weak: Vec<SharechainPoint>,
+    /// The opt-in active-miner counts; a sample taken before the metric
+    /// was available carries no point.
+    pub miners: Vec<SharechainPoint>,
+    /// The opt-in active-worker counts, sampled the same way.
+    pub workers: Vec<SharechainPoint>,
 }
 
 /// One point of a sharechain series.

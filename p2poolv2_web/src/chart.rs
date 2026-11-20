@@ -470,9 +470,9 @@ pub fn draw(
     })
 }
 
-/// What one sharechain chart render draws: the five series (height, diff
-/// min, diff max, uncles, weak), the tight-domain frame around them, and
-/// found blocks marked on the height line.
+/// What one sharechain chart render draws: the seven series (height, diff
+/// min, diff max, uncles, weak, miners, workers), the tight-domain frame
+/// around them, and found blocks marked on the height line.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SharechainDrawn {
     pub frame: TightFrame,
@@ -481,27 +481,32 @@ pub struct SharechainDrawn {
     pub diff_max: Vec<(u64, f64)>,
     pub uncles: Vec<(u64, f64)>,
     pub weak: Vec<(u64, f64)>,
+    pub miners: Vec<(u64, f64)>,
+    pub workers: Vec<(u64, f64)>,
     pub blocks: Vec<PlottedBlock>,
 }
 
-/// Names of all five sharechain series, for tip rows and tracers. Order
-/// matches the replica: Height, Min diff, Max diff, Uncle, Weak.
-const SHARECHAIN_TAGS: [(&str, &str); 5] = [
+/// Names of all seven sharechain series, for tip rows and tracers. Order
+/// matches the replica: Height, Min diff, Max diff, Uncle, Weak, Miners,
+/// Workers.
+const SHARECHAIN_TAGS: [(&str, &str); 7] = [
     ("height", "Height"),
     ("dmin", "Min diff"),
     ("dmax", "Max diff"),
     ("uncles", "Uncle"),
     ("weak", "Weak"),
+    ("miners", "Miners"),
+    ("workers", "Workers"),
 ];
 
-/// Classes whose values are whole numbers: `uncles` and `weak`. Their
-/// tooltips print integers, as on the node's chart.
-const SHARECHAIN_INTEGER_CLASSES: [&str; 2] = ["uncles", "weak"];
+/// Classes whose values are whole numbers: `uncles`, `weak`, `miners` and
+/// `workers`. Their tooltips print integers, as on the node's chart.
+const SHARECHAIN_INTEGER_CLASSES: [&str; 4] = ["uncles", "weak", "miners", "workers"];
 
-/// The sharechain chart: the five series built from the JSON endpoint,
+/// The sharechain chart: the seven series built from the JSON endpoint,
 /// each downsampled to at most [`MAX_POINTS`] points, zoomed to `range`
 /// (all of it when `None`). The value axis uses [`tight_domain`] with
-/// `floor=0.0` so zero-count uncle/weak minutes sit on the floor line, as
+/// `floor=1.0` so zero-count uncle/weak minutes sit on the floor line, as
 /// on the node's chart. Blocks snap to the height line.
 #[allow(clippy::too_many_arguments)]
 pub fn sharechain_draw(
@@ -510,6 +515,8 @@ pub fn sharechain_draw(
     diff_max: &[(u64, f64)],
     uncles: &[(u64, f64)],
     weak: &[(u64, f64)],
+    miners: &[(u64, f64)],
+    workers: &[(u64, f64)],
     blocks: &[FoundBlock],
     range: Option<(f64, f64)>,
     height_on: bool,
@@ -517,6 +524,8 @@ pub fn sharechain_draw(
     dmax_on: bool,
     uncles_on: bool,
     weak_on: bool,
+    miners_on: bool,
+    workers_on: bool,
 ) -> Option<SharechainDrawn> {
     let filtered = |series: &[(u64, f64)], on: bool| -> Vec<(u64, f64)> {
         if !on {
@@ -536,7 +545,17 @@ pub fn sharechain_draw(
     let dhi = filtered(diff_max, dmax_on);
     let un = filtered(uncles, uncles_on);
     let wk = filtered(weak, weak_on);
-    let all = || h.iter().chain(&dlo).chain(&dhi).chain(&un).chain(&wk);
+    let mn = filtered(miners, miners_on);
+    let wr = filtered(workers, workers_on);
+    let all = || {
+        h.iter()
+            .chain(&dlo)
+            .chain(&dhi)
+            .chain(&un)
+            .chain(&wk)
+            .chain(&mn)
+            .chain(&wr)
+    };
     let first = all().map(|(time, _)| *time).min()?;
     let last = all().map(|(time, _)| *time).max()?;
     let (start, end) = range.unwrap_or((first as f64, last as f64));
@@ -576,13 +595,15 @@ pub fn sharechain_draw(
         diff_max: dhi,
         uncles: un,
         weak: wk,
+        miners: mn,
+        workers: wr,
         blocks: plotted,
     })
 }
 
 /// A native `<title>` tooltip for one sharechain dot, with the series
-/// label and integer formatting for `uncles`/`weak` (both count whole
-/// items), decimals otherwise.
+/// label and integer formatting for the count classes (`uncles`, `weak`,
+/// `miners`, `workers` -- all count whole items), decimals otherwise.
 fn sharechain_dot_title(label: &str, class: &str, value: f64, time: u64) -> String {
     let formatted = if SHARECHAIN_INTEGER_CLASSES.contains(&class) {
         format!("{}", value.round() as i64)
@@ -883,6 +904,63 @@ fn weak_line<'a>(points: &'a [(u64, f64)], frame: &'a TightFrame) -> impl IntoVi
     }
 }
 
+/// The active-miners line: a polyline and dots drawn over the grid. Counts
+/// are whole numbers, and the series carries no area fill -- it is a count
+/// line over the difficulty band, not a magnitude under it.
+fn miners_line<'a>(points: &'a [(u64, f64)], frame: &'a TightFrame) -> impl IntoView + use<'a> {
+    let dots = points
+        .iter()
+        .zip(
+            points
+                .iter()
+                .map(|(time, value)| {
+                    (
+                        format!("{:.1}", frame.x(*time as f64)),
+                        format!("{:.1}", frame.y(*value)),
+                    )
+                })
+                .collect::<Vec<_>>(),
+        )
+        .map(move |((time, value), (x, y))| {
+            let title = sharechain_dot_title("Miners", "miners", *value, *time);
+            view! { <circle class="dot miners" cx=x cy=y r="0.5">{title}</circle> }
+        })
+        .collect_view();
+    let poly = polyline_points_sharechain(points, frame);
+    view! {
+        <polyline class="line miners" points=poly />
+        {dots}
+    }
+}
+
+/// The active-workers line: a polyline and dots drawn over the grid.
+/// Whole-number counts, drawn without an area fill like `miners`.
+fn workers_line<'a>(points: &'a [(u64, f64)], frame: &'a TightFrame) -> impl IntoView + use<'a> {
+    let dots = points
+        .iter()
+        .zip(
+            points
+                .iter()
+                .map(|(time, value)| {
+                    (
+                        format!("{:.1}", frame.x(*time as f64)),
+                        format!("{:.1}", frame.y(*value)),
+                    )
+                })
+                .collect::<Vec<_>>(),
+        )
+        .map(move |((time, value), (x, y))| {
+            let title = sharechain_dot_title("Workers", "workers", *value, *time);
+            view! { <circle class="dot workers" cx=x cy=y r="0.5">{title}</circle> }
+        })
+        .collect_view();
+    let poly = polyline_points_sharechain(points, frame);
+    view! {
+        <polyline class="line workers" points=poly />
+        {dots}
+    }
+}
+
 /// `x,y x,y` for an SVG polyline from a sharechain series, using
 /// [`TightFrame`].
 fn polyline_points_sharechain(points: &[(u64, f64)], frame: &TightFrame) -> String {
@@ -903,24 +981,29 @@ struct SharechainHitZone {
 }
 
 /// The hit zones tiling the plot, one per `STEP_PX` step of `fx`.
+#[allow(clippy::too_many_arguments)] // one arg per series: they are all plain slices, not a state struct's job
 fn sharechain_hit_zones(
     height: &[(u64, f64)],
     diff_min: &[(u64, f64)],
     diff_max: &[(u64, f64)],
     uncles: &[(u64, f64)],
     weak: &[(u64, f64)],
+    miners: &[(u64, f64)],
+    workers: &[(u64, f64)],
     window_blocks: &[PlottedBlock],
     frame: &TightFrame,
 ) -> Vec<SharechainHitZone> {
     let plot_width = WIDTH - PAD_LEFT - PAD_RIGHT;
     let count = (plot_width / STEP_PX).floor() as usize + 1;
     let mut zones = Vec::with_capacity(count);
-    let by_class: [(&str, &[(u64, f64)]); 5] = [
+    let by_class: [(&str, &[(u64, f64)]); 7] = [
         ("height", height),
         ("dmin", diff_min),
         ("dmax", diff_max),
         ("uncles", uncles),
         ("weak", weak),
+        ("miners", miners),
+        ("workers", workers),
     ];
     for index in 0..count {
         let fx = (PAD_LEFT + index as f64 * STEP_PX).min(WIDTH - PAD_RIGHT);
@@ -956,7 +1039,7 @@ fn sharechain_hit_zones(
     zones
 }
 
-/// The sharechain chart over the five series from `/sharechain`. `label`
+/// The sharechain chart over the seven series from `/sharechain`. `label`
 /// names it for screen readers. `range` is the zoomed window; `None`
 /// shows everything. Blocks snap to the height line; the Blocks chip
 /// turns them off.
@@ -968,6 +1051,8 @@ pub fn SharechainChart(
     #[prop(into)] diff_max: Signal<Vec<(u64, f64)>>,
     #[prop(into)] uncles: Signal<Vec<(u64, f64)>>,
     #[prop(into)] weak: Signal<Vec<(u64, f64)>>,
+    #[prop(into)] miners: Signal<Vec<(u64, f64)>>,
+    #[prop(into)] workers: Signal<Vec<(u64, f64)>>,
     #[prop(into)] blocks: Signal<Vec<FoundBlock>>,
     range: RwSignal<Option<(f64, f64)>>,
     label: &'static str,
@@ -976,39 +1061,51 @@ pub fn SharechainChart(
     #[prop(into)] dmax_visible: Signal<bool>,
     #[prop(into)] uncles_visible: Signal<bool>,
     #[prop(into)] weak_visible: Signal<bool>,
+    #[prop(into)] miners_visible: Signal<bool>,
+    #[prop(into)] workers_visible: Signal<bool>,
     #[prop(into)] blocks_visible: Signal<bool>,
 ) -> impl IntoView {
     let hover = RwSignal::new(None::<f64>);
     let drag_start = RwSignal::new(None::<f64>);
 
     let drawn = Memo::new(move |_| {
-        let (h_on, dlo_on, dhi_on, un_on, wk_on) = (
+        let (h_on, dlo_on, dhi_on, un_on, wk_on, mn_on, wr_on) = (
             height_visible.get(),
             dmin_visible.get(),
             dmax_visible.get(),
             uncles_visible.get(),
             weak_visible.get(),
+            miners_visible.get(),
+            workers_visible.get(),
         );
         height.with(|h| {
             diff_min.with(|dlo| {
                 diff_max.with(|dhi| {
                     uncles.with(|un| {
                         weak.with(|wk| {
-                            blocks.with(|found| {
-                                sharechain_draw(
-                                    h,
-                                    dlo,
-                                    dhi,
-                                    un,
-                                    wk,
-                                    found,
-                                    range.get(),
-                                    h_on,
-                                    dlo_on,
-                                    dhi_on,
-                                    un_on,
-                                    wk_on,
-                                )
+                            miners.with(|mn| {
+                                workers.with(|wr| {
+                                    blocks.with(|found| {
+                                        sharechain_draw(
+                                            h,
+                                            dlo,
+                                            dhi,
+                                            un,
+                                            wk,
+                                            mn,
+                                            wr,
+                                            found,
+                                            range.get(),
+                                            h_on,
+                                            dlo_on,
+                                            dhi_on,
+                                            un_on,
+                                            wk_on,
+                                            mn_on,
+                                            wr_on,
+                                        )
+                                    })
+                                })
                             })
                         })
                     })
@@ -1052,14 +1149,16 @@ pub fn SharechainChart(
 
     move || {
         // All read unconditionally so a toggle always re-renders.
-        let (h_on, dlo_on, dhi_on, un_on, wk_on) = (
+        let (h_on, dlo_on, dhi_on, un_on, wk_on, mn_on, wr_on) = (
             height_visible.get(),
             dmin_visible.get(),
             dmax_visible.get(),
             uncles_visible.get(),
             weak_visible.get(),
+            miners_visible.get(),
+            workers_visible.get(),
         );
-        if !h_on && !dlo_on && !dhi_on && !un_on && !wk_on {
+        if !h_on && !dlo_on && !dhi_on && !un_on && !wk_on && !mn_on && !wr_on {
             return view! {
                 <p class="empty">
                     "All series hidden. Click a legend chip to show one."
@@ -1074,6 +1173,8 @@ pub fn SharechainChart(
             diff_max,
             uncles,
             weak,
+            miners,
+            workers,
             blocks,
         }) = drawn.get()
         else {
@@ -1137,7 +1238,7 @@ pub fn SharechainChart(
             {ticks}
         };
         let zones = sharechain_hit_zones(
-            &height, &diff_min, &diff_max, &uncles, &weak, &blocks, &frame,
+            &height, &diff_min, &diff_max, &uncles, &weak, &miners, &workers, &blocks, &frame,
         );
         // Found-block diamonds on the height line, tagged with zone
         // numbers whose strips reach them.
@@ -1204,6 +1305,8 @@ pub fn SharechainChart(
                     {dhi_on.then(|| dmax_line(&diff_max, &frame))}
                     {un_on.then(|| uncles_line(&uncles, &frame))}
                     {wk_on.then(|| weak_line(&weak, &frame))}
+                    {mn_on.then(|| miners_line(&miners, &frame))}
+                    {wr_on.then(|| workers_line(&workers, &frame))}
                     {cubes}
                     {selection}
                     {zones
@@ -1267,6 +1370,28 @@ pub fn SharechainChart(
                                             view! {
                                                 <circle
                                                     class="tracer weak"
+                                                    data-zone=zone.zone
+                                                    cx=format!("{x:.1}")
+                                                    cy=format!("{y:.1}")
+                                                    r="1.5"
+                                                />
+                                            }
+                                        }
+                                        "miners" => {
+                                            view! {
+                                                <circle
+                                                    class="tracer miners"
+                                                    data-zone=zone.zone
+                                                    cx=format!("{x:.1}")
+                                                    cy=format!("{y:.1}")
+                                                    r="1.5"
+                                                />
+                                            }
+                                        }
+                                        "workers" => {
+                                            view! {
+                                                <circle
+                                                    class="tracer workers"
                                                     data-zone=zone.zone
                                                     cx=format!("{x:.1}")
                                                     cy=format!("{y:.1}")
@@ -1351,6 +1476,26 @@ pub fn SharechainChart(
                                     <span class="key weak">"Weak"</span> {" "} <b>{formatted}</b>
                                 }
                             }));
+                        let miners_row = zone
+                            .nearests
+                            .iter()
+                            .find(|(c, _)| *c == "miners")
+                            .and_then(|(_, nearest)| nearest.map(|(_, value)| {
+                                let formatted = format!("{}", value.round() as i64);
+                                view! {
+                                    <span class="key miners">"Miners"</span> {" "} <b>{formatted}</b>
+                                }
+                            }));
+                        let workers_row = zone
+                            .nearests
+                            .iter()
+                            .find(|(c, _)| *c == "workers")
+                            .and_then(|(_, nearest)| nearest.map(|(_, value)| {
+                                let formatted = format!("{}", value.round() as i64);
+                                view! {
+                                    <span class="key workers">"Workers"</span> {" "} <b>{formatted}</b>
+                                }
+                            }));
                         let block_rows: Vec<_> = zone
                             .blocks
                             .iter()
@@ -1361,7 +1506,8 @@ pub fn SharechainChart(
                             })
                             .collect();
                         let all_rows: Vec<_> = [
-                            height_row, dmin_row, dmax_row, uncles_row, weak_row,
+                            height_row, dmin_row, dmax_row, uncles_row, weak_row, miners_row,
+                            workers_row,
                         ]
                         .into_iter()
                         .flatten()
@@ -1436,15 +1582,20 @@ fn polyline_points(points: &[(u64, f64)], frame: &Frame) -> String {
 }
 
 /// Fill colour under a series' line, keyed by the series' CSS class.
+/// The sharechain series match the node's chart: min diff blue, max diff
+/// light cyan, uncle yellow, weak amber, miners dark brown, workers light
+/// brown, height white.
 fn area_color(class: &str) -> &'static str {
     match class {
         "local" => "#22d3ee",
         "network" => "#8b5cf6",
         "height" => "#ffffff",
-        "dmin" => "#06b6d4",
-        "dmax" => "#a78bfa",
-        "uncles" => "#f43f5e",
+        "dmin" => "#3b82f6",
+        "dmax" => "#67e8f9",
+        "uncles" => "#facc15",
         "weak" => "#f59e0b",
+        "miners" => "#7a4f2d",
+        "workers" => "#D2A679",
         _ => "#0ac18e",
     }
 }

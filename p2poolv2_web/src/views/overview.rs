@@ -292,6 +292,10 @@ pub fn OverviewPage() -> impl IntoView {
     let dmax_visible = RwSignal::new(crate::app::stored_flag("p2pool.dmax-visible"));
     let uncles_visible = RwSignal::new(crate::app::stored_flag("p2pool.uncles-visible"));
     let weak_visible = RwSignal::new(crate::app::stored_flag("p2pool.weak-visible"));
+    // The miners/workers count lines are opt-in like the network line, so
+    // they start from their own opt-in flags.
+    let miners_visible = RwSignal::new(crate::app::stored_opt_in_flag("p2pool.miners-visible"));
+    let workers_visible = RwSignal::new(crate::app::stored_opt_in_flag("p2pool.workers-visible"));
     // The chips write the flip back so the next visit keeps it. `"1"`/`"0"`
     // suits both flags: [stored_flag] reads only `"0"` as off, and
     // [stored_opt_in_flag] reads only `"1"` as on.
@@ -383,6 +387,11 @@ pub fn OverviewPage() -> impl IntoView {
         Memo::new(move |_| loaded(&sharechain, |data| to_points(&data.uncles)).unwrap_or_default());
     let sc_weak =
         Memo::new(move |_| loaded(&sharechain, |data| to_points(&data.weak)).unwrap_or_default());
+    let sc_miners =
+        Memo::new(move |_| loaded(&sharechain, |data| to_points(&data.miners)).unwrap_or_default());
+    let sc_workers = Memo::new(move |_| {
+        loaded(&sharechain, |data| to_points(&data.workers)).unwrap_or_default()
+    });
     // Harmonize the KPI cards: fall back to the newest non-null history
     // sample when the live read is unknown, so all three cards show a value
     // (or all show the dash) together.
@@ -539,6 +548,8 @@ pub fn OverviewPage() -> impl IntoView {
                     diff_max=sc_dmax
                     uncles=sc_uncles
                     weak=sc_weak
+                    miners=sc_miners
+                    workers=sc_workers
                     blocks=chart_blocks
                     range=zoom
                     label=label
@@ -547,6 +558,8 @@ pub fn OverviewPage() -> impl IntoView {
                     dmax_visible=dmax_visible
                     uncles_visible=uncles_visible
                     weak_visible=weak_visible
+                    miners_visible=miners_visible
+                    workers_visible=workers_visible
                     blocks_visible=blocks_visible
                 />
             }
@@ -620,6 +633,26 @@ pub fn OverviewPage() -> impl IntoView {
                     >
                         <span class="legend-dot dmax"></span>
                         "Max diff"
+                    </button>
+                    <button
+                        class="legend-chip"
+                        class:off=move || !miners_visible.get()
+                        type="button"
+                        aria-pressed=move || miners_visible.get().to_string()
+                        on:click=flip(miners_visible, "p2pool.miners-visible")
+                    >
+                        <span class="legend-dot miners"></span>
+                        "Miners"
+                    </button>
+                    <button
+                        class="legend-chip"
+                        class:off=move || !workers_visible.get()
+                        type="button"
+                        aria-pressed=move || workers_visible.get().to_string()
+                        on:click=flip(workers_visible, "p2pool.workers-visible")
+                    >
+                        <span class="legend-dot workers"></span>
+                        "Workers"
                     </button>
                     <button
                         class="legend-chip"

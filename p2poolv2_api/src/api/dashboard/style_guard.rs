@@ -478,6 +478,8 @@ fn overview(samples: Vec<Sample>, shares: Vec<ShareRow>, blocks: Vec<FoundBlockR
         dmax_on: true,
         uncles_on: true,
         weak_on: true,
+        miners_on: false,
+        workers_on: false,
         share_series: Vec::new(),
     })
     .into_string()

@@ -101,11 +101,20 @@ pub(crate) fn network_on(value: Option<&str>) -> bool {
     value == Some("1")
 }
 
+/// The opt-in toggle the Sharechain tab's miners/workers count lines use,
+/// the same rule as [`network_on`]: only `?miners=1`/`?workers=1` shows
+/// them, so the default Sharechain URL stays clean of both.
+pub(crate) fn series_opt_in_on(value: Option<&str>) -> bool {
+    value == Some("1")
+}
+
 /// The query fragment carrying the chart series toggles: pool, node
 /// and the found-block diamonds carry their turns off, network carries its
 /// turn on (it is opt-in), so `""` is the default state. The Sharechain
 /// tab's height/dmin/dmax/uncles/weak toggles are emitted only when
-/// `chart_key` is `"sharechain"`, so the hashrate tab's URLs never change.
+/// `chart_key` is `"sharechain"`, so the hashrate tab's URLs never change;
+/// its miners/workers count lines are opt-in too, so they carry their
+/// turns on there (both off by default, like network).
 #[allow(clippy::too_many_arguments)] // one bool per toggle series: a state struct would only move the list
 pub(crate) fn series_q(
     pool_on: bool,
@@ -117,6 +126,8 @@ pub(crate) fn series_q(
     dmax_on: bool,
     uncles_on: bool,
     weak_on: bool,
+    miners_on: bool,
+    workers_on: bool,
     chart_key: &str,
 ) -> String {
     let mut query = String::new();
@@ -147,6 +158,12 @@ pub(crate) fn series_q(
         }
         if !weak_on {
             query.push_str("&weak=0");
+        }
+        if miners_on {
+            query.push_str("&miners=1");
+        }
+        if workers_on {
+            query.push_str("&workers=1");
         }
     }
     query
@@ -342,6 +359,10 @@ pub(crate) struct Overview {
     pub(crate) uncles_on: bool,
     /// Whether the weak count line shows (true by default).
     pub(crate) weak_on: bool,
+    /// Whether the active-miners count line shows (opt-in, from `?miners=1`).
+    pub(crate) miners_on: bool,
+    /// Whether the active-workers count line shows (opt-in, from `?workers=1`).
+    pub(crate) workers_on: bool,
     /// Shares fetched for the sharechain tab: time, height, difficulty,
     /// uncle timestamps and weak count, oldest first.
     pub(crate) share_series: Vec<ShareSeriesItem>,
@@ -786,22 +807,22 @@ fn series_toggles(
         span.series-toggles role="group" aria-label="Chart series" {
             a.legend-chip.off[!pool_on] role="button" aria-pressed=(pool_on.to_string())
                 href=(format!("/dashboard?range={range_key}{auto_query}{chart_query}{}",
-                    series_q(!pool_on, node_on, network_on, blocks_on, true, true, true, true, true, chart_key))) {
+                    series_q(!pool_on, node_on, network_on, blocks_on, true, true, true, true, true, false, false, chart_key))) {
                 span.legend-dot.pool {} "Pool"
             }
             a.legend-chip.off[!node_on] role="button" aria-pressed=(node_on.to_string())
                 href=(format!("/dashboard?range={range_key}{auto_query}{chart_query}{}",
-                    series_q(pool_on, !node_on, network_on, blocks_on, true, true, true, true, true, chart_key))) {
+                    series_q(pool_on, !node_on, network_on, blocks_on, true, true, true, true, true, false, false, chart_key))) {
                 span.legend-dot.local {} "Node"
             }
             a.legend-chip.off[!network_on] role="button" aria-pressed=(network_on.to_string())
                 href=(format!("/dashboard?range={range_key}{auto_query}{chart_query}{}",
-                    series_q(pool_on, node_on, !network_on, blocks_on, true, true, true, true, true, chart_key))) {
+                    series_q(pool_on, node_on, !network_on, blocks_on, true, true, true, true, true, false, false, chart_key))) {
                 span.legend-dot.network {} "Network"
             }
             a.legend-chip.off[!blocks_on] role="button" aria-pressed=(blocks_on.to_string())
                 href=(format!("/dashboard?range={range_key}{auto_query}{chart_query}{}",
-                    series_q(pool_on, node_on, network_on, !blocks_on, true, true, true, true, true, chart_key))) {
+                    series_q(pool_on, node_on, network_on, !blocks_on, true, true, true, true, true, false, false, chart_key))) {
                 span.legend-dot.blocks {} "Blocks"
             }
         }
@@ -809,9 +830,11 @@ fn series_toggles(
 }
 
 /// The Sharechain tab's chips, in the series' own order: Height,
-/// Uncle, Weak, Min diff, Max diff and the found-block diamonds, same
-/// stateless-link pattern as the hashrate tab's chips. The height
-/// chip's dot is white, the colour of its line.
+/// Uncle, Weak, Min diff, Max diff, Miners, Workers and the found-block
+/// diamonds, same stateless-link pattern as the hashrate tab's chips.
+/// The height chip's dot is white, the colour of its line. Miners and
+/// Workers are opt-in (like the hashrate tab's Network), so their chips
+/// start off and carry their turns on.
 #[allow(clippy::too_many_arguments)] // one bool per chip: each chip links its own flip
 fn sharechain_toggles(
     height_on: bool,
@@ -819,6 +842,8 @@ fn sharechain_toggles(
     dmax_on: bool,
     uncles_on: bool,
     weak_on: bool,
+    miners_on: bool,
+    workers_on: bool,
     blocks_on: bool,
     range_key: &str,
     auto: Auto,
@@ -832,32 +857,42 @@ fn sharechain_toggles(
         span.series-toggles role="group" aria-label="Chart series" {
             a.legend-chip.off[!height_on] role="button" aria-pressed=(height_on.to_string())
                 href=(format!("/dashboard?chart=sharechain&range={range_key}{auto_query}{}",
-                    series_q(true, true, false, true, !height_on, dmin_on, dmax_on, uncles_on, weak_on, "sharechain"))) {
+                    series_q(true, true, false, true, !height_on, dmin_on, dmax_on, uncles_on, weak_on, miners_on, workers_on, "sharechain"))) {
                 span.legend-dot style="background:#ffffff;border-radius:50%" {} "Height"
             }
             a.legend-chip.off[!uncles_on] role="button" aria-pressed=(uncles_on.to_string())
                 href=(format!("/dashboard?chart=sharechain&range={range_key}{auto_query}{}",
-                    series_q(true, true, false, true, height_on, dmin_on, dmax_on, !uncles_on, weak_on, "sharechain"))) {
-                span.legend-dot style="background:#f43f5e;border-radius:50%" {} "Uncle"
+                    series_q(true, true, false, true, height_on, dmin_on, dmax_on, !uncles_on, weak_on, miners_on, workers_on, "sharechain"))) {
+                span.legend-dot style="background:#facc15;border-radius:50%" {} "Uncle"
             }
             a.legend-chip.off[!weak_on] role="button" aria-pressed=(weak_on.to_string())
                 href=(format!("/dashboard?chart=sharechain&range={range_key}{auto_query}{}",
-                    series_q(true, true, false, true, height_on, dmin_on, dmax_on, uncles_on, !weak_on, "sharechain"))) {
+                    series_q(true, true, false, true, height_on, dmin_on, dmax_on, uncles_on, !weak_on, miners_on, workers_on, "sharechain"))) {
                 span.legend-dot style="background:#f59e0b;border-radius:50%" {} "Weak"
             }
             a.legend-chip.off[!dmin_on] role="button" aria-pressed=(dmin_on.to_string())
                 href=(format!("/dashboard?chart=sharechain&range={range_key}{auto_query}{}",
-                    series_q(true, true, false, true, height_on, !dmin_on, dmax_on, uncles_on, weak_on, "sharechain"))) {
-                span.legend-dot style="background:#06b6d4;border-radius:50%" {} "Min diff"
+                    series_q(true, true, false, true, height_on, !dmin_on, dmax_on, uncles_on, weak_on, miners_on, workers_on, "sharechain"))) {
+                span.legend-dot style="background:#3b82f6;border-radius:50%" {} "Min diff"
             }
             a.legend-chip.off[!dmax_on] role="button" aria-pressed=(dmax_on.to_string())
                 href=(format!("/dashboard?chart=sharechain&range={range_key}{auto_query}{}",
-                    series_q(true, true, false, true, height_on, dmin_on, !dmax_on, uncles_on, weak_on, "sharechain"))) {
-                span.legend-dot style="background:#a78bfa;border-radius:50%" {} "Max diff"
+                    series_q(true, true, false, true, height_on, dmin_on, !dmax_on, uncles_on, weak_on, miners_on, workers_on, "sharechain"))) {
+                span.legend-dot style="background:#67e8f9;border-radius:50%" {} "Max diff"
+            }
+            a.legend-chip.off[!miners_on] role="button" aria-pressed=(miners_on.to_string())
+                href=(format!("/dashboard?chart=sharechain&range={range_key}{auto_query}{}",
+                    series_q(true, true, false, true, height_on, dmin_on, dmax_on, uncles_on, weak_on, !miners_on, workers_on, "sharechain"))) {
+                span.legend-dot style="background:#7a4f2d;border-radius:50%" {} "Miners"
+            }
+            a.legend-chip.off[!workers_on] role="button" aria-pressed=(workers_on.to_string())
+                href=(format!("/dashboard?chart=sharechain&range={range_key}{auto_query}{}",
+                    series_q(true, true, false, true, height_on, dmin_on, dmax_on, uncles_on, weak_on, miners_on, !workers_on, "sharechain"))) {
+                span.legend-dot style="background:#D2A679;border-radius:50%" {} "Workers"
             }
             a.legend-chip.off[!blocks_on] role="button" aria-pressed=(blocks_on.to_string())
                 href=(format!("/dashboard?chart=sharechain&range={range_key}{auto_query}{}",
-                    series_q(true, true, false, !blocks_on, height_on, dmin_on, dmax_on, uncles_on, weak_on, "sharechain"))) {
+                    series_q(true, true, false, !blocks_on, height_on, dmin_on, dmax_on, uncles_on, weak_on, miners_on, workers_on, "sharechain"))) {
                 span.legend-dot style="background:var(--ms-green);border-radius:1px;transform:rotate(45deg)" {} "Blocks"
             }
         }
@@ -884,6 +919,8 @@ fn chart_switch(
     dmax_on: bool,
     uncles_on: bool,
     weak_on: bool,
+    miners_on: bool,
+    workers_on: bool,
 ) -> Markup {
     let auto_query = if matches!(auto, Auto::Off) {
         "&auto=off"
@@ -895,7 +932,7 @@ fn chart_switch(
             @let is_active = *key == *chart_key;
             @let query_prefix = if *key == *"hashrate" { "" } else { "chart=sharechain&" };
             @let series_arg = series_q(pool_on, node_on, network_on, blocks_on,
-                height_on, dmin_on, dmax_on, uncles_on, weak_on, key);
+                height_on, dmin_on, dmax_on, uncles_on, weak_on, miners_on, workers_on, key);
             a.head-switch.dim[!is_active] aria-current=[is_active.then_some("true")]
                 title=[(!is_active).then(|| format!("Switch to the {label} chart"))]
                 href=(format!("/dashboard?{query_prefix}range={range_key}{auto_query}{series_arg}")) {
@@ -1244,12 +1281,22 @@ pub(crate) fn overview(view: &Overview) -> Markup {
         )
     };
     // The sharechain tab's chart: rendering is conditional on toggles.
+    // The miners/workers count lines are sampled straight off the hashrate
+    // samples (same round-trip as their KPI cards), so no share read is
+    // needed for them beyond the samples the page already holds.
     let sharechain_chart = if view.chart_key == "sharechain" {
         let (height_pts, dmin_pts, dmax_pts, uncle_pts, weak_pts) =
             sharechain_series(&view.share_series, &samples);
-        let mut share_series_list = Vec::with_capacity(5);
-        let any_on =
-            view.height_on || view.dmin_on || view.dmax_on || view.uncles_on || view.weak_on;
+        let miners_pts = series(&samples, |sample| sample.miners.map(|count| count as f64));
+        let workers_pts = series(&samples, |sample| sample.workers.map(|count| count as f64));
+        let mut share_series_list = Vec::with_capacity(7);
+        let any_on = view.height_on
+            || view.dmin_on
+            || view.dmax_on
+            || view.uncles_on
+            || view.weak_on
+            || view.miners_on
+            || view.workers_on;
         if view.height_on {
             share_series_list.push(Series {
                 label: "Height",
@@ -1285,6 +1332,20 @@ pub(crate) fn overview(view: &Overview) -> Markup {
                 points: weak_pts,
             });
         }
+        if view.miners_on {
+            share_series_list.push(Series {
+                label: "Active miners",
+                class: "miners",
+                points: miners_pts,
+            });
+        }
+        if view.workers_on {
+            share_series_list.push(Series {
+                label: "Active workers",
+                class: "workers",
+                points: workers_pts,
+            });
+        }
         if !any_on {
             html! {
                 p.empty { "All series hidden. Click a legend chip to show one." }
@@ -1304,13 +1365,15 @@ pub(crate) fn overview(view: &Overview) -> Markup {
                 fmt_hour_tick,
                 fmt_hour_edge,
                 Some(1.0),
-                &["uncles", "weak"],
+                &["uncles", "weak", "miners", "workers"],
                 &[
                     ("height", "Height"),
                     ("dmin", "Min"),
                     ("dmax", "Max"),
                     ("uncles", "Uncle"),
                     ("weak", "Weak"),
+                    ("miners", "Miners"),
+                    ("workers", "Workers"),
                 ],
                 "tight",
             )
@@ -1328,6 +1391,8 @@ pub(crate) fn overview(view: &Overview) -> Markup {
         view.dmax_on,
         view.uncles_on,
         view.weak_on,
+        view.miners_on,
+        view.workers_on,
         view.chart_key,
     );
     let last_block = view.blocks.first().map(|block| block.time);
@@ -1354,14 +1419,15 @@ pub(crate) fn overview(view: &Overview) -> Markup {
             h2.hashrate-head {
                 (chart_switch(view.chart_key, view.range_key, view.auto,
                     view.pool_on, view.node_on, view.network_on, view.blocks_on,
-                    view.height_on, view.dmin_on, view.dmax_on, view.uncles_on, view.weak_on))
+                    view.height_on, view.dmin_on, view.dmax_on, view.uncles_on, view.weak_on,
+                    view.miners_on, view.workers_on))
                 (range_buttons(view.range_key, view.auto, &series_arg, view.chart_key))
             }
             @if view.chart_key == "hashrate" {
                 (series_toggles(view.pool_on, view.node_on, view.network_on, view.blocks_on, view.range_key, view.auto, view.chart_key))
                 div.chart-wrap { (hashrate_chart) }
             } @else {
-                (sharechain_toggles(view.height_on, view.dmin_on, view.dmax_on, view.uncles_on, view.weak_on, view.blocks_on, view.range_key, view.auto))
+                (sharechain_toggles(view.height_on, view.dmin_on, view.dmax_on, view.uncles_on, view.weak_on, view.miners_on, view.workers_on, view.blocks_on, view.range_key, view.auto))
                 div.chart-wrap { (sharechain_chart) }
             }
         }
@@ -2118,6 +2184,8 @@ mod tests {
             dmax_on: true,
             uncles_on: true,
             weak_on: true,
+            miners_on: false,
+            workers_on: false,
             share_series: Vec::new(),
         }
     }
@@ -2198,25 +2266,25 @@ mod tests {
     fn the_series_query_lists_only_the_hidden_series() {
         assert_eq!(
             series_q(
-                true, true, false, true, true, true, true, true, true, "hashrate"
+                true, true, false, true, true, true, true, true, true, false, false, "hashrate"
             ),
             ""
         );
         assert_eq!(
             series_q(
-                false, true, false, true, true, true, true, true, true, "hashrate"
+                false, true, false, true, true, true, true, true, true, false, false, "hashrate"
             ),
             "&pool=0"
         );
         assert_eq!(
             series_q(
-                true, false, false, true, true, true, true, true, true, "hashrate"
+                true, false, false, true, true, true, true, true, true, false, false, "hashrate"
             ),
             "&node=0"
         );
         assert_eq!(
             series_q(
-                false, false, false, true, true, true, true, true, true, "hashrate"
+                false, false, false, true, true, true, true, true, true, false, false, "hashrate"
             ),
             "&pool=0&node=0"
         );
@@ -2226,15 +2294,80 @@ mod tests {
     fn the_series_query_carries_the_network_turn_on() {
         assert_eq!(
             series_q(
-                true, true, true, true, true, true, true, true, true, "hashrate"
+                true, true, true, true, true, true, true, true, true, false, false, "hashrate"
             ),
             "&network=1"
         );
         assert_eq!(
             series_q(
-                false, false, true, true, true, true, true, true, true, "hashrate"
+                false, false, true, true, true, true, true, true, true, false, false, "hashrate"
             ),
             "&pool=0&node=0&network=1"
+        );
+    }
+
+    #[test]
+    fn the_series_query_carries_the_miners_and_workers_turn_on() {
+        assert_eq!(
+            series_q(
+                true,
+                true,
+                false,
+                true,
+                true,
+                true,
+                true,
+                true,
+                true,
+                true,
+                false,
+                "sharechain"
+            ),
+            "&miners=1"
+        );
+        assert_eq!(
+            series_q(
+                true,
+                true,
+                false,
+                true,
+                true,
+                true,
+                true,
+                true,
+                true,
+                false,
+                true,
+                "sharechain"
+            ),
+            "&workers=1"
+        );
+        assert_eq!(
+            series_q(
+                true,
+                true,
+                false,
+                true,
+                true,
+                true,
+                true,
+                true,
+                true,
+                true,
+                true,
+                "sharechain"
+            ),
+            "&miners=1&workers=1"
+        );
+    }
+
+    #[test]
+    fn the_series_query_stays_clean_of_miners_and_workers_on_hashrate() {
+        assert_eq!(
+            series_q(
+                true, true, false, true, true, true, true, true, true, true, true, "hashrate"
+            ),
+            ""
         );
     }
 
@@ -2285,13 +2418,13 @@ mod tests {
     fn the_series_query_carries_the_blocks_turn_off() {
         assert_eq!(
             series_q(
-                true, true, false, false, true, true, true, true, true, "hashrate"
+                true, true, false, false, true, true, true, true, true, false, false, "hashrate"
             ),
             "&blocks=0"
         );
         assert_eq!(
             series_q(
-                false, true, false, false, true, true, true, true, true, "hashrate"
+                false, true, false, false, true, true, true, true, true, false, false, "hashrate"
             ),
             "&pool=0&blocks=0"
         );

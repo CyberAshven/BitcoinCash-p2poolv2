@@ -145,9 +145,10 @@ fn error_page(state: &AppState, error: ApiError) -> Response {
 /// A `?page=` query, counted from 1, plus the overview's `?auto=` toggle,
 /// `?range=` chart window, `?chart=` chart tab and the series toggles
 /// (`?pool=`/`?node=`/`?network`/`?blocks` for the hashrate tab,
-/// `?height=`/`?dmin=`/`?dmax=`/`?uncles=`/`?weak=` for the sharechain)
+/// `?height=`/`?dmin=`/`?dmax=`/`?uncles=`/`?weak=` for the sharechain,
+/// `?miners=`/`?workers=` for the sharechain's opt-in count lines)
 /// (a series is hidden when its parameter is `0`; the network series is
-/// opt-in and shows only for `network=1`).
+/// opt-in and shows only for `network=1`, as are miners and workers).
 #[derive(Deserialize)]
 struct PageQuery {
     page: Option<usize>,
@@ -163,6 +164,8 @@ struct PageQuery {
     dmax: Option<String>,
     uncles: Option<String>,
     weak: Option<String>,
+    miners: Option<String>,
+    workers: Option<String>,
 }
 
 /// Whether the share `blockhash` met its own Bitcoin Cash block target.
@@ -474,6 +477,8 @@ async fn overview(
     let dmax_on = pages::series_on(query.dmax.as_deref());
     let uncles_on = pages::series_on(query.uncles.as_deref());
     let weak_on = pages::series_on(query.weak.as_deref());
+    let miners_on = pages::series_opt_in_on(query.miners.as_deref());
+    let workers_on = pages::series_opt_in_on(query.workers.as_deref());
     let now = unix_now();
     let chain = read_store(state, move |state| {
         (
@@ -583,6 +588,8 @@ async fn overview(
         dmax_on,
         uncles_on,
         weak_on,
+        miners_on,
+        workers_on,
         share_series,
     }))
 }

@@ -283,16 +283,22 @@ tr.uncle-row {
   background: #ffffff;
 }
 .series-toggles .legend-dot.uncles {
-  background: #f43f5e;
+  background: #facc15;
 }
 .series-toggles .legend-dot.weak {
   background: #f59e0b;
 }
 .series-toggles .legend-dot.dmin {
-  background: #06b6d4;
+  background: #3b82f6;
 }
 .series-toggles .legend-dot.dmax {
-  background: #a78bfa;
+  background: #67e8f9;
+}
+.series-toggles .legend-dot.miners {
+  background: #7a4f2d;
+}
+.series-toggles .legend-dot.workers {
+  background: #D2A679;
 }
 .series-toggles .legend-chip.off {
   opacity: 0.45;
@@ -359,42 +365,57 @@ tr.uncle-row {
   border-radius: 1px;
   transform: rotate(45deg);
 }
-/* Sharechain series colours: height white, min diff cyan, max diff light
-   violet, uncles rose, weak amber. Each group covers line, dot, key, tracer. */
+/* Sharechain series colours: height white, min diff blue, max diff light
+   cyan, uncles yellow, weak amber, miners dark brown, workers light brown.
+   Each group covers line, dot, key, tracer. */
 .chart-wrap .line.height { stroke: #ffffff; }
 .chart-wrap .dot.height,
 .chart-wrap .key.height { fill: #ffffff; color: #ffffff; }
 .chart-wrap .tracer.height {
   fill: #ffffff; stroke: #ffffff;
   filter: drop-shadow(0 0 1px #fff) drop-shadow(0 0 3px #fff); }
-.chart-wrap .line.dmin { stroke: #06b6d4; }
+.chart-wrap .line.dmin { stroke: #3b82f6; }
 .chart-wrap .dot.dmin,
-.chart-wrap .key.dmin { fill: #06b6d4; color: #06b6d4; }
+.chart-wrap .key.dmin { fill: #3b82f6; color: #3b82f6; }
 .chart-wrap .tracer.dmin {
-  fill: #06b6d4; stroke: #06b6d4;
-  filter: drop-shadow(0 0 1px #06b6d4) drop-shadow(0 0 3px #06b6d4); }
-.chart-wrap .line.dmax { stroke: #a78bfa; }
+  fill: #3b82f6; stroke: #3b82f6;
+  filter: drop-shadow(0 0 1px #3b82f6) drop-shadow(0 0 3px #3b82f6); }
+.chart-wrap .line.dmax { stroke: #67e8f9; }
 .chart-wrap .dot.dmax,
-.chart-wrap .key.dmax { fill: #a78bfa; color: #a78bfa; }
+.chart-wrap .key.dmax { fill: #67e8f9; color: #67e8f9; }
 .chart-wrap .tracer.dmax {
-  fill: #a78bfa; stroke: #a78bfa;
-  filter: drop-shadow(0 0 1px #a78bfa) drop-shadow(0 0 3px #a78bfa); }
-.chart-wrap .line.uncles { stroke: #f43f5e; }
+  fill: #67e8f9; stroke: #67e8f9;
+  filter: drop-shadow(0 0 1px #67e8f9) drop-shadow(0 0 3px #67e8f9); }
+.chart-wrap .line.uncles { stroke: #facc15; }
 .chart-wrap .dot.uncles,
-.chart-wrap .key.uncles { fill: #f43f5e; color: #f43f5e; }
+.chart-wrap .key.uncles { fill: #facc15; color: #facc15; }
 .chart-wrap .tracer.uncles {
-  fill: #f43f5e; stroke: #f43f5e;
-  filter: drop-shadow(0 0 1px #f43f5e) drop-shadow(0 0 3px #f43f5e); }
+  fill: #facc15; stroke: #facc15;
+  filter: drop-shadow(0 0 1px #facc15) drop-shadow(0 0 3px #facc15); }
 .chart-wrap .line.weak { stroke: #f59e0b; }
 .chart-wrap .dot.weak,
 .chart-wrap .key.weak { fill: #f59e0b; color: #f59e0b; }
 .chart-wrap .tracer.weak {
   fill: #f59e0b; stroke: #f59e0b;
   filter: drop-shadow(0 0 1px #f59e0b) drop-shadow(0 0 3px #f59e0b); }
-/* The key chip for uncle/weak counts shows an integer (no decimal point or
+.chart-wrap .line.miners { stroke: #7a4f2d; }
+.chart-wrap .dot.miners,
+.chart-wrap .key.miners { fill: #7a4f2d; color: #7a4f2d; }
+.chart-wrap .tracer.miners {
+  fill: #7a4f2d; stroke: #7a4f2d;
+  filter: drop-shadow(0 0 1px #7a4f2d) drop-shadow(0 0 3px #7a4f2d); }
+.chart-wrap .line.workers { stroke: #D2A679; }
+.chart-wrap .dot.workers,
+.chart-wrap .key.workers { fill: #D2A679; color: #D2A679; }
+.chart-wrap .tracer.workers {
+  fill: #D2A679; stroke: #D2A679;
+  filter: drop-shadow(0 0 1px #D2A679) drop-shadow(0 0 3px #D2A679); }
+/* The key chip for the count rows shows an integer (no decimal point or
    units) so the tip rows read "Uncle 3" instead of "Uncle 3.00". */
 .chart-wrap .key.uncles,
-.chart-wrap .key.weak { font-variant-numeric: tabular-nums; }
+.chart-wrap .key.weak,
+.chart-wrap .key.miners,
+.chart-wrap .key.workers { font-variant-numeric: tabular-nums; }
 .chart-wrap figcaption {
   display: flex;
   gap: 1rem;
