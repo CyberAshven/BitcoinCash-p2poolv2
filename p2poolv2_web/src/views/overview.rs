@@ -63,9 +63,14 @@ const RECENT_BLOCKS: usize = 5;
 /// page has them all.
 const RECENT_SHARES: usize = 5;
 
+/// Connected peers the overview's Peers panel lists; the peers page has
+/// them all. The panel keeps this many rows at every count so a peer
+/// joining or leaving never changes its height.
+const RECENT_PEERS: usize = 5;
+
 /// What the overview's peers panel says when its request answered and no
 /// peer is connected.
-const NO_PEERS_YET: &str =
+pub const NO_PEERS_YET: &str =
     "No p2pool peers connected right now. They appear here once the node dials or accepts a peer.";
 
 /// A confirmed share or one of its uncles, as the overview lists it.
@@ -123,6 +128,13 @@ pub fn capped_history(mut history: Vec<HashratePoint>) -> Vec<HashratePoint> {
     let excess = history.len().saturating_sub(MAX_HISTORY_POINTS);
     history.drain(..excess);
     history
+}
+
+/// The peers the overview's panel lists: the `RECENT_PEERS` the endpoint
+/// sent first, in its longest-uptime order. The panel's note still counts
+/// every peer, and the peers page lists them all.
+pub fn capped_peers(peers: &[Peer]) -> Vec<Peer> {
+    peers.iter().take(RECENT_PEERS).cloned().collect()
 }
 
 /// The network difficulty `hashrate` implies: its current network hashrate,
@@ -191,7 +203,7 @@ pub fn shares_table(rows: Vec<ShareRow>) -> impl IntoView {
 /// multiaddr when the IP is not known, or the dash when neither is there),
 /// its version with the identify agent prefix dropped, the connection
 /// direction, its uptime and its latest ping round trip.
-fn peer_row_view(peer: &Peer) -> impl IntoView {
+fn peer_row_view(peer: Peer) -> impl IntoView {
     let address = peer.ip.as_deref().unwrap_or(peer.address.as_str());
     let address = if address.is_empty() {
         UNKNOWN.to_string()
@@ -204,10 +216,33 @@ fn peer_row_view(peer: &Peer) -> impl IntoView {
         <tr>
             <td class="mono peer-addr">{address}</td>
             <td>{version}</td>
-            <td>{peer.direction.clone()}</td>
+            <td>{peer.direction}</td>
             <td>{fmt_duration(peer.connected_secs)}</td>
             <td class="mono">{latency}</td>
         </tr>
+    }
+}
+
+/// The connected peers table: the overview and the peers page render the
+/// same five columns, so one component holds the markup.
+#[component]
+pub fn PeerTable(peers: Vec<Peer>) -> impl IntoView {
+    let rows = peers.into_iter().map(peer_row_view).collect_view();
+    view! {
+        <div class="table-wrap">
+            <table class="table">
+                <thead>
+                    <tr>
+                        <th>"Address"</th>
+                        <th>"Version"</th>
+                        <th>"Direction"</th>
+                        <th>"Uptime"</th>
+                        <th>"Latency"</th>
+                    </tr>
+                </thead>
+                <tbody>{rows}</tbody>
+            </table>
+        </div>
     }
 }
 
@@ -812,19 +847,9 @@ pub fn OverviewPage() -> impl IntoView {
                 view! { <p class="empty-state">{NO_PEERS_YET}</p> }.into_any()
             }
             Some(Ok(peers_list)) => view! {
-                <div class="table-wrap">
-                    <table class="table">
-                        <thead>
-                            <tr>
-                                <th>"Address"</th>
-                                <th>"Version"</th>
-                                <th>"Direction"</th>
-                                <th>"Uptime"</th>
-                                <th>"Latency"</th>
-                            </tr>
-                        </thead>
-                        <tbody>{peers_list.iter().map(peer_row_view).collect_view()}</tbody>
-                    </table>
+                <PeerTable peers=capped_peers(&peers_list) />
+                <div class="panel-more">
+                    <a href=Route::Peers.href()>"All connected peers \u{2192}"</a>
                 </div>
             }
             .into_any(),
@@ -909,6 +934,18 @@ pub fn OverviewPage() -> impl IntoView {
 mod tests {
     use super::*;
     use crate::api::Uncle;
+
+    /// A connected peer as `/peers` reports it, at `address`.
+    fn connected_peer(address: &str) -> Peer {
+        Peer {
+            ip: Some(address.to_string()),
+            address: format!("/ip4/{address}/tcp/6886"),
+            direction: "Inbound".to_string(),
+            connected_secs: 60,
+            version: Some("p2poolv2/0.0.1-alpha".to_string()),
+            latency_ms: Some(0.5),
+        }
+    }
 
     #[test]
     fn test_uncles_follow_the_share_that_includes_them() {
@@ -1007,6 +1044,38 @@ mod tests {
         let capped = capped_history(history);
         assert_eq!(capped.len(), MAX_HISTORY_POINTS);
         assert_eq!(capped[0].time, 5);
+    }
+
+    #[test]
+    fn test_the_peers_panel_keeps_the_five_longest_connected() {
+        let peers: Vec<Peer> = ["1", "2", "3", "4", "5", "6"]
+            .iter()
+            .map(|octet| connected_peer(&format!("10.0.0.{octet}")))
+            .collect();
+        let capped = capped_peers(&peers);
+
+        assert_eq!(capped.len(), RECENT_PEERS);
+        assert_eq!(
+            capped
+                .iter()
+                .map(|peer| peer.ip.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                Some("10.0.0.1".to_string()),
+                Some("10.0.0.2".to_string()),
+                Some("10.0.0.3".to_string()),
+                Some("10.0.0.4".to_string()),
+                Some("10.0.0.5".to_string()),
+            ],
+            "the sixth peer falls off the capped panel, in the endpoint's order"
+        );
+    }
+
+    #[test]
+    fn test_capping_fewer_peers_than_the_cap_keeps_them() {
+        let peers = vec![connected_peer("10.0.0.1")];
+        assert_eq!(capped_peers(&peers), peers);
+        assert!(capped_peers(&Vec::new()).is_empty());
     }
 
     #[test]
