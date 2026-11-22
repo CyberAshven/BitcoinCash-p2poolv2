@@ -41,7 +41,7 @@ use p2poolv2_lib::address_display::ShareInfoDisplay;
 use p2poolv2_lib::address_display::payout_address_string;
 use pages::{
     BlockView, BlocksView, FoundBlockRow, MinerRow, MinerView, MinersView, Overview, PAGE_SIZE,
-    Paging, ShareRow, ShareView, SharesView, Site, WorkerRow, range_window_secs,
+    Paging, PeersView, ShareRow, ShareView, SharesView, Site, WorkerRow, range_window_secs,
 };
 use serde::Deserialize;
 use std::str::FromStr;
@@ -60,6 +60,9 @@ const OVERVIEW_SHARES: usize = 5;
 /// refresh, whatever uncles the window carries.
 const OVERVIEW_ROWS: usize = 5;
 
+/// Peers the overview's Peers panel lists; the peers page has them all.
+const OVERVIEW_PEERS: usize = 5;
+
 /// What the dashboard handlers share: the API's state and the history its
 /// sampler fills.
 pub(crate) struct DashboardState {
@@ -75,6 +78,7 @@ pub(crate) fn router(app: Arc<AppState>, history: Arc<HashrateHistory>) -> Route
     Router::new()
         .route("/dashboard", get(overview))
         .route("/dashboard/shares", get(shares))
+        .route("/dashboard/peers", get(peers))
         .route("/dashboard/blocks", get(blocks))
         .route("/dashboard/block/{hash}", get(block))
         .route("/dashboard/miners", get(miners))
@@ -651,6 +655,21 @@ async fn shares(
         tip_height,
         shares,
         paging,
+    }))
+}
+
+async fn peers(State(dashboard): State<Arc<DashboardState>>) -> Response {
+    let state = &dashboard.app;
+    let peers = match state.node_handle.get_peer_infos().await {
+        Ok(peers) => peers,
+        Err(error) => {
+            tracing::warn!("Dashboard could not read connected peers: {error}");
+            Vec::new()
+        }
+    };
+    html(pages::peers(&PeersView {
+        site: site(state),
+        peers,
     }))
 }
 

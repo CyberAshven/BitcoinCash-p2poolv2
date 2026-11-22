@@ -876,6 +876,16 @@ async fn the_overview_recent_shares_hold_five_rows_when_a_share_carries_an_uncle
 }
 
 #[tokio::test]
+async fn the_peers_page_is_served() {
+    let (state, _store, _metrics) = build_state(None, None).await;
+    let (status, body, _) = get(&state, "/dashboard/peers").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.starts_with("<!DOCTYPE html>"));
+    assert!(body.contains("<h2>Peers"));
+    assert!(!body.contains("<script"));
+}
+
+#[tokio::test]
 async fn the_overview_links_to_the_shares_page_instead_of_a_pager() {
     let (state, _store, _metrics) = build_state(None, None).await;
     build_confirmed_test_chain(&state.chain_store_handle, 8).await;

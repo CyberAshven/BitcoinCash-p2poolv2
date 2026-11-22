@@ -389,6 +389,14 @@ pub(crate) struct SharesView {
     pub(crate) paging: Paging,
 }
 
+/// The peers page: every connected peer, longest uptime first. The
+/// overview's Peers panel shows at most `super::OVERVIEW_PEERS` of them;
+/// this page carries the whole list the node reports.
+pub(crate) struct PeersView {
+    pub(crate) site: Site,
+    pub(crate) peers: Vec<PeerInfoResponse>,
+}
+
 /// One found block's page.
 pub(crate) struct BlockView {
     pub(crate) site: Site,
@@ -1496,7 +1504,7 @@ pub(crate) fn overview(view: &Overview) -> Markup {
                     table.table {
                         thead { tr { th { "Address" } th { "Version" } th { "Direction" } th { "Uptime" } th { "Latency" } } }
                         tbody {
-                            @for peer in &view.peers {
+                            @for peer in view.peers.iter().take(super::OVERVIEW_PEERS) {
                                 tr {
                                     td.mono.peer-addr { (peer_address(peer)) }
                                     td { (agent_version(peer.version.as_deref())) }
@@ -1508,6 +1516,7 @@ pub(crate) fn overview(view: &Overview) -> Markup {
                         }
                     }
                 }
+                div.panel-more { a href="/dashboard/peers" { "All connected peers →" } }
             }
         }
     };
@@ -1597,6 +1606,55 @@ pub(crate) fn shares(view: &SharesView) -> Markup {
         "Shares",
         Tab::None,
         &[dashboard_crumb(), Crumb::here("Shares")],
+        None,
+        None,
+        None,
+        "",
+        body,
+    )
+}
+
+/// The peers page: the whole connected list the overview's panel caps, in
+/// the panel's own columns. The list is never long enough to page, so the
+/// page renders every peer the node reports.
+pub(crate) fn peers(view: &PeersView) -> Markup {
+    let body = html! {
+        div.panel {
+            h2 {
+                "Peers"
+                span.panel-note {
+                    "longest uptime first"
+                    @if view.peers.is_empty() { " · none connected" }
+                    @else { " · " (view.peers.len()) " connected" }
+                }
+            }
+            @if view.peers.is_empty() {
+                p.empty-state { "No p2pool peers connected right now. They appear here once the node dials or accepts a peer." }
+            } @else {
+                div.table-wrap {
+                    table.table {
+                        thead { tr { th { "Address" } th { "Version" } th { "Direction" } th { "Uptime" } th { "Latency" } } }
+                        tbody {
+                            @for peer in &view.peers {
+                                tr {
+                                    td.mono.peer-addr { (peer_address(peer)) }
+                                    td { (agent_version(peer.version.as_deref())) }
+                                    td { (direction_label(&peer.direction)) }
+                                    td { (fmt_duration(peer.connected_secs)) }
+                                    td.mono { (optional(peer.latency_ms, fmt_latency)) }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    };
+    layout(
+        &view.site,
+        "Peers",
+        Tab::None,
+        &[dashboard_crumb(), Crumb::here("Peers")],
         None,
         None,
         None,
@@ -2150,6 +2208,20 @@ mod tests {
                 weak_summary: None,
             },
             is_block: false,
+        }
+    }
+
+    /// A connected peer row, as the panel and the peers page list them:
+    /// inbound, a version, a latency, longest uptime first.
+    fn connected_peer(peer_id: &str, ip: &str) -> PeerInfoResponse {
+        PeerInfoResponse {
+            peer_id: peer_id.to_string(),
+            ip: Some(ip.to_string()),
+            address: format!("/ip4/{ip}/tcp/6884"),
+            direction: ConnectionDirection::Inbound,
+            connected_secs: 1_337,
+            version: Some("p2poolv2/0.0.1-alpha".to_string()),
+            latency_ms: Some(0.914),
         }
     }
 
@@ -2976,6 +3048,71 @@ mod tests {
 
         assert!(page.contains("libp2p"));
         assert!(page.contains("No p2pool peers connected right now."));
+    }
+
+    #[test]
+    fn the_overview_peers_panel_lists_five_of_six_peers_and_counts_six() {
+        let mut view = empty_overview();
+        view.peers = vec![
+            connected_peer("12D3KooWFirst", "10.0.0.1"),
+            connected_peer("12D3KooWSecond", "10.0.0.2"),
+            connected_peer("12D3KooWThird", "10.0.0.3"),
+            connected_peer("12D3KooWFourth", "10.0.0.4"),
+            connected_peer("12D3KooWFifth", "10.0.0.5"),
+            connected_peer("12D3KooWSixth", "10.0.0.6"),
+        ];
+        let page = overview(&view).into_string();
+
+        assert!(page.contains("6 connected"), "the header counts every peer");
+        assert!(page.contains("10.0.0.1"));
+        assert!(page.contains("10.0.0.5"), "the fifth peer stays listed");
+        assert!(
+            !page.contains("10.0.0.6"),
+            "the sixth peer falls off the capped panel"
+        );
+        assert!(page.contains("href=\"/dashboard/peers\""));
+        assert!(page.contains("All connected peers"));
+    }
+
+    #[test]
+    fn the_peers_page_lists_every_connected_peer() {
+        let view = PeersView {
+            site: site(),
+            peers: vec![
+                connected_peer("12D3KooWFirst", "10.0.0.1"),
+                connected_peer("12D3KooWSecond", "10.0.0.2"),
+                connected_peer("12D3KooWThird", "10.0.0.3"),
+                connected_peer("12D3KooWFourth", "10.0.0.4"),
+                connected_peer("12D3KooWFifth", "10.0.0.5"),
+                connected_peer("12D3KooWSixth", "10.0.0.6"),
+            ],
+        };
+        let page = peers(&view).into_string();
+
+        assert!(page.contains("<h2>Peers"));
+        assert!(page.contains("longest uptime first"));
+        assert!(page.contains("6 connected"));
+        assert!(page.contains("10.0.0.1"));
+        assert!(page.contains("10.0.0.4"));
+        assert!(
+            page.contains("10.0.0.6"),
+            "no peer is dropped without a cap"
+        );
+        assert!(!page.contains("page="));
+        assert!(!page.contains("<script"));
+    }
+
+    #[test]
+    fn the_peers_page_without_peers_says_so() {
+        let view = PeersView {
+            site: site(),
+            peers: Vec::new(),
+        };
+        let page = peers(&view).into_string();
+
+        assert!(page.contains("none connected"));
+        assert!(page.contains("No p2pool peers connected right now."));
+        assert!(!page.contains("href=\"/dashboard/peers\""));
     }
 
     #[test]
