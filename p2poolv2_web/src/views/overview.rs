@@ -60,8 +60,16 @@ pub const MAX_HISTORY_POINTS: usize = 2_592_000 / 60;
 const RECENT_BLOCKS: usize = 5;
 
 /// Confirmed share heights the overview's Recent shares lists; the shares
-/// page has them all.
+/// page has them all. [`RECENT_ROWS`] caps the rows those heights expand
+/// to, uncles included.
 const RECENT_SHARES: usize = 5;
+
+/// Rows the overview's Recent shares table renders: the height window
+/// expands to a row per share plus a row per uncle, and this truncates the
+/// result to a fixed count so the panel keeps the same size on every
+/// refresh, whatever uncles the window carries, as the node's own
+/// `OVERVIEW_ROWS` does.
+const RECENT_ROWS: usize = 5;
 
 /// Connected peers the overview's Peers panel lists; the peers page has
 /// them all. The panel keeps this many rows at every count so a peer
@@ -120,6 +128,17 @@ pub fn share_rows(shares: &[Share], found: &HashSet<String>) -> Vec<ShareRow> {
             weak_count: 0,
         }));
     }
+    rows
+}
+
+/// The rows the overview's Recent shares panel holds: the window's rows,
+/// capped at [`RECENT_ROWS`], dropping oldest rows only, so a share row
+/// still sits directly above its uncles and the panel keeps the same size
+/// on every refresh, whatever uncles the window carries. The node's own
+/// overview truncates the same way.
+pub fn capped_share_rows(shares: &[Share], found: &HashSet<String>) -> Vec<ShareRow> {
+    let mut rows = share_rows(shares, found);
+    rows.truncate(RECENT_ROWS);
     rows
 }
 
@@ -367,10 +386,11 @@ pub fn OverviewPage() -> impl IntoView {
         .unwrap_or_default()
     });
     // The overview shows the few newest heights; `recent` stays newest
-    // first, and the shares page carries the whole chain.
+    // first, and the shares page carries the whole chain. The rows cap
+    // keeps the panel a fixed height when the window carries uncles.
     let rows = Signal::derive(move || {
         recent.with(|shares| {
-            found.with(|found| share_rows(&shares[..shares.len().min(RECENT_SHARES)], found))
+            found.with(|found| capped_share_rows(&shares[..shares.len().min(RECENT_SHARES)], found))
         })
     });
     let history = Memo::new(move |_| {
@@ -1044,6 +1064,105 @@ mod tests {
         let capped = capped_history(history);
         assert_eq!(capped.len(), MAX_HISTORY_POINTS);
         assert_eq!(capped[0].time, 5);
+    }
+
+    #[test]
+    fn test_recent_shares_hold_five_rows_when_a_share_carries_an_uncle() {
+        let shares = vec![
+            Share {
+                blockhash: "h5".to_string(),
+                height: 5,
+                miner_bitcoin_address: "bchtest:a".to_string(),
+                miner_address: "tp2pool:a".to_string(),
+                timestamp: 50,
+                bits: 0x1d00_ffff,
+                uncles: Vec::new(),
+                weak_count: 0,
+            },
+            Share {
+                blockhash: "h4".to_string(),
+                height: 4,
+                miner_bitcoin_address: "bchtest:b".to_string(),
+                miner_address: "tp2pool:b".to_string(),
+                timestamp: 40,
+                bits: 0x1d00_ffff,
+                uncles: vec![Uncle {
+                    blockhash: "u4".to_string(),
+                    miner_bitcoin_address: "bchtest:c".to_string(),
+                    miner_address: "tp2pool:c".to_string(),
+                    timestamp: 39,
+                    height: Some(4),
+                }],
+                weak_count: 0,
+            },
+            Share {
+                blockhash: "h3".to_string(),
+                height: 3,
+                miner_bitcoin_address: "bchtest:d".to_string(),
+                miner_address: "tp2pool:d".to_string(),
+                timestamp: 30,
+                bits: 0x1d00_ffff,
+                uncles: Vec::new(),
+                weak_count: 0,
+            },
+            Share {
+                blockhash: "h2".to_string(),
+                height: 2,
+                miner_bitcoin_address: "bchtest:e".to_string(),
+                miner_address: "tp2pool:e".to_string(),
+                timestamp: 20,
+                bits: 0x1d00_ffff,
+                uncles: Vec::new(),
+                weak_count: 0,
+            },
+            Share {
+                blockhash: "h1".to_string(),
+                height: 1,
+                miner_bitcoin_address: "bchtest:f".to_string(),
+                miner_address: "tp2pool:f".to_string(),
+                timestamp: 10,
+                bits: 0x1d00_ffff,
+                uncles: Vec::new(),
+                weak_count: 0,
+            },
+        ];
+        let rows = capped_share_rows(&shares, &HashSet::new());
+
+        assert_eq!(rows.len(), RECENT_ROWS, "the uncle does not grow the panel");
+        assert_eq!(
+            rows.iter()
+                .map(|row| (row.blockhash.as_str(), row.is_uncle))
+                .collect::<Vec<_>>(),
+            vec![
+                ("h5", false),
+                ("h4", false),
+                ("u4", true),
+                ("h3", false),
+                ("h2", false),
+            ],
+            "the uncle stays under the share that includes it and the oldest row drops"
+        );
+    }
+
+    #[test]
+    fn test_recent_shares_without_uncles_keep_all_five_rows() {
+        let shares: Vec<Share> = (1..=5)
+            .map(|height| Share {
+                blockhash: format!("h{height}"),
+                height,
+                miner_bitcoin_address: "bchtest:a".to_string(),
+                miner_address: "tp2pool:a".to_string(),
+                timestamp: u64::from(height) * 10,
+                bits: 0x1d00_ffff,
+                uncles: Vec::new(),
+                weak_count: 0,
+            })
+            .collect();
+        let rows = capped_share_rows(&shares, &HashSet::new());
+
+        assert_eq!(rows.len(), RECENT_ROWS);
+        assert_eq!(rows[0].height, Some(5));
+        assert_eq!(rows[4].height, Some(1));
     }
 
     #[test]
