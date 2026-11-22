@@ -55,6 +55,11 @@ const RECENT_BLOCKS: usize = 5;
 /// shares page has them all, [`pages::PAGE_SIZE`] per page.
 const OVERVIEW_SHARES: usize = 5;
 
+/// Rows the overview's Recent shares table always renders: the page is
+/// truncated to this count so the panel keeps the same size on every
+/// refresh, whatever uncles the window carries.
+const OVERVIEW_ROWS: usize = 5;
+
 /// What the dashboard handlers share: the API's state and the history its
 /// sampler fills.
 pub(crate) struct DashboardState {
@@ -183,11 +188,16 @@ fn share_found_a_block(state: &AppState, blockhash: &BlockHash) -> bool {
 /// One page of the confirmed share chain, newest first, each share followed
 /// by the uncles it includes, with the tip height. `window` is how many
 /// heights a page spans: [`OVERVIEW_SHARES`] for the overview's Recent
-/// shares, `pages::PAGE_SIZE` for the shares page.
+/// shares, `pages::PAGE_SIZE` for the shares page. `row_limit` caps the
+/// rows the page may render: the overview passes [`OVERVIEW_ROWS`] so its
+/// table keeps the same size on every refresh, the shares page passes
+/// `None` for the window's full detail. Truncation drops oldest content
+/// only, so a share row still sits directly above its uncles.
 fn share_page(
     state: &AppState,
     page: Option<usize>,
     window: usize,
+    row_limit: Option<usize>,
 ) -> (Option<u32>, Paging, Vec<ShareRow>) {
     let Ok(Some(tip)) = state.chain_store_handle.get_tip_height() else {
         return (None, Paging::of(None, 0), Vec::new());
@@ -235,6 +245,9 @@ fn share_page(
                 weak_count: 0,
             });
         }
+    }
+    if let Some(limit) = row_limit {
+        rows.truncate(limit);
     }
     (Some(tip), paging, rows)
 }
@@ -482,7 +495,7 @@ async fn overview(
     let now = unix_now();
     let chain = read_store(state, move |state| {
         (
-            share_page(state, None, OVERVIEW_SHARES),
+            share_page(state, None, OVERVIEW_SHARES, Some(OVERVIEW_ROWS)),
             pool_hashrate(state, now),
             found_blocks(state),
         )
@@ -624,11 +637,14 @@ async fn shares(
     Query(query): Query<PageQuery>,
 ) -> Response {
     let state = &dashboard.app;
-    let (tip_height, paging, shares) =
-        match read_store(state, move |state| share_page(state, query.page, PAGE_SIZE)).await {
-            Ok(page) => page,
-            Err(error) => return error_page(state, error),
-        };
+    let (tip_height, paging, shares) = match read_store(state, move |state| {
+        share_page(state, query.page, PAGE_SIZE, None)
+    })
+    .await
+    {
+        Ok(page) => page,
+        Err(error) => return error_page(state, error),
+    };
     html(pages::shares(&SharesView {
         site: site(state),
         now: unix_now(),

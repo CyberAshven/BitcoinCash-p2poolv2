@@ -327,7 +327,9 @@ pub(crate) struct Overview {
     /// The newest of them, newest first.
     pub(crate) blocks: Vec<FoundBlockRow>,
     /// The newest confirmed shares, newest first, uncles under the share that
-    /// includes them, at most `super::OVERVIEW_SHARES` heights.
+    /// includes them, at most `super::OVERVIEW_SHARES` heights and at most
+    /// `super::OVERVIEW_ROWS` rows, so the panel keeps the same size on
+    /// every refresh.
     pub(crate) shares: Vec<ShareRow>,
     /// Connected libp2p peers, longest uptime first, as `/peers` answers.
     pub(crate) peers: Vec<PeerInfoResponse>,

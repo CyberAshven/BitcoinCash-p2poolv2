@@ -90,6 +90,22 @@ fn recent_share_row_heights(body: &str) -> Vec<u32> {
         .collect()
 }
 
+/// For each row of the Shares table, whether it renders as an uncle, in
+/// the same order as `recent_share_row_heights`.
+fn recent_share_row_is_uncle(body: &str) -> Vec<bool> {
+    let table = body
+        .split_once("<h2>Shares")
+        .and_then(|(_, rest)| rest.split_once("</table>"))
+        .map(|(table, _)| table)
+        .expect("overview has a Shares table");
+    table
+        .split("<tr")
+        .skip(1)
+        .filter(|row| row.contains("<td"))
+        .map(|row| row.contains("class=\"uncle-row\""))
+        .collect()
+}
+
 async fn get_with(
     state: &Arc<AppState>,
     uri: &str,
@@ -777,6 +793,85 @@ async fn the_overview_recent_shares_stop_at_five_heights() {
         recent_share_row_heights(&body),
         vec![30, 29, 28, 27, 26],
         "the overview lists the five newest heights, newest first"
+    );
+}
+
+#[tokio::test]
+async fn the_overview_recent_shares_hold_five_rows_when_a_share_carries_an_uncle() {
+    let (state, _store, _metrics) = build_state(None, None).await;
+    let genesis_block = genesis_for_tests();
+    state
+        .chain_store_handle
+        .init_or_setup_genesis(genesis_block.clone())
+        .await
+        .unwrap();
+    let share1 = TestShareBlockBuilder::new()
+        .prev_share_blockhash(genesis_block.block_hash().to_string())
+        .build();
+    confirm_share(&state, &share1).await;
+    let share2 = TestShareBlockBuilder::new()
+        .prev_share_blockhash(share1.block_hash().to_string())
+        .build();
+    confirm_share(&state, &share2).await;
+    let share3 = TestShareBlockBuilder::new()
+        .prev_share_blockhash(share2.block_hash().to_string())
+        .build();
+    confirm_share(&state, &share3).await;
+    // An off-chain sibling of share3: share4 names it as an uncle, the
+    // shape a race between two miners leaves behind. Its nonce differs so
+    // it does not hash to the same block as share3, its sibling.
+    let uncle = TestShareBlockBuilder::new()
+        .prev_share_blockhash(share2.block_hash().to_string())
+        .nonce(0xe9695799)
+        .build();
+    confirm_share(&state, &uncle).await;
+    let share4 = TestShareBlockBuilder::new()
+        .prev_share_blockhash(share3.block_hash().to_string())
+        .uncles(vec![uncle.block_hash()])
+        .build();
+    confirm_share(&state, &share4).await;
+    let share5 = TestShareBlockBuilder::new()
+        .prev_share_blockhash(share4.block_hash().to_string())
+        .build();
+    confirm_share(&state, &share5).await;
+    let share6 = TestShareBlockBuilder::new()
+        .prev_share_blockhash(share5.block_hash().to_string())
+        .build();
+    confirm_share(&state, &share6).await;
+    let share7 = TestShareBlockBuilder::new()
+        .prev_share_blockhash(share6.block_hash().to_string())
+        .build();
+    confirm_share(&state, &share7).await;
+
+    let (status, body, _) = get(&state, "/dashboard").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        recent_share_row_heights(&body),
+        vec![7, 6, 5, 4, 3],
+        "the overview holds five rows, dropping share3's row to keep the uncle under share4"
+    );
+    assert_eq!(
+        recent_share_row_is_uncle(&body),
+        vec![false, false, false, false, true],
+        "the kept fifth row is the uncle, directly under the share that includes it"
+    );
+    assert_eq!(
+        body.matches("class=\"uncle-row\"").count(),
+        1,
+        "the overview renders the uncle once"
+    );
+
+    let (status, body, _) = get(&state, "/dashboard/shares").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        recent_share_row_heights(&body),
+        vec![7, 6, 5, 4, 3, 3, 2, 1, 0],
+        "the shares page lists every height, the uncle under the share that includes it"
+    );
+    assert_eq!(
+        recent_share_row_is_uncle(&body),
+        vec![false, false, false, false, true, false, false, false, false],
+        "the shares page keeps the uncle between share4 and share3"
     );
 }
 
