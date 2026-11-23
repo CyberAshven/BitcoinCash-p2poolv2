@@ -239,6 +239,10 @@ format and genesis re-pin.
 - A Bitcoin node stops mining on a block template that marks required (`!`
   prefix) a rule P2Poolv2 does not implement, and logs an error naming the
   rule, instead of building blocks that may be invalid (from upstream).
+- Stratum rejects a share whose ntime is below the `mintime` of the template
+  ("Time too old") or more than two hours past its `curtime` ("Time too
+  new"), so a found block always meets the timewarp rule of BIP54 and the
+  time limits of the node (from upstream).
 - Connections Kademlia opens for a lookup close once no query needs them, so
   `target_outgoing_peers` and its /16 rule set a node's outgoing peers; the
   peer stays in the routing table. A lookup only discovers addresses: no

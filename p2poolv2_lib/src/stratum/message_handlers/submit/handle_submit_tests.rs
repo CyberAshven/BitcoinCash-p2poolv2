@@ -1409,7 +1409,7 @@ async fn test_handle_submit_bad_nonce_returns_error_not_panic() {
     session.subscribed = true;
     let tracker_handle = start_tracker_actor();
 
-    let (template, notify, _submit, authorize_response) =
+    let (template, notify, valid_submit, authorize_response) =
         load_valid_stratum_work_components("../p2poolv2_tests/test_data/validation/stratum/b/");
 
     let enonce1 = authorize_response.result.unwrap()[1].clone();
@@ -1436,7 +1436,7 @@ async fn test_handle_submit_bad_nonce_returns_error_not_panic() {
         "worker".to_string(),
         notify.params.job_id.clone(),
         "0000000000000000".to_string(),
-        "504e86ed".to_string(),
+        valid_submit.params[3].clone().unwrap(),
         "ZZZZZZZZ".to_string(),
     );
 
@@ -1495,7 +1495,7 @@ async fn test_handle_submit_none_version_bits_returns_error_not_panic() {
     session.subscribed = true;
     let tracker_handle = start_tracker_actor();
 
-    let (template, notify, _submit, authorize_response) =
+    let (template, notify, valid_submit, authorize_response) =
         load_valid_stratum_work_components("../p2poolv2_tests/test_data/validation/stratum/b/");
 
     let enonce1 = authorize_response.result.unwrap()[1].clone();
@@ -1525,7 +1525,7 @@ async fn test_handle_submit_none_version_bits_returns_error_not_panic() {
             Some("worker".to_string()),
             Some(notify.params.job_id.clone()),
             Some("0000000000000000".to_string()),
-            Some("504e86ed".to_string()),
+            valid_submit.params[3].clone(),
             Some("e9695791".to_string()),
             None, // version bits is None
         ]),
