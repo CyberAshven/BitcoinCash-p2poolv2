@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 use crate::address::Address as P2PoolAddress;
+use crate::stratum::error::StratumErrorCode;
 use crate::stratum::work::level_policy::PayoutLevelChoice;
 use crate::utils::time_provider::SystemTimeProvider;
 use crate::{
@@ -11,6 +12,7 @@ use crate::{
 use bitcoin::secp256k1::rand::{self, Rng};
 use p2poolv2_wallet::payout_address::PayoutAddress;
 use p2poolv2_wallet::share_owner::ShareOwner;
+use std::collections::HashMap;
 use std::time::SystemTime;
 
 /// Use 4 byte extranonce1
@@ -92,6 +94,10 @@ pub struct Session<D: DifficultyAdjusterTrait> {
     /// node merge-mines tokens: each job's leaves and each token win's
     /// proof follow (`stratum::merge_disclosure`).
     pub merge_disclosure: bool,
+    /// Rejections logged so far on this session, counted per stratum
+    /// reason (`stratum::reject_log`): the first rejection of a reason
+    /// logs at warn, then every `reject_log::REJECT_LOG_INTERVAL`-th.
+    pub reject_logs: HashMap<StratumErrorCode, u64>,
 }
 
 impl<D: DifficultyAdjusterTrait> Session<D> {
@@ -133,6 +139,7 @@ impl<D: DifficultyAdjusterTrait> Session<D> {
             needs_first_notify: false,
             last_job_tip: None,
             merge_disclosure: false,
+            reject_logs: HashMap::new(),
         }
     }
 

@@ -26,6 +26,7 @@ use crate::stratum::{
     messages::{
         ExtensionNotification, Message, Response, SetDifficultyNotification, SimpleRequest,
     },
+    reject_log::handle_reject,
     server::StratumContext,
     session::Session,
     work::{
@@ -77,12 +78,24 @@ pub(crate) async fn handle_submit<'a, D: DifficultyAdjusterTrait>(
 ) -> Result<Vec<Message<'a>>, Error> {
     debug!("Handling mining.submit message");
     if !session.subscribed {
+        handle_reject(
+            session,
+            StratumErrorCode::NotSubscribed,
+            None,
+            Some("mining.submit before subscribe"),
+        );
         return Ok(vec![Message::Response(Response::new_error(
             message.id,
             StratumErrorCode::NotSubscribed,
         ))]);
     }
     if session.user_id.is_none() {
+        handle_reject(
+            session,
+            StratumErrorCode::UnauthorizedWorker,
+            None,
+            Some("mining.submit before authorize"),
+        );
         return Ok(vec![Message::Response(
             Response::new_error(message.id, StratumErrorCode::UnauthorizedWorker)
                 .with_message("Not authorized".to_string()),
@@ -103,6 +116,7 @@ pub(crate) async fn handle_submit<'a, D: DifficultyAdjusterTrait>(
         Some(job) => job,
         None => {
             debug!("Job not found for job_id: {job_id}");
+            handle_reject(session, StratumErrorCode::JobNotFound, Some(job_id), None);
             return Ok(vec![Message::Response(Response::new_error(
                 message.id,
                 StratumErrorCode::JobNotFound,
@@ -121,6 +135,12 @@ pub(crate) async fn handle_submit<'a, D: DifficultyAdjusterTrait>(
             Ok(result) => result,
             Err(e) => {
                 debug!("Share validation failed: {}", e);
+                handle_reject(
+                    session,
+                    StratumErrorCode::OtherUnknown,
+                    Some(job_id),
+                    Some(&e.to_string()),
+                );
                 let response = Response::new_error(message.id, StratumErrorCode::OtherUnknown)
                     .with_message(e.to_string());
                 return Ok(vec![Message::Response(response)]);
@@ -138,6 +158,12 @@ pub(crate) async fn handle_submit<'a, D: DifficultyAdjusterTrait>(
             "Share nTime {} is not allowed with job {job_id:x}'s nBits",
             validation_result.header.time
         );
+        handle_reject(
+            session,
+            StratumErrorCode::OtherUnknown,
+            Some(job_id),
+            Some(NTIME_OUT_OF_RANGE),
+        );
         let response = Response::new_error(message.id, StratumErrorCode::OtherUnknown)
             .with_message(NTIME_OUT_OF_RANGE.to_string());
         return Ok(vec![Message::Response(response)]);
@@ -152,6 +178,12 @@ pub(crate) async fn handle_submit<'a, D: DifficultyAdjusterTrait>(
         .add_share(JobId(job_id), block_hash);
 
     if !is_new_share {
+        handle_reject(
+            session,
+            StratumErrorCode::DuplicateShare,
+            Some(job_id),
+            None,
+        );
         return Ok(vec![Message::Response(Response::new_error(
             message.id,
             StratumErrorCode::DuplicateShare,
@@ -227,6 +259,14 @@ pub(crate) async fn handle_submit<'a, D: DifficultyAdjusterTrait>(
             .record_share_accepted(stratum_share, truediff as u64)
             .await;
     } else {
+        handle_reject(
+            session,
+            StratumErrorCode::LowDifficultyShare,
+            Some(job_id),
+            Some(&format!(
+                "hash true difficulty {truediff} below session difficulty {current_difficulty}"
+            )),
+        );
         let _ = stratum_context.metrics.record_share_rejected().await;
     }
 

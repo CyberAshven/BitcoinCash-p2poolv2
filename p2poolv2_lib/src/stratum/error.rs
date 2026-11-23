@@ -31,7 +31,7 @@ pub enum Error {
 ///
 /// Minimal negative codes -32700..-32600 from JSON-RPC 2.0 convention.
 #[repr(i32)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum StratumErrorCode {
     /// Catch-all unknown error
     OtherUnknown = 20,
@@ -49,6 +49,24 @@ pub enum StratumErrorCode {
     ParseError = -32700,
     /// Unknown method name
     MethodNotFound = -32601,
+}
+
+impl StratumErrorCode {
+    /// Short ASCII label for this code, used when logging a rejection
+    /// server-side (`stratum::reject_log`). The wire response carries
+    /// the `Display` text instead.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::OtherUnknown => "other",
+            Self::JobNotFound => "job_not_found",
+            Self::DuplicateShare => "duplicate_share",
+            Self::LowDifficultyShare => "low_difficulty_share",
+            Self::UnauthorizedWorker => "unauthorized_worker",
+            Self::NotSubscribed => "not_subscribed",
+            Self::ParseError => "parse_error",
+            Self::MethodNotFound => "method_not_found",
+        }
+    }
 }
 
 impl Display for StratumErrorCode {

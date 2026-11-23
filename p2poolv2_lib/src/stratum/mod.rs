@@ -12,6 +12,7 @@ pub mod message_handlers;
 pub mod messages;
 pub mod node_p2p_listener;
 pub(crate) mod parse_password;
+pub mod reject_log;
 pub mod server;
 pub mod session;
 pub mod session_timeout;

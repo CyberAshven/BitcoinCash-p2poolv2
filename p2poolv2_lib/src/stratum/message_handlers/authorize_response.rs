@@ -15,6 +15,7 @@ use crate::stratum::{
     error::{Error, StratumErrorCode},
     messages::{Id, Message, Response, SetDifficultyNotification, SimpleRequest},
     parse_password::parse_password,
+    reject_log::handle_reject,
     server::StratumContext,
     session::Session,
     validate_username,
@@ -255,12 +256,23 @@ fn reject_authorize<'a, D: DifficultyAdjusterTrait>(
     reason: String,
 ) -> Result<Vec<Message<'a>>, Error> {
     if session.auth_failed_once {
+        handle_reject(
+            session,
+            StratumErrorCode::UnauthorizedWorker,
+            None,
+            Some(&reason),
+        );
         return Err(Error::AuthorizationFailure(format!(
             "Second miner address failure. Disconnecting. {reason}"
         )));
     }
     session.auth_failed_once = true;
-    debug!("Rejecting authorize: {reason}");
+    handle_reject(
+        session,
+        StratumErrorCode::UnauthorizedWorker,
+        None,
+        Some(&reason),
+    );
     Ok(vec![Message::Response(
         Response::new_error(id, StratumErrorCode::UnauthorizedWorker).with_message(reason),
     )])
@@ -289,6 +301,12 @@ pub(crate) async fn handle_authorize<'a, D: DifficultyAdjusterTrait>(
     let username = match message.params.first().and_then(|p| p.clone()) {
         Some(name) => name,
         None => {
+            handle_reject(
+                session,
+                StratumErrorCode::UnauthorizedWorker,
+                None,
+                Some("authorize with an empty username"),
+            );
             return Ok(vec![Message::Response(
                 Response::new_error(message.id, StratumErrorCode::UnauthorizedWorker)
                     .with_message("Empty username".to_string()),
@@ -307,7 +325,13 @@ pub(crate) async fn handle_authorize<'a, D: DifficultyAdjusterTrait>(
             .map(BitcoinCashNetwork::from_share_network),
     ) {
         Ok(validated) => validated,
-        Err(_e) => {
+        Err(e) => {
+            handle_reject(
+                session,
+                StratumErrorCode::UnauthorizedWorker,
+                None,
+                Some(&format!("invalid username: {e}")),
+            );
             if !session.auth_failed_once {
                 session.auth_failed_once = true;
                 return Ok(vec![Message::Response(
