@@ -226,7 +226,12 @@ pub(crate) fn append_proportional_distribution(
     total_amount: bitcoin::Amount,
     distribution: &mut Vec<OutputPair>,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let total_difficulty: u128 = address_difficulty_map.values().sum();
+    let total_difficulty = address_difficulty_map
+        .values()
+        .try_fold(0u128, |acc, difficulty| acc.checked_add(*difficulty))
+        .ok_or_else(|| {
+            "Total difficulty overflows u128 when computing proportional payout".to_string()
+        })?;
     if total_difficulty == 0 {
         return Err(
             "Invalid total difficulty (0) when computing proportional payout"
@@ -249,7 +254,15 @@ pub(crate) fn append_proportional_distribution(
             // Last address gets remainder from truncation
             total_amount - distributed_amount
         } else {
-            let amount_sats = (total_sats * *difficulty / total_difficulty) as u64;
+            let amount_sats = total_sats
+                .checked_mul(*difficulty)
+                .ok_or_else(|| {
+                    format!(
+                        "Difficulty {difficulty} too large to compute a proportional payout of {total_sats} sats"
+                    )
+                })?
+                / total_difficulty;
+            let amount_sats = amount_sats as u64;
             bitcoin::Amount::from_sat(amount_sats)
         };
 
