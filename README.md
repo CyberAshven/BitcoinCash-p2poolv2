@@ -1,9 +1,10 @@
 # P2Poolv2 for Bitcoin Cash
 
-> **About this branch.** `alpha-dashv1` is a fork of the `alpha` development
-> branch. Its purpose is to work on UI enhancements -- currently an admin
-> sign-in flow for the dashboard -- which are meant to be reviewed and merged
-> back into `alpha` once they are ready. See `alpha` for the main line.
+> **About this branch.** `alpha-test1` is a branch of `alpha` for
+> non-dashboard testing. It carries one feature: rejected shares are logged
+> with their stratum reason code (see [Branch testing](#branch-testing)
+> below). It deliberately excludes the dashboard work on `alpha-dashv1`;
+> see `alpha` for the main line.
 
 [![Rust CI](https://github.com/CyberAshven/BitcoinCash-p2poolv2/actions/workflows/rust.yml/badge.svg?branch=alpha)](https://github.com/CyberAshven/BitcoinCash-p2poolv2/actions/workflows/rust.yml)
 [![Docs](https://github.com/CyberAshven/BitcoinCash-p2poolv2/actions/workflows/docs.yml/badge.svg?branch=alpha)](https://github.com/CyberAshven/BitcoinCash-p2poolv2/actions/workflows/docs.yml)
