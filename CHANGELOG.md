@@ -243,6 +243,10 @@ format and genesis re-pin.
   ("Time too old") or more than two hours past its `curtime` ("Time too
   new"), so a found block always meets the timewarp rule of BIP54 and the
   time limits of the node (from upstream).
+- Stratum rejects a share whose extranonce2 is not the 8 bytes announced in
+  `mining.subscribe`, and a coinbase with bytes left over after decoding, so
+  a miner can no longer shift which coinbase bytes are read as nSequence and
+  nLockTime (from upstream).
 - Connections Kademlia opens for a lookup close once no query needs them, so
   `target_outgoing_peers` and its /16 rule set a node's outgoing peers; the
   peer stays in the routing table. A lookup only discovers addresses: no
