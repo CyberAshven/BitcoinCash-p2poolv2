@@ -5,6 +5,7 @@
 use crate::address::Address as P2PoolAddress;
 use crate::stratum::error::StratumErrorCode;
 use crate::stratum::work::level_policy::PayoutLevelChoice;
+use crate::stratum::work::tracker::JobId;
 use crate::utils::time_provider::SystemTimeProvider;
 use crate::{
     stratum::difficulty_adjuster::DifficultyAdjusterTrait, utils::time_provider::TimeProvider,
@@ -12,13 +13,19 @@ use crate::{
 use bitcoin::secp256k1::rand::{self, Rng};
 use p2poolv2_wallet::payout_address::PayoutAddress;
 use p2poolv2_wallet::share_owner::ShareOwner;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::time::SystemTime;
 
 /// Use 4 byte extranonce1
 pub const EXTRANONCE1_SIZE: usize = 4;
 /// Use 8 byte extranonce2
 pub const EXTRANONCE2_SIZE: usize = 8;
+
+/// How many recent jobs keep the difficulty they were announced at. One
+/// template a minute at most reaches a session, so this holds far more
+/// jobs than a session has live; a job pushed out of the ring falls back
+/// to the session difficulty when it submits.
+const ANNOUNCED_DIFFICULTY_CAPACITY: usize = 64;
 
 /// Manages each sessions for each miner connection.
 ///
@@ -98,6 +105,14 @@ pub struct Session<D: DifficultyAdjusterTrait> {
     /// reason (`stratum::reject_log`): the first rejection of a reason
     /// logs at warn, then every `reject_log::REJECT_LOG_INTERVAL`-th.
     pub reject_logs: HashMap<StratumErrorCode, u64>,
+    /// The difficulty each recent job was announced at, in notify order.
+    /// A Stratum V1 share is validated and credited against its own job's
+    /// announced difficulty (`stratum::message_handlers::submit`), so
+    /// shares mined before the session difficulty rises stay valid on the
+    /// job they were mined on; the session difficulty takes over when it
+    /// falls below the announcement. A job older than the ring falls back
+    /// to the session difficulty.
+    announced_difficulties: VecDeque<(JobId, u64)>,
 }
 
 impl<D: DifficultyAdjusterTrait> Session<D> {
@@ -140,7 +155,35 @@ impl<D: DifficultyAdjusterTrait> Session<D> {
             last_job_tip: None,
             merge_disclosure: false,
             reject_logs: HashMap::new(),
+            announced_difficulties: VecDeque::with_capacity(ANNOUNCED_DIFFICULTY_CAPACITY),
         }
+    }
+
+    /// Remember the difficulty `mining.notify` announced for `job_id`, so a
+    /// share on it is judged against that difficulty and not the live
+    /// session difficulty. Re-announcing a job id overwrites its entry.
+    pub fn record_job_announcement(&mut self, job_id: JobId, difficulty: u64) {
+        if let Some(entry) = self
+            .announced_difficulties
+            .iter_mut()
+            .find(|(announced_job, _)| *announced_job == job_id)
+        {
+            entry.1 = difficulty;
+            return;
+        }
+        if self.announced_difficulties.len() == ANNOUNCED_DIFFICULTY_CAPACITY {
+            self.announced_difficulties.pop_front();
+        }
+        self.announced_difficulties.push_back((job_id, difficulty));
+    }
+
+    /// The difficulty `job_id` was announced at, or `None` once it has
+    /// aged out of [`Self::record_job_announcement`]'s ring.
+    pub fn announced_difficulty(&self, job_id: JobId) -> Option<u64> {
+        self.announced_difficulties
+            .iter()
+            .find(|(announced_job, _)| *announced_job == job_id)
+            .map(|(_, difficulty)| *difficulty)
     }
 
     /// Generates a random session ID.
@@ -218,5 +261,46 @@ mod tests {
             Session::<DifficultyAdjuster>::new(100, 2000, Some(3000), DEFAULT_VERSION_MASK);
 
         assert_eq!(session.difficulty_adjuster.current_difficulty, 100);
+    }
+
+    #[test]
+    fn a_sessions_announced_difficulty_remembers_each_jobs_own() {
+        let mut session = Session::<DifficultyAdjuster>::new(1, 1, None, DEFAULT_VERSION_MASK);
+        session.record_job_announcement(JobId(11), 1);
+        session.record_job_announcement(JobId(12), 16_384);
+
+        assert_eq!(session.announced_difficulty(JobId(11)), Some(1));
+        assert_eq!(session.announced_difficulty(JobId(12)), Some(16_384));
+        assert_eq!(session.announced_difficulty(JobId(13)), None);
+    }
+
+    #[test]
+    fn re_announcing_a_job_id_replaces_its_difficulty_in_place() {
+        let mut session = Session::<DifficultyAdjuster>::new(1, 1, None, DEFAULT_VERSION_MASK);
+        session.record_job_announcement(JobId(7), 1);
+        session.record_job_announcement(JobId(8), 1);
+        session.record_job_announcement(JobId(7), 4096);
+
+        assert_eq!(session.announced_difficulty(JobId(7)), Some(4096));
+        assert_eq!(session.announced_difficulty(JobId(8)), Some(1));
+    }
+
+    #[test]
+    fn a_job_announced_too_long_ago_falls_out_of_the_ring() {
+        let mut session = Session::<DifficultyAdjuster>::new(1, 1, None, DEFAULT_VERSION_MASK);
+        session.record_job_announcement(JobId(1), 1);
+        for job_index in 2..=(ANNOUNCED_DIFFICULTY_CAPACITY as u64 + 1) {
+            session.record_job_announcement(JobId(job_index), 1);
+        }
+
+        assert_eq!(session.announced_difficulty(JobId(1)), None);
+        assert_eq!(
+            session.announced_difficulty(JobId(ANNOUNCED_DIFFICULTY_CAPACITY as u64)),
+            Some(1)
+        );
+        assert_eq!(
+            session.announced_difficulty(JobId(ANNOUNCED_DIFFICULTY_CAPACITY as u64 + 1)),
+            Some(1)
+        );
     }
 }

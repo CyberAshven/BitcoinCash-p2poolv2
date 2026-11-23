@@ -984,6 +984,12 @@ fn job_lines<D: DifficultyAdjusterTrait>(
         payout_level,
         tracker_handle,
     )?;
+    //* Record the difficulty this notify announced the job at: the lowered
+    //* value when a set_difficulty line precedes it, the session's own
+    //* otherwise, for the per-job gate at submit time.
+    let announced_difficulty =
+        lowered.unwrap_or_else(|| session.difficulty_adjuster.get_current_difficulty());
+    session.record_job_announcement(job_id, announced_difficulty);
     let template = prepared.template();
     let new_tip = session
         .last_job_tip
@@ -1094,7 +1100,7 @@ mod stratum_server_tests {
     use crate::stratum::messages::SimpleRequest;
     use crate::stratum::server;
     use crate::stratum::work::prepared_notify::PreparedNotifyParamsBuilder;
-    use crate::stratum::work::tracker::start_tracker_actor;
+    use crate::stratum::work::tracker::{JobId, start_tracker_actor};
     use crate::test_utils::{TestShareBlockBuilder, setup_test_chain_store_handle};
     use crate::test_utils::{make_test_share_address, test_bch_prepared, test_bch_stratum_context};
     use crate::utils::time_provider::TestTimeProvider;
@@ -2651,6 +2657,11 @@ mod stratum_server_tests {
         assert_eq!(messages[0]["params"][0], 1);
         assert_eq!(messages[1]["method"], "mining.notify");
         assert_eq!(session.difficulty_adjuster.get_current_difficulty(), 1);
+        // The job records the lowered difficulty its preceding
+        // set_difficulty put on the wire, not the 1000 the session had.
+        let job_id = messages[1]["params"][0].as_str().unwrap();
+        let job_id = u64::from_str_radix(job_id, 16).unwrap();
+        assert_eq!(session.announced_difficulty(JobId(job_id)), Some(1));
     }
 
     #[tokio::test]
@@ -2663,6 +2674,13 @@ mod stratum_server_tests {
 
         assert_eq!(lines.lines().count(), 1);
         assert!(lines.contains("mining.notify"));
+        // With no set_difficulty line, the job records the session's own
+        // difficulty as what it announced.
+        let message: serde_json::Value =
+            serde_json::from_str(lines.lines().next().unwrap()).unwrap();
+        let job_id = message["params"][0].as_str().unwrap();
+        let job_id = u64::from_str_radix(job_id, 16).unwrap();
+        assert_eq!(session.announced_difficulty(JobId(job_id)), Some(1));
     }
 
     /// Hydrapool has no share chain, so its sessions are not capped.
@@ -2676,6 +2694,13 @@ mod stratum_server_tests {
 
         assert_eq!(lines.lines().count(), 1);
         assert_eq!(session.difficulty_adjuster.get_current_difficulty(), 1000);
+        // Hydrapool sessions are not capped, so the job records the
+        // session's own difficulty as what it announced.
+        let message: serde_json::Value =
+            serde_json::from_str(lines.lines().next().unwrap()).unwrap();
+        let job_id = message["params"][0].as_str().unwrap();
+        let job_id = u64::from_str_radix(job_id, 16).unwrap();
+        assert_eq!(session.announced_difficulty(JobId(job_id)), Some(1000));
     }
 
     /// A `mining.suggest_difficulty` after a job cannot lift the session

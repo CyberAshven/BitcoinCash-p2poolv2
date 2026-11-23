@@ -64,7 +64,7 @@ const NTIME_OUT_OF_RANGE: &str = "nTime out of range for the job's nBits";
 ///
 /// Where an accepted share goes depends on the pool mode. In P2Poolv2 mode a
 /// share meeting the pool target is emitted to the share chain. In Hydrapool
-/// mode a share whose hash meets the session difficulty is queued for the PPLNS
+/// mode a share whose hash meets its credited difficulty is queued for the PPLNS
 /// share worker; it is never emitted.
 ///
 /// On a test network a share whose nTime its job's nBits do not allow under
@@ -125,6 +125,21 @@ pub(crate) async fn handle_submit<'a, D: DifficultyAdjusterTrait>(
     };
 
     let current_difficulty = session.difficulty_adjuster.get_current_difficulty();
+
+    // Stratum V1 difficulty applies per job: a share is judged against the
+    // difficulty its job was announced at, so shares still in flight when
+    // the session difficulty rises stay valid on the job they were mined
+    // on. The session difficulty takes over when it falls below a live
+    // job's announcement, where the job asked for more than the device is
+    // now told to do. Whichever is easier decides, so a share the device
+    // could truthfully have produced under either announcement is never
+    // refused, and none is ever credited above what it proved. A job
+    // whose announcement has aged out falls back to the session
+    // difficulty, which is the gate every job had before.
+    let credited_difficulty = session
+        .announced_difficulty(JobId(job_id))
+        .unwrap_or(current_difficulty)
+        .min(current_difficulty);
 
     // version mask from the session - we ignore different version mask sent in a submit message
     let version_mask = session.version_mask;
@@ -218,7 +233,7 @@ pub(crate) async fn handle_submit<'a, D: DifficultyAdjusterTrait>(
         .expect("validated by validate_bitcoin_difficulty");
     let stratum_share = SimplePplnsShare::new(
         session.user_id.unwrap(),
-        current_difficulty,
+        credited_difficulty,
         session.btcaddress.clone().unwrap_or_default(),
         session.workername.clone().unwrap_or_default(),
         timestamp,
@@ -227,11 +242,12 @@ pub(crate) async fn handle_submit<'a, D: DifficultyAdjusterTrait>(
         nonce.to_string(),
     );
 
-    // The hash proves work only up to `truediff`. A share is credited at the
-    // session difficulty, so it may only be stored when its hash meets that
-    // difficulty. `ignore_difficulty` is a testing aid for the miner response
-    // and metrics below; it must never open this gate.
-    let hash_meets_session_difficulty = truediff >= current_difficulty as u128;
+    // The hash proves work only up to `truediff`. A share is credited at
+    // the difficulty this gate accepted it under, so it may only be stored
+    // when its hash meets that difficulty. `ignore_difficulty` is a
+    // testing aid for the miner response and metrics below; it must never
+    // open this gate.
+    let hash_meets_credited_difficulty = truediff >= credited_difficulty as u128;
 
     emit_pool_share(
         &stratum_context,
@@ -242,7 +258,7 @@ pub(crate) async fn handle_submit<'a, D: DifficultyAdjusterTrait>(
             block_hash,
             coinbase: &validation_result.coinbase,
             share: stratum_share.clone(),
-            meets_credited_difficulty: hash_meets_session_difficulty,
+            meets_credited_difficulty: hash_meets_credited_difficulty,
         },
     )
     .await?;
@@ -250,10 +266,10 @@ pub(crate) async fn handle_submit<'a, D: DifficultyAdjusterTrait>(
     session.last_share_time = Some(SystemTime::now());
 
     // If we are in testing mode and ignoring difficulty, accept share as meeting current difficulty
-    let meets_session_difficulty =
-        stratum_context.ignore_difficulty || hash_meets_session_difficulty;
+    let meets_credited_difficulty =
+        stratum_context.ignore_difficulty || hash_meets_credited_difficulty;
 
-    if meets_session_difficulty {
+    if meets_credited_difficulty {
         let _ = stratum_context
             .metrics
             .record_share_accepted(stratum_share, truediff as u64)
@@ -264,7 +280,7 @@ pub(crate) async fn handle_submit<'a, D: DifficultyAdjusterTrait>(
             StratumErrorCode::LowDifficultyShare,
             Some(job_id),
             Some(&format!(
-                "hash true difficulty {truediff} below session difficulty {current_difficulty}"
+                "hash true difficulty {truediff} below credited difficulty {credited_difficulty}"
             )),
         );
         let _ = stratum_context.metrics.record_share_rejected().await;
@@ -279,7 +295,7 @@ pub(crate) async fn handle_submit<'a, D: DifficultyAdjusterTrait>(
 
     let mut response = vec![Message::Response(Response::new_ok(
         message.id,
-        json!(meets_session_difficulty),
+        json!(meets_credited_difficulty),
     ))];
     if let Some(difficulty) = new_difficulty {
         response.push(Message::SetDifficulty(SetDifficultyNotification::new(
@@ -594,8 +610,10 @@ pub(crate) struct PoolShare<'a> {
     pub coinbase: &'a bitcoin::Transaction,
     pub share: SimplePplnsShare,
     /// Whether the share's hash meets the difficulty it is credited at: the
-    /// SV1 session difficulty or the SV2 channel target. Never opened by
-    /// `ignore_difficulty`, which only changes the miner's reply and metrics.
+    /// SV1 job-announcement floor (its announced difficulty, never above
+    /// the session difficulty) or the SV2 channel target. Never opened by
+    /// `ignore_difficulty`, which only changes the miner's reply and
+    /// metrics.
     pub meets_credited_difficulty: bool,
 }
 

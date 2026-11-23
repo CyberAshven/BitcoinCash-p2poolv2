@@ -27,8 +27,8 @@ pub const REJECT_LOG_INTERVAL: u64 = 100;
 ///
 /// `job_id` and `detail` are logged when present; `detail` carries the
 /// specifics a reason alone lacks (the validation error, or the share's
-/// true difficulty against the session difficulty). Callers pass no job
-/// for rejections that happen before a job is resolved.
+/// true difficulty against the difficulty it is credited at). Callers pass
+/// no job for rejections that happen before a job is resolved.
 pub(crate) fn handle_reject<D: DifficultyAdjusterTrait>(
     session: &mut Session<D>,
     reason: StratumErrorCode,
@@ -95,7 +95,7 @@ mod tests {
             &mut session,
             StratumErrorCode::LowDifficultyShare,
             Some(1),
-            Some("truediff 1 below session difficulty 2")
+            Some("truediff 1 below credited difficulty 2")
         ));
         assert!(handle_reject(
             &mut session,
