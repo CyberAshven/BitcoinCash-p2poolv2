@@ -1,14 +1,29 @@
 # P2Poolv2 for Bitcoin Cash
 
 > **About this branch.** `alpha-test1` is a branch of `alpha` for
-> non-dashboard testing. It carries one feature: rejected shares are logged
-> with their stratum reason code (see [Branch testing](#branch-testing)
-> below). It deliberately excludes the dashboard work on `alpha-dashv1`;
-> see `alpha` for the main line.
+> non-dashboard testing: any issues outside the dashboard scope. What it
+> carries is under [Branch testing](#branch-testing) below. It
+> deliberately excludes the dashboard work on `alpha-dashv1`; see
+> `alpha` for the main line.
 
 [![Rust CI](https://github.com/CyberAshven/BitcoinCash-p2poolv2/actions/workflows/rust.yml/badge.svg?branch=alpha)](https://github.com/CyberAshven/BitcoinCash-p2poolv2/actions/workflows/rust.yml)
 [![Docs](https://github.com/CyberAshven/BitcoinCash-p2poolv2/actions/workflows/docs.yml/badge.svg?branch=alpha)](https://github.com/CyberAshven/BitcoinCash-p2poolv2/actions/workflows/docs.yml)
 [![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](#license)
+
+### Issue found
+
+A Whatsminer asks for `mining.suggest_difficulty 16384` right after
+authorizing; the node raised the session to it while shares were still
+being mined at the old difficulty, and those shares were rejected
+against the new one -- `low_difficulty_share` (code 23) storms ending
+in firmware aborts and reconnect loops.
+
+### Fix deployed
+
+Each share is validated against the difficulty announced with its own
+job: the credited difficulty is the easier of that announcement and the
+live session difficulty, and shares never credit below their announced
+target. Miners now connect and mine cleanly across difficulty changes.
 
 **Mission: Replace pool operators with miners**
 
@@ -29,6 +44,34 @@ and adds what Bitcoin Cash makes possible. Upstream's chat is on
 
 Status: **alpha.** The pool runs on chipnet; mainnet has not started. Try it
 on regtest or chipnet first.
+
+## Branch testing
+
+This branch carries two features, both tested on a live node on Bitcoin
+Cash mainnet: logging rejected shares with their reason code, and
+validating each share against the difficulty announced with its own job
+(the fix described above).
+
+### Reject reason logging
+
+The node now logs every rejection at warn level with its stratum reason
+code, at each reject exit of `mining.submit` and `mining.authorize`:
+`job_not_found` (21), `duplicate_share` (22), `low_difficulty_share` (23),
+`unauthorized_worker` (24), `not_subscribed` (25), and validation failures.
+A line names the reason code, the job, and -- for a low-difficulty share --
+the hash's true difficulty against the credited difficulty; an authorize
+rejection carries the reason text. Logging is throttled per session and
+reason: the first rejection of a reason on a session logs, then every
+100th.
+
+### Outcome
+
+Tested with two ASICs (a Bitaxe and a Whatsminer) against the live node:
+sessions run without reject storms or firmware aborts, and a stray
+rejection still leaves a warn line naming the reason code, the job and
+both difficulties. A fresh session may briefly submit against its
+previous job id and be rejected `job_not_found` (code 21); that clears
+on its own.
 
 ## Decisions in short
 
