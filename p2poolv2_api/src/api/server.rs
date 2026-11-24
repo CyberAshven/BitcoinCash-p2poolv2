@@ -195,6 +195,10 @@ pub(crate) fn build_router_with_history(
         .route("/payout_tree", get(endpoints::payout_trees::payout_tree))
         .route("/miners", get(endpoints::miners::miners))
         .route("/network", get(endpoints::network::network))
+        .route(
+            "/share_address",
+            get(endpoints::share_address::share_address),
+        )
         .route("/peers", get(peers))
         .merge(endpoints::hashrate::router(
             app_state.clone(),

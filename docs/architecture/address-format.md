@@ -447,6 +447,10 @@ p2poolv2_cli bch-share-address --network mainnet bitcoincash:q...
 
 The command only changes the prefix and checksum. It takes no private key
 and rejects a P2SH address, because a share is owned by a P2PKH script.
+Both the command and the dashboard help page's generator go through
+`p2poolv2_config::payout_to_share_address`, and the page calls it over
+the API as `GET /share_address?payout=...`, answered with the node's own
+`bitcoin_cash_network` prefix.
 
 Bitcoin Cash share transactions are checked by a Bitcoin Cash interpreter
 (`shares/bch_script.rs`), not by `bitcoinconsensus`, which applies Bitcoin
