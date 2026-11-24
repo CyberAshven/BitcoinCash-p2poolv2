@@ -218,17 +218,37 @@ pub fn shares_table(rows: Vec<ShareRow>) -> impl IntoView {
     }
 }
 
-/// One connected peer as the peers table's row: its IP (or the full
-/// multiaddr when the IP is not known, or the dash when neither is there),
-/// its version with the identify agent prefix dropped, the connection
-/// direction, its uptime and its latest ping round trip.
-fn peer_row_view(peer: Peer) -> impl IntoView {
-    let address = peer.ip.as_deref().unwrap_or(peer.address.as_str());
-    let address = if address.is_empty() {
+/// A peer's address cell: its IP with the connection's port, or the full
+/// multiaddr when the IP is not known (its own `/tcp/` component already
+/// carries the port), or the dash when neither is there.
+fn peer_address(peer: &Peer) -> String {
+    if let Some(ip) = peer.ip.as_deref().filter(|ip| !ip.is_empty()) {
+        return match peer_port(&peer.address) {
+            Some(port) => format!("{ip}:{port}"),
+            None => ip.to_string(),
+        };
+    }
+    if peer.address.is_empty() {
         UNKNOWN.to_string()
     } else {
-        address.to_string()
-    };
+        peer.address.clone()
+    }
+}
+
+/// The TCP port in a peer's multiaddr: the digits after `/tcp/` up to the
+/// next component, or none when the address carries no transport port.
+fn peer_port(address: &str) -> Option<&str> {
+    let (_, tail) = address.split_once("/tcp/")?;
+    let port = tail.split('/').next().unwrap_or("");
+    (!port.is_empty() && port.bytes().all(|byte| byte.is_ascii_digit())).then_some(port)
+}
+
+/// One connected peer as the peers table's row: its address as host:port
+/// (or the full multiaddr when the IP is not known, or the dash when
+/// neither is there), its version with the identify agent prefix dropped,
+/// the connection direction, its uptime and its latest ping round trip.
+fn peer_row_view(peer: Peer) -> impl IntoView {
+    let address = peer_address(&peer);
     let version = agent_version(peer.version.as_deref());
     let latency = optional(peer.latency_ms, fmt_latency);
     view! {
@@ -252,7 +272,7 @@ pub fn PeerTable(peers: Vec<Peer>) -> impl IntoView {
             <table class="table">
                 <thead>
                     <tr>
-                        <th>"Address"</th>
+                        <th>"Address:port"</th>
                         <th>"Version"</th>
                         <th>"Direction"</th>
                         <th>"Uptime"</th>
@@ -965,6 +985,52 @@ mod tests {
             version: Some("p2poolv2/0.0.1-alpha".to_string()),
             latency_ms: Some(0.5),
         }
+    }
+
+    /// A peer variant the address tests reshape freely.
+    fn bare_peer(ip: Option<&str>, address: &str) -> Peer {
+        Peer {
+            ip: ip.map(str::to_string),
+            address: address.to_string(),
+            direction: "Inbound".to_string(),
+            connected_secs: 60,
+            version: None,
+            latency_ms: None,
+        }
+    }
+
+    #[test]
+    fn test_an_address_is_the_ip_followed_by_the_connection_port() {
+        // The live multiaddr keeps going after the port with /p2p/<peer id>.
+        let peer = bare_peer(
+            Some("104.164.55.69"),
+            "/ip4/104.164.55.69/tcp/6887/p2p/12D3KooWExample",
+        );
+        assert_eq!(peer_address(&peer), "104.164.55.69:6887");
+    }
+
+    #[test]
+    fn test_an_address_falls_back_to_the_multiaddr_or_the_ip_alone() {
+        let no_ip = bare_peer(None, "/ip6/2001:db8::1/tcp/6884");
+        assert_eq!(peer_address(&no_ip), "/ip6/2001:db8::1/tcp/6884");
+
+        let no_port = bare_peer(Some("10.0.0.1"), "/dns4/seed.example");
+        assert_eq!(peer_address(&no_port), "10.0.0.1");
+
+        assert_eq!(peer_address(&bare_peer(None, "")), UNKNOWN);
+    }
+
+    #[test]
+    fn test_the_port_is_the_digits_after_tcp_and_nothing_else() {
+        assert_eq!(
+            peer_port("/ip4/1.2.3.4/tcp/6887/p2p/12D3KooW"),
+            Some("6887")
+        );
+        assert_eq!(peer_port("/ip4/1.2.3.4/tcp/39196"), Some("39196"));
+        assert_eq!(peer_port("/dns4/seed.example"), None);
+        assert_eq!(peer_port("/ip4/1.2.3.4/tcp//p2p/x"), None);
+        assert_eq!(peer_port("/ip4/1.2.3.4/tcp/12ab"), None);
+        assert_eq!(peer_port(""), None);
     }
 
     #[test]

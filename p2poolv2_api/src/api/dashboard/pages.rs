@@ -1222,11 +1222,30 @@ fn blocks_table(now: u64, blocks: &[FoundBlockRow]) -> Markup {
     }
 }
 
-/// A peer's address cell: its IP, or the full multiaddr when the IP is not
-/// known, or the dash when neither is there.
-fn peer_address(peer: &PeerInfoResponse) -> &str {
-    let address = peer.ip.as_deref().unwrap_or(peer.address.as_str());
-    if address.is_empty() { "—" } else { address }
+/// A peer's address cell: its IP with the connection's port, or the full
+/// multiaddr when the IP is not known (its own `/tcp/` component already
+/// carries the port), or the dash when neither is there.
+fn peer_address(peer: &PeerInfoResponse) -> String {
+    let ip = peer.ip.as_deref().filter(|ip| !ip.is_empty());
+    if let Some(ip) = ip {
+        return match peer_port(&peer.address) {
+            Some(port) => format!("{ip}:{port}"),
+            None => ip.to_string(),
+        };
+    }
+    if peer.address.is_empty() {
+        "—".to_string()
+    } else {
+        peer.address.clone()
+    }
+}
+
+/// The TCP port in a peer's multiaddr: the digits after `/tcp/` up to the
+/// next component, or none when the address carries no transport port.
+fn peer_port(address: &str) -> Option<&str> {
+    let (_, tail) = address.split_once("/tcp/")?;
+    let port = tail.split('/').next().unwrap_or("");
+    (!port.is_empty() && port.bytes().all(|byte| byte.is_ascii_digit())).then_some(port)
 }
 
 /// The direction cell's label, as the JSON API serializes it.
@@ -1508,7 +1527,7 @@ pub(crate) fn overview(view: &Overview) -> Markup {
             } @else {
                 div.table-wrap {
                     table.table {
-                        thead { tr { th { "Address" } th { "Version" } th { "Direction" } th { "Uptime" } th { "Latency" } } }
+                        thead { tr { th { "Address:port" } th { "Version" } th { "Direction" } th { "Uptime" } th { "Latency" } } }
                         tbody {
                             @for peer in view.peers.iter().take(super::OVERVIEW_PEERS) {
                                 tr {
@@ -1639,7 +1658,7 @@ pub(crate) fn peers(view: &PeersView) -> Markup {
             } @else {
                 div.table-wrap {
                     table.table {
-                        thead { tr { th { "Address" } th { "Version" } th { "Direction" } th { "Uptime" } th { "Latency" } } }
+                        thead { tr { th { "Address:port" } th { "Version" } th { "Direction" } th { "Uptime" } th { "Latency" } } }
                         tbody {
                             @for peer in &view.peers {
                                 tr {
@@ -3079,12 +3098,12 @@ mod tests {
 
         assert!(page.contains("<h2>Peers"));
         assert!(page.contains("1 connected"));
-        assert!(page.contains("<th>Address</th>"));
+        assert!(page.contains("<th>Address:port</th>"));
         assert!(page.contains("<th>Version</th>"));
         assert!(page.contains("<th>Direction</th>"));
         assert!(page.contains("<th>Uptime</th>"));
         assert!(page.contains("<th>Latency</th>"));
-        assert!(page.contains("<td class=\"mono peer-addr\">127.0.0.1</td>"));
+        assert!(page.contains("<td class=\"mono peer-addr\">127.0.0.1:6884</td>"));
         assert!(page.contains("<td>0.0.1-alpha</td>"));
         assert!(!page.contains("p2poolv2/"));
         assert!(page.contains("<td>Inbound</td>"));
@@ -3111,6 +3130,43 @@ mod tests {
         assert!(page.contains("<td>0 s</td>"));
         assert!(page.contains("<td>—</td>"));
         assert!(page.contains("<td class=\"mono\">—</td>"));
+    }
+
+    #[test]
+    fn the_overview_peers_panel_keeps_an_ip_whose_address_has_no_port() {
+        let mut view = empty_overview();
+        view.peers = vec![PeerInfoResponse {
+            peer_id: "12D3KooWNoPort".to_string(),
+            ip: Some("10.0.0.1".to_string()),
+            address: "/dns4/seed.example".to_string(),
+            direction: ConnectionDirection::Outbound,
+            connected_secs: 7,
+            version: None,
+            latency_ms: None,
+        }];
+        let page = overview(&view).into_string();
+
+        assert!(
+            page.contains("<td class=\"mono peer-addr\">10.0.0.1</td>"),
+            "an address without a /tcp/ component leaves the IP alone"
+        );
+    }
+
+    #[test]
+    fn the_overview_peers_panel_shows_a_dash_for_a_peer_of_nothing() {
+        let mut view = empty_overview();
+        view.peers = vec![PeerInfoResponse {
+            peer_id: "12D3KooWNothing".to_string(),
+            ip: None,
+            address: String::new(),
+            direction: ConnectionDirection::Inbound,
+            connected_secs: 7,
+            version: None,
+            latency_ms: None,
+        }];
+        let page = overview(&view).into_string();
+
+        assert!(page.contains("<td class=\"mono peer-addr\">—</td>"));
     }
 
     #[test]
