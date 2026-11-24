@@ -24,6 +24,7 @@ mod style_guard;
 use crate::api::endpoints::MAX_NUM_SHARES_IN_RESPONSE;
 use crate::api::endpoints::miner::miner_report;
 use crate::api::endpoints::share::build_share_output;
+use crate::api::endpoints::share_address::{ShareAddressQuery, share_address_for};
 use crate::api::error::ApiError;
 use crate::api::server::AppState;
 use axum::Router;
@@ -797,8 +798,27 @@ async fn share(State(dashboard): State<Arc<DashboardState>>, Path(hash): Path<St
     }
 }
 
-async fn help(State(dashboard): State<Arc<DashboardState>>, headers: HeaderMap) -> Response {
-    html(pages::help(&site(&dashboard.app), &request_host(&headers)))
+/// The help page, with the share address generator's outcome when a
+/// payout was submitted. No `?payout=` is a plain page; a submitted one
+/// runs the endpoint's own rule, so the form and `GET /share_address`
+/// can never disagree. On a refusal the payout is kept only to echo into
+/// the form's input, and the example fields keep their placeholders.
+async fn help(
+    State(dashboard): State<Arc<DashboardState>>,
+    headers: HeaderMap,
+    Query(query): Query<ShareAddressQuery>,
+) -> Response {
+    let site = site(&dashboard.app);
+    let host = request_host(&headers);
+    let (payout, result, error) = match query.payout {
+        None => (String::new(), String::new(), String::new()),
+        Some(payout) => match share_address_for(&payout, dashboard.app.app_config.cash_network) {
+            Ok(address) => (payout, address, String::new()),
+            Err(ApiError::BadRequest(message)) => (payout, String::new(), message),
+            Err(error) => (payout, String::new(), error.to_string()),
+        },
+    };
+    html(pages::help(&site, &host, &payout, &result, &error))
 }
 
 /// The hostname the request's `Host` header names, without its port: the

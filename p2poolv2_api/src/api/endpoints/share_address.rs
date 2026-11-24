@@ -19,17 +19,19 @@ use p2poolv2_lib::config::{BitcoinCashNetwork, payout_to_share_address};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-/// The `?payout=` query parameter; absent or empty is a bad request with
-/// its own message rather than a parse error about a missing address.
+/// The `?payout=` query parameter. Absent is no submission at all (the
+/// help page renders its widget without one); present and empty or
+/// unparsable is a bad request with its own message rather than a parse
+/// error about a missing address.
 #[derive(Deserialize)]
 pub struct ShareAddressQuery {
-    payout: Option<String>,
+    pub payout: Option<String>,
 }
 
 /// The generated share chain address, the same string the CLI prints.
 #[derive(Serialize)]
 pub struct ShareAddressResponse {
-    address: String,
+    pub address: String,
 }
 
 /// The payout address and the share address answer as one rule: decode the
@@ -37,8 +39,9 @@ pub struct ShareAddressResponse {
 /// prefix. Rejects a payout of another network, a P2SH script and anything
 /// unparseable, each with the wording the help page shows the user. A node
 /// with no cash network mines the Bitcoin chain and has no prefix to answer
-/// under, so its refusal says so.
-fn share_address_for(
+/// under, so its refusal says so. The help page's route runs the same rule
+/// for its form, so the page and the endpoint can never disagree.
+pub(crate) fn share_address_for(
     payout: &str,
     cash_network: Option<BchShareNetwork>,
 ) -> Result<String, ApiError> {

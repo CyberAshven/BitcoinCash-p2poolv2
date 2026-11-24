@@ -141,6 +141,14 @@ pub struct Site {
     pub sv2_port: Option<u16>,
 }
 
+/// `/share_address`: the share chain address a payout CashAddr stands for
+/// on the node's own network, the same string the CLI command prints.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct ShareAddressResponse {
+    /// The generated share chain address, e.g. `p2pool:q...`.
+    pub address: String,
+}
+
 /// `/chain_info`.
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 pub struct ChainInfo {

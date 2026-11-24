@@ -4,10 +4,30 @@
 
 //! Help, as `/dashboard/help` shows it, with this app's settings added.
 
+use crate::api::ShareAddressResponse;
 use crate::app::ctx;
+use crate::format::url_component;
 use crate::layout::{Crumb, dashboard_crumb};
 use crate::route::Tab;
 use leptos::prelude::*;
+use leptos::task::spawn_local;
+
+/// The `GET /share_address` path for `payout`, percent-encoded. The node
+/// decodes it back and runs the conversion rule shared with the CLI.
+fn share_address_path(payout: &str) -> String {
+    format!("/share_address?payout={}", url_component(payout))
+}
+
+/// The example fields' payout half: the submitted payout once the node
+/// accepted it, the placeholder before that (a refused payout fills
+/// nothing).
+fn example_payout(payout: &str, share: &str) -> String {
+    if share.is_empty() {
+        "<payout address>".to_string()
+    } else {
+        payout.to_string()
+    }
+}
 
 #[component]
 pub fn HelpPage() -> impl IntoView {
@@ -54,6 +74,32 @@ pub fn HelpPage() -> impl IntoView {
         site.get()
             .map_or_else(|| "<network>".to_string(), |site| site.badge.clone())
     };
+    // The generator's form: the payout as typed, the share address the
+    // node returned (empty until one succeeds), and the error it refuses
+    // with. An invalid entry goes to the error alone; the example fields
+    // below fill only once `share` has a value.
+    let payout = RwSignal::new(String::new());
+    let share = RwSignal::new(String::new());
+    let error = RwSignal::new(None::<String>);
+    let generate = move |event: leptos::ev::SubmitEvent| {
+        event.prevent_default();
+        let connection = ctx().connection.get_untracked();
+        let entered = payout.get_untracked();
+        spawn_local(async move {
+            let path = share_address_path(&entered);
+            match connection.get::<ShareAddressResponse>(&path).await {
+                Ok(response) => {
+                    error.set(None);
+                    share.set(response.address);
+                }
+                Err(message) => {
+                    error.set(Some(message));
+                    share.set(String::new());
+                }
+            }
+        });
+    };
+    let user_payout = move || example_payout(&payout.get(), &share.get());
     view! {
         <div class="panel">
             <div class="banner-warn" role="status">
@@ -61,12 +107,35 @@ pub fn HelpPage() -> impl IntoView {
             </div>
             <div class="help-section">
                 <h3>"Connect a miner"</h3>
+                <form class="share-form search-row" on:submit=generate>
+                    <div class="grow">
+                        <label for="share-payout">
+                            "Enter your payout address to get miner connection info."
+                        </label>
+                        <input
+                            id="share-payout"
+                            type="text"
+                            placeholder="bchtest:q... or bitcoincash:q..."
+                            bind:value=payout
+                            required
+                        />
+                    </div>
+                    <button class="btn-primary" type="submit">"Generate"</button>
+                </form>
+                {move || {
+                    error.get().map(|message| {
+                        view! { <div class="toast" role="alert">{message}</div> }
+                    })
+                }}
                 <p>"Stratum V1: point the miner at this node's stratum port."</p>
                 <ul>
                     <li>"URL: " <code>{url}</code></li>
-                    <li>"User: " <code>"<payout address>.<worker name>"</code></li>
+                    <li>"User: " <code>{user_payout}</code></li>
                     <li>
-                        "Password: " <code>"p2p=<share chain address>"</code>
+                        "Worker Name (optional): " <code>"<payout address>.<worker>"</code>
+                    </li>
+                    <li>
+                        "Password: " <code>"p2p=" {move || share.get()}</code>
                         ", which names who owns your shares."
                     </li>
                 </ul>
@@ -75,7 +144,14 @@ pub fn HelpPage() -> impl IntoView {
                 </p>
                 <ul>
                     <li>"Host: " <code>{sv2}</code></li>
-                    <li>"User: " <code>"<payout address>.<worker>,p2p=<share chain address>"</code></li>
+                    <li>
+                        "User: " <code>
+                            {user_payout} ",p2p=" {move || share.get()}
+                        </code>
+                    </li>
+                    <li>
+                        "Worker Name (optional): " <code>"<payout address>.<worker>"</code>
+                    </li>
                     <li>
                         "Key: the node's authority public key (configure when the node runs Noise keys)"
                     </li>
@@ -84,7 +160,7 @@ pub fn HelpPage() -> impl IntoView {
                     "SV1 devices can connect to the SV1 port directly, or mine through an SV2 translator."
                 </p>
                 <p>
-                    "Get a share chain address with " <code>
+                    "Validate a share chain address with " <code>
                         "p2poolv2_cli bch-share-address --network " {share_net} " <payout address>"
                     </code> "."
                 </p>
@@ -155,5 +231,28 @@ pub fn HelpPage() -> impl IntoView {
                 </p>
             </div>
         </div>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The payout travels percent-encoded: a colon survives (the node's
+    /// own pages keep it, and `url_component` does too), spaces do not.
+    #[test]
+    fn the_share_address_path_encodes_the_payout() {
+        assert_eq!(
+            share_address_path("bchtest:qr7fz ep"),
+            "/share_address?payout=bchtest:qr7fz%20ep"
+        );
+    }
+
+    /// The example fields fill only once a share address came back: a
+    /// refused payout leaves the placeholder in place.
+    #[test]
+    fn the_example_payout_waits_for_an_accepted_share_address() {
+        assert_eq!(example_payout("nope", ""), "<payout address>");
+        assert_eq!(example_payout("bchtest:q1", "tp2pool:q2"), "bchtest:q1");
     }
 }
