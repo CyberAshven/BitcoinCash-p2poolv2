@@ -2067,10 +2067,10 @@ pub(crate) fn help(site: &Site, host: &str) -> Markup {
                 ul {
                     li { "Host: " code { (sv2_host) } }
                     li { "User: " code { "<payout address>.<worker>,p2p=<share chain address>" } }
-                    li { "Key: pin the node's authority public key" }
+                    li { "Key: the node's authority public key (configure when the node runs Noise keys)" }
                 }
-                p { "SV1 devices can mine through an SV2 translator." }
-                p { "Get a share chain address with " code { "p2poolv2_cli bch-share-address" } "." }
+                p { "SV1 devices can connect to the SV1 port directly, or mine through an SV2 translator." }
+                p { "Get a share chain address with " code { "p2poolv2_cli bch-share-address --network " (site.badge) " <payout address>" } "." }
             }
             div.help-section {
                 h3 { "Pages" }
@@ -2892,8 +2892,15 @@ mod tests {
         assert!(
             page.contains("&lt;payout address&gt;.&lt;worker&gt;,p2p=&lt;share chain address&gt;")
         );
-        assert!(page.contains("Key: pin the node's authority public key"));
-        assert!(page.contains("SV1 devices can mine through an SV2 translator."));
+        assert!(page.contains(
+            "Key: the node's authority public key (configure when the node runs Noise keys)"
+        ));
+        assert!(page.contains(
+            "SV1 devices can connect to the SV1 port directly, or mine through an SV2 translator."
+        ));
+        assert!(page.contains(
+            "<code>p2poolv2_cli bch-share-address --network chipnet &lt;payout address&gt;</code>"
+        ));
         assert!(!page.contains("&lt;stratum port&gt;"));
         assert!(!page.contains("&lt;sv2 port&gt;"));
     }

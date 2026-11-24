@@ -47,6 +47,13 @@ pub fn HelpPage() -> impl IntoView {
             .map_or_else(|| "<sv2 port>".to_string(), |port| port.to_string());
         format!("{host}:{port}")
     };
+    // The `--network` value in the share address example: the node's own
+    // badge, which is the name the CLI accepts, or the placeholder until
+    // `/network` answers.
+    let share_net = move || {
+        site.get()
+            .map_or_else(|| "<network>".to_string(), |site| site.badge.clone())
+    };
     view! {
         <div class="panel">
             <div class="banner-warn" role="status">
@@ -69,12 +76,17 @@ pub fn HelpPage() -> impl IntoView {
                 <ul>
                     <li>"Host: " <code>{sv2}</code></li>
                     <li>"User: " <code>"<payout address>.<worker>,p2p=<share chain address>"</code></li>
-                    <li>"Key: pin the node's authority public key"</li>
+                    <li>
+                        "Key: the node's authority public key (configure when the node runs Noise keys)"
+                    </li>
                 </ul>
-                <p>"SV1 devices can mine through an SV2 translator."</p>
                 <p>
-                    "Get a share chain address with " <code>"p2poolv2_cli bch-share-address"</code>
-                    "."
+                    "SV1 devices can connect to the SV1 port directly, or mine through an SV2 translator."
+                </p>
+                <p>
+                    "Get a share chain address with " <code>
+                        "p2poolv2_cli bch-share-address --network " {share_net} " <payout address>"
+                    </code> "."
                 </p>
             </div>
             <div class="help-section">
