@@ -175,6 +175,8 @@ async fn serve_dashboard() -> (String, tempfile::TempDir, tempfile::TempDir) {
         monitoring_event_sender: create_monitoring_event_channel(),
         auth_user: None,
         auth_token: None,
+        stratum_port: 3333,
+        sv2_port: None,
         pplns_window: Some(Arc::new(MinerWindowSource::new(Arc::clone(&window)))),
     });
     let genesis_block = genesis_for_tests();

@@ -371,6 +371,8 @@ fn site() -> Site {
         network: "Bitcoin Cash chipnet".to_string(),
         badge: "chipnet".to_string(),
         auth: true,
+        stratum_port: 3333,
+        sv2_port: Some(3336),
     }
 }
 
@@ -733,7 +735,7 @@ fn every_page() -> String {
             is_block: false,
         })
         .into_string(),
-        pages::help(&site()).into_string(),
+        pages::help(&site(), "pool.example.org").into_string(),
         pages::signin(&site()).into_string(),
         pages::error(&site(), "Not here").into_string(),
     ]
@@ -899,7 +901,7 @@ fn the_wasm_views_load_only_bundled_images() {
 
 #[test]
 fn the_node_links_the_same_stylesheets() {
-    let page = pages::help(&site()).into_string();
+    let page = pages::help(&site(), "pool.example.org").into_string();
     assert!(page.contains(&assets::href("pico.min.css")));
     assert!(page.contains(&assets::href("dashboard.css")));
 }

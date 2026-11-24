@@ -49,6 +49,8 @@ async fn build_state(
         monitoring_event_sender: create_monitoring_event_channel(),
         auth_user,
         auth_token,
+        stratum_port: 3333,
+        sv2_port: Some(3336),
         pplns_window: None,
     });
     (state, store_dir, metrics_dir)
@@ -494,6 +496,26 @@ async fn every_page_has_the_menu_and_no_script() {
 }
 
 #[tokio::test]
+async fn the_help_page_builds_the_stratum_url_from_the_hosts_header() {
+    let (state, _store, _metrics) = build_state(None, Some(BchShareNetwork::Chipnet)).await;
+    let (status, body, _) = get_with_headers(
+        &state,
+        "/dashboard/help",
+        WebOptions::default(),
+        &[("host", "pool.example.org")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("stratum+tcp://pool.example.org:3333"));
+    assert!(body.contains("Host: <code>pool.example.org:3336</code>"));
+    // Without a Host header the page keeps its placeholder.
+    let (status, body, _) =
+        get_with_headers(&state, "/dashboard/help", WebOptions::default(), &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("stratum+tcp://&lt;this node&gt;:3333"));
+}
+
+#[tokio::test]
 async fn the_assets_are_served_from_the_binary() {
     let (state, _store, _metrics) = build_state(None, None).await;
     let (status, body, headers) = get(&state, "/dashboard/assets/dashboard.css").await;
@@ -576,7 +598,7 @@ async fn the_network_is_named_as_the_header_names_it() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
         body,
-        r#"{"network":"Bitcoin Cash chipnet","badge":"chipnet","auth":false}"#
+        r#"{"network":"Bitcoin Cash chipnet","badge":"chipnet","auth":false,"stratum_port":3333,"sv2_port":3336}"#
     );
 }
 

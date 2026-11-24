@@ -28,7 +28,7 @@ use crate::api::error::ApiError;
 use crate::api::server::AppState;
 use axum::Router;
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::get;
 use bitcoin::{BlockHash, Target};
@@ -115,6 +115,8 @@ pub(crate) fn site(state: &AppState) -> Site {
         network,
         badge: badge.to_string(),
         auth: state.auth_user.is_some(),
+        stratum_port: state.stratum_port,
+        sv2_port: state.sv2_port,
     }
 }
 
@@ -795,8 +797,29 @@ async fn share(State(dashboard): State<Arc<DashboardState>>, Path(hash): Path<St
     }
 }
 
-async fn help(State(dashboard): State<Arc<DashboardState>>) -> Response {
-    html(pages::help(&site(&dashboard.app)))
+async fn help(State(dashboard): State<Arc<DashboardState>>, headers: HeaderMap) -> Response {
+    html(pages::help(&site(&dashboard.app), &request_host(&headers)))
+}
+
+/// The hostname the request's `Host` header names, without its port: the
+/// host the operator browsed the dashboard with is the host a miner on the
+/// same network reaches this node at. Empty when the header is absent
+/// (HTTP/1.0) or is not valid text, so the help page falls back to its
+/// placeholder. An IPv6 literal keeps the brackets its URL needs.
+fn request_host(headers: &HeaderMap) -> String {
+    let Some(host) = headers
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return String::new();
+    };
+    if host.starts_with('[') {
+        return match host.find(']') {
+            Some(close) => host[..=close].to_string(),
+            None => host.to_string(),
+        };
+    }
+    host.split(':').next().unwrap_or_default().to_string()
 }
 
 pub(crate) async fn signin(State(dashboard): State<Arc<DashboardState>>) -> Response {

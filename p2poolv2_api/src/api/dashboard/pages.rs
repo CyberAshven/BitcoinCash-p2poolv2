@@ -203,6 +203,12 @@ pub(crate) struct Site {
     /// Whether the node has an API login, so the header offers the Admin
     /// button that leads to `/dashboard/signin`.
     pub(crate) auth: bool,
+    /// The port the stratum server listens on, which the help page prints
+    /// in the URL a miner points at.
+    pub(crate) stratum_port: u16,
+    /// The port the stratum V2 endpoint listens on, or `None` when the node
+    /// runs without SV2; the help page then prints a placeholder.
+    pub(crate) sv2_port: Option<u16>,
 }
 
 /// The menu bar's pages.
@@ -2011,7 +2017,20 @@ pub(crate) fn share(view: &ShareView) -> Markup {
     )
 }
 
-pub(crate) fn help(site: &Site) -> Markup {
+pub(crate) fn help(site: &Site, host: &str) -> Markup {
+    // The host the operator browsed the dashboard with: a miner on the
+    // same network reaches this node at it. Absent (HTTP/1.0, or a client
+    // that sent no Host header) falls back to the placeholder.
+    let stratum_host = if host.is_empty() { "<this node>" } else { host };
+    let stratum_url = format!("stratum+tcp://{stratum_host}:{}", site.stratum_port);
+    // SV2 mirrors the SV1 list: the same host on the SV2 port, the
+    // identity packed into SV2's user_identity field, and the authority
+    // public key pinned instead of a password (SV2 has none; the pin
+    // matters only when the node runs Noise keys).
+    let sv2_port = site
+        .sv2_port
+        .map_or_else(|| "<sv2 port>".to_string(), |port| port.to_string());
+    let sv2_host = format!("{stratum_host}:{sv2_port}");
     let body = html! {
         div.panel {
             div.banner-warn role="status" {
@@ -2021,15 +2040,17 @@ pub(crate) fn help(site: &Site) -> Markup {
                 h3 { "Connect a miner" }
                 p { "Stratum V1: point the miner at this node's stratum port." }
                 ul {
-                    li { "URL: " code { "stratum+tcp://<this node>:<stratum port>" } }
+                    li { "URL: " code { (stratum_url) } }
                     li { "User: " code { "<payout address>.<worker name>" } }
                     li { "Password: " code { "p2p=<share chain address>" } ", which names who owns your shares." }
                 }
-                p {
-                    "Stratum V2: connect to the node's SV2 port and pin its authority key. Use "
-                    code { "<payout address>.<worker>,p2p=<share chain address>" } " as the user identity. "
-                    "SV1 devices can mine through an SV2 translator."
+                p { "Stratum V2: point the miner at this node's SV2 port and pin its authority key." }
+                ul {
+                    li { "Host: " code { (sv2_host) } }
+                    li { "User: " code { "<payout address>.<worker>,p2p=<share chain address>" } }
+                    li { "Key: pin the node's authority public key" }
                 }
+                p { "SV1 devices can mine through an SV2 translator." }
                 p { "Get a share chain address with " code { "p2poolv2_cli bch-share-address" } "." }
             }
             div.help-section {
@@ -2166,6 +2187,8 @@ mod tests {
             network: "Bitcoin Cash chipnet".to_string(),
             badge: "chipnet".to_string(),
             auth: true,
+            stratum_port: 3333,
+            sv2_port: Some(3336),
         }
     }
 
@@ -2642,6 +2665,8 @@ mod tests {
                 network: "Bitcoin Cash chipnet".to_string(),
                 badge: "chipnet".to_string(),
                 auth: false,
+                stratum_port: 3333,
+                sv2_port: None,
             },
             "Dashboard",
             Tab::Dashboard,
@@ -2670,7 +2695,7 @@ mod tests {
 
     #[test]
     fn the_help_page_explains_signing_in_and_out() {
-        let page = help(&site()).into_string();
+        let page = help(&site(), "pool.example.org").into_string();
         assert!(!page.contains("<script"));
         assert!(page.contains("/dashboard/signin"));
         assert!(page.contains("wrong password"));
@@ -2835,14 +2860,44 @@ mod tests {
 
     #[test]
     fn the_help_page_explains_the_share_address() {
-        let page = help(&site()).into_string();
+        let page = help(&site(), "").into_string();
         assert!(page.contains("p2p=&lt;share chain address&gt;"));
         assert!(page.contains("renders these pages in Rust"));
     }
 
     #[test]
+    fn the_help_page_points_a_miner_at_the_real_ports() {
+        let page = help(&site(), "pool.example.org").into_string();
+        assert!(page.contains("stratum+tcp://pool.example.org:3333"));
+        assert!(page.contains("Host: <code>pool.example.org:3336</code>"));
+        assert!(
+            page.contains("&lt;payout address&gt;.&lt;worker&gt;,p2p=&lt;share chain address&gt;")
+        );
+        assert!(page.contains("Key: pin the node's authority public key"));
+        assert!(page.contains("SV1 devices can mine through an SV2 translator."));
+        assert!(!page.contains("&lt;stratum port&gt;"));
+        assert!(!page.contains("&lt;sv2 port&gt;"));
+    }
+
+    #[test]
+    fn the_help_page_keeps_its_placeholders_without_a_host_or_an_sv2_port() {
+        let mut site = site();
+        site.sv2_port = None;
+        let page = help(&site, "").into_string();
+        assert!(page.contains("stratum+tcp://&lt;this node&gt;:3333"));
+        assert!(page.contains("&lt;this node&gt;:&lt;sv2 port&gt;"));
+    }
+
+    #[test]
+    fn the_help_page_brackets_an_ipv6_host() {
+        let page = help(&site(), "[::1]").into_string();
+        assert!(page.contains("stratum+tcp://[::1]:3333"));
+        assert!(page.contains("Host: <code>[::1]:3336</code>"));
+    }
+
+    #[test]
     fn the_help_page_carries_the_alpha_warning() {
-        let page = help(&site()).into_string();
+        let page = help(&site(), "").into_string();
         assert!(page.contains(r#"class="banner-warn""#));
         assert!(page.contains("mine at your own risk"));
         // The banner opens the panel, before the first section.
