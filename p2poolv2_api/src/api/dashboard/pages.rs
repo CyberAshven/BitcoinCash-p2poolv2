@@ -2014,6 +2014,9 @@ pub(crate) fn share(view: &ShareView) -> Markup {
 pub(crate) fn help(site: &Site) -> Markup {
     let body = html! {
         div.panel {
+            div.banner-warn role="status" {
+                "P2Poolv2 is alpha software, mine at your own risk!"
+            }
             div.help-section {
                 h3 { "Connect a miner" }
                 p { "Stratum V1: point the miner at this node's stratum port." }
@@ -2033,8 +2036,10 @@ pub(crate) fn help(site: &Site) -> Markup {
                 h3 { "Pages" }
                 ul {
                     li { a href="/dashboard" { "Dashboard" } ": hashrate, found blocks and the newest shares." }
+                    li { a href="/dashboard/shares" { "Shares" } ": the confirmed share chain, newest first." }
                     li { a href="/dashboard/blocks" { "Blocks" } ": every block the pool found." }
                     li { a href="/dashboard/miners" { "Miners" } ": the miners on this node and their workers." }
+                    li { a href="/dashboard/peers" { "Peers" } ": the peers connected to this node, longest uptime first." }
                     li { "Search: a payout or share chain address opens the miner, a share hash opens the share." }
                 }
             }
@@ -2056,7 +2061,7 @@ pub(crate) fn help(site: &Site) -> Markup {
                 h3 { "About this dashboard" }
                 p {
                     "This node renders these pages in Rust, from the same store and PPLNS window the API reads. "
-                    "They load no scripts. The design is CashDragon0's."
+                    "They load no scripts."
                 }
             }
             div.help-section {
@@ -2832,7 +2837,18 @@ mod tests {
     fn the_help_page_explains_the_share_address() {
         let page = help(&site()).into_string();
         assert!(page.contains("p2p=&lt;share chain address&gt;"));
-        assert!(page.contains("CashDragon0"));
+        assert!(page.contains("renders these pages in Rust"));
+    }
+
+    #[test]
+    fn the_help_page_carries_the_alpha_warning() {
+        let page = help(&site()).into_string();
+        assert!(page.contains(r#"class="banner-warn""#));
+        assert!(page.contains("mine at your own risk"));
+        // The banner opens the panel, before the first section.
+        let panel = page.split(r#"class="panel""#).nth(1).unwrap();
+        let panel = panel.split("help-section").next().unwrap();
+        assert!(panel.contains("banner-warn"));
     }
 
     #[test]

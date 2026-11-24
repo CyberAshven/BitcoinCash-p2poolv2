@@ -18,6 +18,9 @@ pub fn HelpPage() -> impl IntoView {
     );
     view! {
         <div class="panel">
+            <div class="banner-warn" role="status">
+                "P2Poolv2 is alpha software, mine at your own risk!"
+            </div>
             <div class="help-section">
                 <h3>"Connect a miner"</h3>
                 <p>"Stratum V1: point the miner at this node's stratum port."</p>
@@ -47,10 +50,18 @@ pub fn HelpPage() -> impl IntoView {
                         <a href="#/">"Dashboard"</a>
                         ": hashrate, found blocks and the newest shares."
                     </li>
+                    <li>
+                        <a href="#/shares">"Shares"</a>
+                        ": the confirmed share chain, newest first."
+                    </li>
                     <li><a href="#/blocks">"Blocks"</a> ": every block the pool found."</li>
                     <li>
                         <a href="#/miners">"Miners"</a>
                         ": the miners on this node and their workers."
+                    </li>
+                    <li>
+                        <a href="#/peers">"Peers"</a>
+                        ": the peers connected to this node, longest uptime first."
                     </li>
                     <li>
                         "Search: a payout or share chain address opens the miner, a share hash opens the share."
@@ -83,7 +94,8 @@ pub fn HelpPage() -> impl IntoView {
                         <code>"/peers"</code>
                     </li>
                     <li>
-                        <code>"/metrics"</code> " (Prometheus)"
+                        <code>"/metrics"</code> " (Prometheus), " <code>"/blocked_ips"</code>
+                        ", " <code>"/jd_prepare"</code> " and " <code>"/share_transaction"</code>
                         ": always behind the API login"
                     </li>
                 </ul>
@@ -93,8 +105,7 @@ pub fn HelpPage() -> impl IntoView {
                 <p>
                     "This dashboard is Rust compiled to WebAssembly. It reads the node's JSON API, "
                     "takes new shares live from its /ws feed, and lets you zoom the hashrate chart. "
-                    "It uses the stylesheets of the pages the node renders itself, so both look the same. "
-                    "The design is CashDragon0's."
+                    "It uses the stylesheets of the pages the node renders itself, so both look the same."
                 </p>
             </div>
         </div>
