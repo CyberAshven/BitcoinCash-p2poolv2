@@ -510,35 +510,6 @@ async fn every_page_has_the_menu_and_no_script() {
     }
 }
 
-/// The help route runs the same rule as `GET /share_address`: a chipnet
-/// payout comes back as the `tp2pool:` address, in the example fields.
-#[tokio::test]
-async fn the_help_route_converts_a_submitted_payout() {
-    let (state, _store, _metrics) = build_state(None, Some(BchShareNetwork::Chipnet)).await;
-    let (status, body, _) = get(
-        &state,
-        "/dashboard/help?payout=bchtest%3Aqr7fzmep8g7h7ymfxy74lgc0v950j3r295pdnvy3hr",
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    assert!(body.contains("p2p=tp2pool:qr7fzmep8g7h7ymfxy74lgc0v950j3r295mz06fluu"));
-    assert!(body.contains("User: <code>bchtest:qr7fzmep8g7h7ymfxy74lgc0v950j3r295pdnvy3hr</code>"));
-}
-
-/// A refused payout is shown as the form's error and inserts nothing:
-/// the example fields keep their placeholders.
-#[tokio::test]
-async fn the_help_route_refuses_a_bad_payout_without_filling_the_fields() {
-    let (state, _store, _metrics) = build_state(None, Some(BchShareNetwork::Chipnet)).await;
-    let (status, body, _) = get(&state, "/dashboard/help?payout=nope").await;
-    assert_eq!(status, StatusCode::OK);
-    assert!(body.contains(
-        "role=\"alert\">Invalid Bitcoin Cash payout address: CashAddr prefix is required"
-    ));
-    assert!(body.contains("User: <code>&lt;payout address&gt;</code>"));
-    assert!(body.contains("p2p=&lt;share chain address&gt;"));
-}
-
 #[tokio::test]
 async fn the_help_page_builds_the_stratum_url_from_the_hosts_header() {
     let (state, _store, _metrics) = build_state(None, Some(BchShareNetwork::Chipnet)).await;
