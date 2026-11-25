@@ -1,3 +1,4 @@
+use super::history::Sample;
 use super::*;
 use crate::api::server::{AppConfig, WebOptions, build_router_with_history};
 use axum::body::Body;
@@ -122,12 +123,26 @@ async fn get_with_headers(
     web: WebOptions,
     headers: &[(&str, &str)],
 ) -> (StatusCode, String, HeaderMap) {
-    let app = build_router_with_history(
-        Arc::clone(state),
-        state.app_config.clone(),
-        Arc::new(HashrateHistory::default()),
+    get_with_history(
+        state,
+        uri,
         web,
-    );
+        Arc::new(HashrateHistory::default()),
+        headers,
+    )
+    .await
+}
+
+/// `get_with_headers` over `history` instead of an empty ring, so a test
+/// can seed the samples the overview's KPI fallbacks read.
+async fn get_with_history(
+    state: &Arc<AppState>,
+    uri: &str,
+    web: WebOptions,
+    history: Arc<HashrateHistory>,
+    headers: &[(&str, &str)],
+) -> (StatusCode, String, HeaderMap) {
+    let app = build_router_with_history(Arc::clone(state), state.app_config.clone(), history, web);
     let mut builder = Request::builder().uri(uri);
     for (name, value) in headers {
         builder = builder.header(*name, *value);
@@ -961,6 +976,70 @@ async fn the_overview_ignores_its_page_parameter() {
         "the overview shows the same recent shares on every request"
     );
     assert_eq!(recent_share_row_heights(&paged), vec![8, 7, 6, 5, 4]);
+}
+
+/// One stored hashrate sample stamped `time`, with this node's rate on it.
+fn local_sample(time: u64, local: f64) -> Sample {
+    Sample {
+        time,
+        pool: None,
+        local: Some(local),
+        network: None,
+        miners: None,
+        workers: None,
+    }
+}
+
+/// The Node hashrate card's value: it sits after the card's label, before
+/// the next card opens.
+fn node_hashrate_value(body: &str) -> &str {
+    let card = body
+        .split(r#"class="kpi-label">Node hashrate"#)
+        .nth(1)
+        .expect("overview has a Node hashrate card");
+    let (_, value) = card
+        .split_once(r#"class="kpi-value kpi-value-local">"#)
+        .expect("the card carries its value");
+    value
+        .split_once('<')
+        .map(|(value, _)| value)
+        .expect("the value closes")
+}
+
+#[tokio::test]
+async fn the_node_hashrate_card_drops_a_sample_older_than_the_window() {
+    let (state, _store, _metrics) = build_state(None, None).await;
+    // A miner stopped and the sample froze on its last decay value; the
+    // card must age to a dash rather than carry it past the window it
+    // measures (the live rate is None with no submissions at all).
+    let history = Arc::new(HashrateHistory::default());
+    history.load(vec![local_sample(unix_now() - 1200, 37.3e9)]);
+    let (status, body, _) =
+        get_with_history(&state, "/dashboard", WebOptions::default(), history, &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        node_hashrate_value(&body),
+        "—",
+        "a sample outside the submission window cannot stand in for the live rate"
+    );
+}
+
+#[tokio::test]
+async fn the_node_hashrate_card_still_falls_back_inside_the_window() {
+    let (state, _store, _metrics) = build_state(None, None).await;
+    // Before the first sample lands the ring is empty and the card reads
+    // the live rate; this is the gap the sample fallback bridges, for a
+    // sample young enough to still describe the window.
+    let history = Arc::new(HashrateHistory::default());
+    history.load(vec![local_sample(unix_now() - 120, 37.3e9)]);
+    let (status, body, _) =
+        get_with_history(&state, "/dashboard", WebOptions::default(), history, &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        node_hashrate_value(&body),
+        "37.3 GH/s",
+        "a sample inside the submission window keeps the card alive"
+    );
 }
 
 #[tokio::test]

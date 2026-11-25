@@ -36,7 +36,7 @@ use bitcoin::{BlockHash, Target};
 use chart::ChartBlock;
 use history::{HashrateHistory, is_block, pool_hashrate};
 use maud::Markup;
-use p2poolv2_lib::accounting::stats::metrics::PoolMetrics;
+use p2poolv2_lib::accounting::stats::metrics::{PoolMetrics, SUBMISSION_WINDOW_SECS};
 use p2poolv2_lib::address::bch_share::BchShareNetwork;
 use p2poolv2_lib::address_display::ShareInfoDisplay;
 use p2poolv2_lib::address_display::payout_address_string;
@@ -528,13 +528,22 @@ async fn overview(
         network_hashrate.map(|rate| history::difficulty_from_network_hashrate(rate, interval))
     });
     // The metrics read comes before both local and pool, so the two cards
-    // take theirs the same way: live first, then the newest non-null sample.
+    // take theirs the same way: live first, then the newest non-null sample
+    // (local only while that sample is inside the window it measures).
     let metrics = state.metrics_handle.get_metrics().await;
     // The local rate from the metrics actor's sliding window of accepted
-    // submissions (the pre-sample fallback keeps a value on the card).
-    let local_hashrate = metrics
-        .local_submission_hashrate(now)
-        .or_else(|| samples.iter().rev().find_map(|sample| sample.local));
+    // submissions. The sample fallback keeps the card alive through the gap
+    // before the first sample, but only for samples inside the same
+    // submission window they measure: an older sample cannot say what the
+    // rate is now, so a card whose miner stopped ages to a dash instead of
+    // freezing on the last value it saw.
+    let local_hashrate = metrics.local_submission_hashrate(now).or_else(|| {
+        samples
+            .iter()
+            .rev()
+            .filter(|sample| now.saturating_sub(sample.time) <= SUBMISSION_WINDOW_SECS)
+            .find_map(|sample| sample.local)
+    });
     // Harmonize with the pool KPI: fall back to the newest non-null sample
     // when the live recompute has too few shares to form a span, so both
     // cards show a value (or both show the dash) together.

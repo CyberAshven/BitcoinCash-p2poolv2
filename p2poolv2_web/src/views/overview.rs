@@ -305,6 +305,44 @@ fn failure<T: 'static>(resource: &LocalResource<Result<T, String>>) -> Option<St
     })
 }
 
+/// The sliding window the node's local hashrate is measured over, in
+/// seconds. Kept in sync with p2poolv2_lib's metrics `SUBMISSION_WINDOW_SECS`
+/// (the web crate does not depend on the node), the same way
+/// `format.rs` carries `BLOCK_INTERVAL_SECONDS`.
+const SUBMISSION_WINDOW_SECS: u64 = 600;
+
+/// The node's hashrate the KPI card shows: `current`, the rate `/hashrate`
+/// read live, else the newest of `history` inside the window that has one.
+/// Samples only accumulate when a metric goes quiet, so the newest one can
+/// be the stale value a stopped miner left behind; `fresh` cuts a sample
+/// that has outlived the window it measures, leaving the card a dash
+/// instead of frozen. With history, `current` is the newest sample's own
+/// value, so it takes the same test; with no samples `current` is the live
+/// window read and passes on its own. `now` is unix seconds the caller
+/// holds already (the page clock), not a clock read of its own.
+fn local_rate(
+    current: Option<f64>,
+    history: &[HashratePoint],
+    now: u64,
+    fresh: impl Fn(u64) -> bool,
+) -> Option<f64> {
+    let current = if history
+        .last()
+        .is_none_or(|newest| fresh(now.saturating_sub(newest.time)))
+    {
+        current
+    } else {
+        None
+    };
+    current.or_else(|| {
+        history
+            .iter()
+            .rev()
+            .filter(|point| fresh(now.saturating_sub(point.time)))
+            .find_map(|point| point.local_hashrate)
+    })
+}
+
 /// The first error among the overview's requests, shown above it as the
 /// node's error page would.
 fn first_error(errors: [Option<String>; 5]) -> Option<String> {
@@ -511,15 +549,15 @@ pub fn OverviewPage() -> impl IntoView {
             totals.unwrap_or_else(|| format!("{UNKNOWN} rejected of {UNKNOWN} shares")),
         ]
     });
-    // The node's overview shows the newest sample that has this node's rate.
+    // The node's overview shows the newest sample that has this node's
+    // rate, aged against the page clock (which ticks every second) so a
+    // sample older than the submission window it measures cannot stand in
+    // for a live rate that no longer exists.
     let local_rate = Signal::derive(move || {
+        let now = clock.get();
         loaded(&hashrate, |hashrate| {
-            let newest = hashrate.local_hashrate.or_else(|| {
-                hashrate
-                    .history
-                    .iter()
-                    .rev()
-                    .find_map(|point| point.local_hashrate)
+            let newest = local_rate(hashrate.local_hashrate, &hashrate.history, now, |age| {
+                age <= SUBMISSION_WINDOW_SECS
             });
             optional(newest, fmt_hashrate)
         })
@@ -1276,5 +1314,81 @@ mod tests {
             Some("a".to_string())
         );
         assert_eq!(first_error([None, None, None, None, None]), None);
+    }
+
+    /// A history point carrying only this node's rate, at `time`.
+    fn local_point(time: u64, local: f64) -> HashratePoint {
+        HashratePoint {
+            time,
+            pool_hashrate: None,
+            local_hashrate: Some(local),
+            network_hashrate: None,
+        }
+    }
+
+    /// The freshness test the KPI signal applies: a sample must sit inside
+    /// the submission window it measures.
+    fn fresh(age: u64) -> bool {
+        age <= SUBMISSION_WINDOW_SECS
+    }
+
+    #[test]
+    fn test_the_local_rate_drops_a_sample_older_than_the_submission_window() {
+        // The miner stopped and the last sample froze on its decay value;
+        // with history, the response's top-level rate *is* that newest
+        // sample, so both the direct read and the scan must age out.
+        let history = [local_point(8_000, 37.3e9)];
+        assert_eq!(local_rate(Some(37.3e9), &history, 10_000, fresh), None);
+    }
+
+    #[test]
+    fn test_the_local_rate_keeps_a_sample_inside_the_submission_window() {
+        let history = [local_point(9_600, 37.3e9)];
+        assert_eq!(
+            local_rate(None, &history, 10_000, fresh),
+            Some(37.3e9),
+            "a sample young enough to describe the window still carries the card"
+        );
+    }
+
+    #[test]
+    fn test_the_local_rate_looks_past_a_fresh_sample_with_no_value() {
+        // The newest sample is fresh but carries no rate (a sampler tick
+        // between submissions): the scan must continue to the sample behind
+        // it instead of stopping at the first fresh point. What sits behind
+        // is older, though, so a rate can only come from the stale side.
+        let without_rate = HashratePoint {
+            time: 9_600,
+            pool_hashrate: None,
+            local_hashrate: None,
+            network_hashrate: None,
+        };
+        assert_eq!(
+            local_rate(
+                None,
+                &[without_rate, local_point(8_000, 37.3e9)],
+                10_000,
+                fresh
+            ),
+            None,
+            "all other samples are stale once the fresh ones carry nothing"
+        );
+        assert_eq!(
+            local_rate(
+                None,
+                &[local_point(9_600, 5.0e6), local_point(8_000, 37.3e9)],
+                10_000,
+                fresh
+            ),
+            Some(5.0e6),
+            "the fresh newest sample's own value is what answers"
+        );
+    }
+
+    #[test]
+    fn test_the_local_rate_trusts_the_live_read_without_history() {
+        // No samples yet: the response's rate is the live window read, not
+        // a stored value, and stands on its own.
+        assert_eq!(local_rate(Some(42.0e9), &[], 10_000, fresh), Some(42.0e9));
     }
 }
