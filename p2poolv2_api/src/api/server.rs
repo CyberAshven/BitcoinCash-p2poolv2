@@ -53,6 +53,12 @@ pub(crate) struct AppState {
     pub(crate) monitoring_event_sender: MonitoringEventSender,
     pub(crate) auth_user: Option<String>,
     pub(crate) auth_token: Option<String>,
+    /// The port the stratum server listens on, which the help page tells a
+    /// miner to connect to.
+    pub(crate) stratum_port: u16,
+    /// The port the stratum V2 endpoint listens on, or `None` when the node
+    /// runs without SV2.
+    pub(crate) sv2_port: Option<u16>,
     /// The node's share chain PPLNS window, shared with the payout and
     /// validation code, with the snapshot `/miner` answers from. `None` when
     /// the node does not pay from it (Hydrapool mode), which turns `/miner`
@@ -189,6 +195,10 @@ pub(crate) fn build_router_with_history(
         .route("/payout_tree", get(endpoints::payout_trees::payout_tree))
         .route("/miners", get(endpoints::miners::miners))
         .route("/network", get(endpoints::network::network))
+        .route(
+            "/share_address",
+            get(endpoints::share_address::share_address),
+        )
         .route("/peers", get(peers))
         .merge(endpoints::hashrate::router(
             app_state.clone(),
@@ -263,7 +273,10 @@ pub(crate) fn build_router_with_history(
 /// Start the API server and return a shutdown channel and the actual bound port.
 ///
 /// `pplns_window` is the node's share chain PPLNS window, or `None` when the
-/// node does not pay from it; `/miner` reads it.
+/// node does not pay from it; `/miner` reads it. `stratum_port` and
+/// `sv2_port` are the ports the node's stratum endpoints listen on; the
+/// help page tells a miner to connect there, and `sv2_port` is `None` when
+/// the node runs without SV2.
 #[allow(clippy::too_many_arguments)] // wiring constructor: each parameter is a distinct collaborator, a params struct would only move the list
 pub async fn start_api_server(
     config: ApiConfig,
@@ -276,6 +289,8 @@ pub async fn start_api_server(
     cash_network: Option<BchShareNetwork>,
     pool_signature: Option<String>,
     pplns_window: Option<Arc<RwLock<PplnsWindow>>>,
+    stratum_port: u16,
+    sv2_port: Option<u16>,
 ) -> Result<(oneshot::Sender<()>, u16), std::io::Error> {
     let app_config = AppConfig {
         pool_signature_length: pool_signature.unwrap_or_default().len(),
@@ -293,6 +308,8 @@ pub async fn start_api_server(
         monitoring_event_sender,
         auth_user: config.auth_user.clone(),
         auth_token: config.auth_token.clone(),
+        stratum_port,
+        sv2_port,
         pplns_window: pplns_window.map(|window| Arc::new(MinerWindowSource::new(window))),
     });
 

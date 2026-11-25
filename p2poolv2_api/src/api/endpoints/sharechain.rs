@@ -4,7 +4,7 @@
 
 //! `/sharechain`: the sharechain chart's series as JSON.
 //!
-//! Reads shares from the store and builds the same five series the
+//! Reads shares from the store and builds the same seven series the
 //! server-rendered Sharechain tab draws, so both charts show the same lines.
 //! No sampling happens here; the endpoint reuses the SSR's
 //! [`share_series`] and [`sharechain_series`] from the dashboard module.
@@ -38,7 +38,9 @@ pub struct SharechainPoint {
     pub value: f64,
 }
 
-/// The five series in the replica's order: height, dmin, dmax, uncles, weak.
+/// The seven series in the replica's order: height, dmin, dmax, uncles,
+/// weak, miners, workers. The last two are the opt-in count lines; samples
+/// taken before the counts were available carry no point for them.
 #[derive(Serialize)]
 pub struct SharechainResponse {
     pub window_secs: u64,
@@ -48,6 +50,8 @@ pub struct SharechainResponse {
     pub diff_max: Vec<SharechainPoint>,
     pub uncles: Vec<SharechainPoint>,
     pub weak: Vec<SharechainPoint>,
+    pub miners: Vec<SharechainPoint>,
+    pub workers: Vec<SharechainPoint>,
 }
 
 struct SharechainState {
@@ -69,6 +73,21 @@ fn to_points(series: &[(u64, f64)]) -> Vec<SharechainPoint> {
             value: *value,
         })
         .collect()
+}
+
+/// One point per sample that carried the count; samples taken before the
+/// metric was available are dropped rather than drawn as a dip to zero.
+fn count_points(samples: &[Sample], pick: fn(&Sample) -> Option<u64>) -> Vec<SharechainPoint> {
+    let mut points = Vec::with_capacity(samples.len());
+    for sample in samples {
+        if let Some(value) = pick(sample) {
+            points.push(SharechainPoint {
+                time: sample.time,
+                value: value as f64,
+            });
+        }
+    }
+    points
 }
 
 async fn sharechain(
@@ -105,6 +124,8 @@ async fn sharechain(
         diff_max: to_points(&diff_max),
         uncles: to_points(&uncles),
         weak: to_points(&weak),
+        miners: count_points(&window_samples, |sample| sample.miners),
+        workers: count_points(&window_samples, |sample| sample.workers),
     }))
 }
 
@@ -140,6 +161,46 @@ mod tests {
             SharechainPoint {
                 time: 160,
                 value: 37.0
+            }
+        );
+    }
+
+    #[test]
+    fn count_points_skips_samples_without_the_count() {
+        let samples = vec![
+            Sample {
+                time: 100,
+                pool: None,
+                local: None,
+                network: None,
+                miners: Some(3),
+                workers: Some(7),
+            },
+            Sample {
+                time: 160,
+                pool: None,
+                local: None,
+                network: None,
+                miners: None,
+                workers: Some(8),
+            },
+        ];
+        let miners = count_points(&samples, |sample| sample.miners);
+        assert_eq!(miners.len(), 1);
+        assert_eq!(
+            miners[0],
+            SharechainPoint {
+                time: 100,
+                value: 3.0
+            }
+        );
+        let workers = count_points(&samples, |sample| sample.workers);
+        assert_eq!(workers.len(), 2);
+        assert_eq!(
+            workers[1],
+            SharechainPoint {
+                time: 160,
+                value: 8.0
             }
         );
     }

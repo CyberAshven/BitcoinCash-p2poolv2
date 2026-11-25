@@ -552,6 +552,24 @@ table.table td {
   color: var(--ms-green);
 }
 
+/* The help page's share address generator: half the width of the header
+   search and miner lookup rows, which span a whole section. The input
+   keeps shrinking below .grow's usual 16rem floor so it fits the half. */
+.share-form {
+  max-width: 50%;
+}
+
+.share-form .grow {
+  min-width: 0;
+}
+
+/* The widget's error renders directly under its form and takes the same
+   width, so the alert reads as part of the generator rather than a full
+   section-wide banner. */
+.share-form + .toast {
+  max-width: 50%;
+}
+
 .help-section {
   margin-bottom: 1.2rem;
 }

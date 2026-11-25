@@ -24,23 +24,25 @@ mod style_guard;
 use crate::api::endpoints::MAX_NUM_SHARES_IN_RESPONSE;
 use crate::api::endpoints::miner::miner_report;
 use crate::api::endpoints::share::build_share_output;
+use crate::api::endpoints::share_address::{ShareAddressQuery, share_address_for};
 use crate::api::error::ApiError;
 use crate::api::server::AppState;
 use axum::Router;
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::get;
 use bitcoin::{BlockHash, Target};
 use chart::ChartBlock;
 use history::{HashrateHistory, is_block, pool_hashrate};
 use maud::Markup;
+use p2poolv2_lib::accounting::stats::metrics::{PoolMetrics, SUBMISSION_WINDOW_SECS};
 use p2poolv2_lib::address::bch_share::BchShareNetwork;
 use p2poolv2_lib::address_display::ShareInfoDisplay;
 use p2poolv2_lib::address_display::payout_address_string;
 use pages::{
     BlockView, BlocksView, FoundBlockRow, MinerRow, MinerView, MinersView, Overview, PAGE_SIZE,
-    Paging, ShareRow, ShareView, SharesView, Site, WorkerRow, range_window_secs,
+    Paging, PeersView, ShareRow, ShareView, SharesView, Site, WorkerRow, range_window_secs,
 };
 use serde::Deserialize;
 use std::str::FromStr;
@@ -53,6 +55,14 @@ const RECENT_BLOCKS: usize = 5;
 /// Confirmed share heights the overview's Recent shares panel lists; the
 /// shares page has them all, [`pages::PAGE_SIZE`] per page.
 const OVERVIEW_SHARES: usize = 5;
+
+/// Rows the overview's Recent shares table always renders: the page is
+/// truncated to this count so the panel keeps the same size on every
+/// refresh, whatever uncles the window carries.
+const OVERVIEW_ROWS: usize = 5;
+
+/// Peers the overview's Peers panel lists; the peers page has them all.
+const OVERVIEW_PEERS: usize = 5;
 
 /// What the dashboard handlers share: the API's state and the history its
 /// sampler fills.
@@ -69,6 +79,7 @@ pub(crate) fn router(app: Arc<AppState>, history: Arc<HashrateHistory>) -> Route
     Router::new()
         .route("/dashboard", get(overview))
         .route("/dashboard/shares", get(shares))
+        .route("/dashboard/peers", get(peers))
         .route("/dashboard/blocks", get(blocks))
         .route("/dashboard/block/{hash}", get(block))
         .route("/dashboard/miners", get(miners))
@@ -105,6 +116,8 @@ pub(crate) fn site(state: &AppState) -> Site {
         network,
         badge: badge.to_string(),
         auth: state.auth_user.is_some(),
+        stratum_port: state.stratum_port,
+        sv2_port: state.sv2_port,
     }
 }
 
@@ -144,9 +157,10 @@ fn error_page(state: &AppState, error: ApiError) -> Response {
 /// A `?page=` query, counted from 1, plus the overview's `?auto=` toggle,
 /// `?range=` chart window, `?chart=` chart tab and the series toggles
 /// (`?pool=`/`?node=`/`?network`/`?blocks` for the hashrate tab,
-/// `?height=`/`?dmin=`/`?dmax=`/`?uncles=`/`?weak=` for the sharechain)
+/// `?height=`/`?dmin=`/`?dmax=`/`?uncles=`/`?weak=` for the sharechain,
+/// `?miners=`/`?workers=` for the sharechain's opt-in count lines)
 /// (a series is hidden when its parameter is `0`; the network series is
-/// opt-in and shows only for `network=1`).
+/// opt-in and shows only for `network=1`, as are miners and workers).
 #[derive(Deserialize)]
 struct PageQuery {
     page: Option<usize>,
@@ -162,6 +176,8 @@ struct PageQuery {
     dmax: Option<String>,
     uncles: Option<String>,
     weak: Option<String>,
+    miners: Option<String>,
+    workers: Option<String>,
 }
 
 /// Whether the share `blockhash` met its own Bitcoin Cash block target.
@@ -179,11 +195,16 @@ fn share_found_a_block(state: &AppState, blockhash: &BlockHash) -> bool {
 /// One page of the confirmed share chain, newest first, each share followed
 /// by the uncles it includes, with the tip height. `window` is how many
 /// heights a page spans: [`OVERVIEW_SHARES`] for the overview's Recent
-/// shares, `pages::PAGE_SIZE` for the shares page.
+/// shares, `pages::PAGE_SIZE` for the shares page. `row_limit` caps the
+/// rows the page may render: the overview passes [`OVERVIEW_ROWS`] so its
+/// table keeps the same size on every refresh, the shares page passes
+/// `None` for the window's full detail. Truncation drops oldest content
+/// only, so a share row still sits directly above its uncles.
 fn share_page(
     state: &AppState,
     page: Option<usize>,
     window: usize,
+    row_limit: Option<usize>,
 ) -> (Option<u32>, Paging, Vec<ShareRow>) {
     let Ok(Some(tip)) = state.chain_store_handle.get_tip_height() else {
         return (None, Paging::of(None, 0), Vec::new());
@@ -231,6 +252,9 @@ fn share_page(
                 weak_count: 0,
             });
         }
+    }
+    if let Some(limit) = row_limit {
+        rows.truncate(limit);
     }
     (Some(tip), paging, rows)
 }
@@ -401,6 +425,25 @@ pub(crate) fn online_counts(miners: &[MinerRow]) -> (usize, usize) {
     (miners_online, workers_online)
 }
 
+/// The same two counts straight off the metrics actor's snapshot, for
+/// callers that fetched it for other fields too (the hashrate sampler
+/// and the `/hashrate` response): a miner is one with any worker
+/// `active`, a worker is one `active`, exactly as [`online_counts`]
+/// counts them off the miner rows.
+pub(crate) fn online_counts_from_metrics(metrics: &PoolMetrics) -> (usize, usize) {
+    let miners_online = metrics
+        .users
+        .values()
+        .filter(|user| user.workers.values().any(|worker| worker.active))
+        .count();
+    let workers_online = metrics
+        .users
+        .values()
+        .map(|user| user.workers.values().filter(|worker| worker.active).count())
+        .sum();
+    (miners_online, workers_online)
+}
+
 /// Whether a miner on this node is the one looked up as `typed`, which the
 /// window lookup spells `canonical` (a payout address may be typed without
 /// its prefix).
@@ -454,10 +497,12 @@ async fn overview(
     let dmax_on = pages::series_on(query.dmax.as_deref());
     let uncles_on = pages::series_on(query.uncles.as_deref());
     let weak_on = pages::series_on(query.weak.as_deref());
+    let miners_on = pages::series_opt_in_on(query.miners.as_deref());
+    let workers_on = pages::series_opt_in_on(query.workers.as_deref());
     let now = unix_now();
     let chain = read_store(state, move |state| {
         (
-            share_page(state, None, OVERVIEW_SHARES),
+            share_page(state, None, OVERVIEW_SHARES, Some(OVERVIEW_ROWS)),
             pool_hashrate(state, now),
             found_blocks(state),
         )
@@ -483,13 +528,22 @@ async fn overview(
         network_hashrate.map(|rate| history::difficulty_from_network_hashrate(rate, interval))
     });
     // The metrics read comes before both local and pool, so the two cards
-    // take theirs the same way: live first, then the newest non-null sample.
+    // take theirs the same way: live first, then the newest non-null sample
+    // (local only while that sample is inside the window it measures).
     let metrics = state.metrics_handle.get_metrics().await;
     // The local rate from the metrics actor's sliding window of accepted
-    // submissions (the pre-sample fallback keeps a value on the card).
-    let local_hashrate = metrics
-        .local_submission_hashrate(now)
-        .or_else(|| samples.iter().rev().find_map(|sample| sample.local));
+    // submissions. The sample fallback keeps the card alive through the gap
+    // before the first sample, but only for samples inside the same
+    // submission window they measure: an older sample cannot say what the
+    // rate is now, so a card whose miner stopped ages to a dash instead of
+    // freezing on the last value it saw.
+    let local_hashrate = metrics.local_submission_hashrate(now).or_else(|| {
+        samples
+            .iter()
+            .rev()
+            .filter(|sample| now.saturating_sub(sample.time) <= SUBMISSION_WINDOW_SECS)
+            .find_map(|sample| sample.local)
+    });
     // Harmonize with the pool KPI: fall back to the newest non-null sample
     // when the live recompute has too few shares to form a span, so both
     // cards show a value (or both show the dash) together.
@@ -563,6 +617,8 @@ async fn overview(
         dmax_on,
         uncles_on,
         weak_on,
+        miners_on,
+        workers_on,
         share_series,
     }))
 }
@@ -597,17 +653,35 @@ async fn shares(
     Query(query): Query<PageQuery>,
 ) -> Response {
     let state = &dashboard.app;
-    let (tip_height, paging, shares) =
-        match read_store(state, move |state| share_page(state, query.page, PAGE_SIZE)).await {
-            Ok(page) => page,
-            Err(error) => return error_page(state, error),
-        };
+    let (tip_height, paging, shares) = match read_store(state, move |state| {
+        share_page(state, query.page, PAGE_SIZE, None)
+    })
+    .await
+    {
+        Ok(page) => page,
+        Err(error) => return error_page(state, error),
+    };
     html(pages::shares(&SharesView {
         site: site(state),
         now: unix_now(),
         tip_height,
         shares,
         paging,
+    }))
+}
+
+async fn peers(State(dashboard): State<Arc<DashboardState>>) -> Response {
+    let state = &dashboard.app;
+    let peers = match state.node_handle.get_peer_infos().await {
+        Ok(peers) => peers,
+        Err(error) => {
+            tracing::warn!("Dashboard could not read connected peers: {error}");
+            Vec::new()
+        }
+    };
+    html(pages::peers(&PeersView {
+        site: site(state),
+        peers,
     }))
 }
 
@@ -733,8 +807,48 @@ async fn share(State(dashboard): State<Arc<DashboardState>>, Path(hash): Path<St
     }
 }
 
-async fn help(State(dashboard): State<Arc<DashboardState>>) -> Response {
-    html(pages::help(&site(&dashboard.app)))
+/// The help page, with the share address generator's outcome when a
+/// payout was submitted. No `?payout=` is a plain page; a submitted one
+/// runs the endpoint's own rule, so the form and `GET /share_address`
+/// can never disagree. On a refusal the payout is kept only to echo into
+/// the form's input, and the example fields keep their placeholders.
+async fn help(
+    State(dashboard): State<Arc<DashboardState>>,
+    headers: HeaderMap,
+    Query(query): Query<ShareAddressQuery>,
+) -> Response {
+    let site = site(&dashboard.app);
+    let host = request_host(&headers);
+    let (payout, result, error) = match query.payout {
+        None => (String::new(), String::new(), String::new()),
+        Some(payout) => match share_address_for(&payout, dashboard.app.app_config.cash_network) {
+            Ok(address) => (payout, address, String::new()),
+            Err(ApiError::BadRequest(message)) => (payout, String::new(), message),
+            Err(error) => (payout, String::new(), error.to_string()),
+        },
+    };
+    html(pages::help(&site, &host, &payout, &result, &error))
+}
+
+/// The hostname the request's `Host` header names, without its port: the
+/// host the operator browsed the dashboard with is the host a miner on the
+/// same network reaches this node at. Empty when the header is absent
+/// (HTTP/1.0) or is not valid text, so the help page falls back to its
+/// placeholder. An IPv6 literal keeps the brackets its URL needs.
+fn request_host(headers: &HeaderMap) -> String {
+    let Some(host) = headers
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return String::new();
+    };
+    if host.starts_with('[') {
+        return match host.find(']') {
+            Some(close) => host[..=close].to_string(),
+            None => host.to_string(),
+        };
+    }
+    host.split(':').next().unwrap_or_default().to_string()
 }
 
 pub(crate) async fn signin(State(dashboard): State<Arc<DashboardState>>) -> Response {
