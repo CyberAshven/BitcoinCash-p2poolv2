@@ -56,10 +56,13 @@ const DEFAULT_P2P_PORT: u16 = 6884;
 /// `DEFAULT_P2P_PORT`.
 const BITCOIN_CASH_MAINNET_SEED_HOSTNAMES: &[&str] = &[];
 
-/// Seed hostnames for Bitcoin Cash chipnet, as for mainnet.
-const BITCOIN_CASH_CHIPNET_SEED_HOSTNAMES: &[&str] = &[];
+/// Seed hostnames for Bitcoin Cash chipnet, as for mainnet. An entry may
+/// name its own port as `host:port`, for a seed node that listens on
+/// another port than the network's.
+const BITCOIN_CASH_CHIPNET_SEED_HOSTNAMES: &[&str] = &["p2poolv2-chipnet.realbitcoin.cash:6886"];
 
-/// The DNS seeds for one network and the port their nodes listen on.
+/// The DNS seeds for one network and the port their nodes listen on. A
+/// hostname written `host:port` overrides that port for its own nodes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DnsSeeds {
     pub(crate) hostnames: Vec<String>,
@@ -167,10 +170,24 @@ pub(crate) fn spawn_dns_seed_dials<C: Send + 'static>(
 /// one bad seed does not stop the others.
 pub(crate) async fn resolve_dns_seeds(seeds: DnsSeeds) -> HashSet<Multiaddr> {
     let mut dial_addresses = HashSet::with_capacity(seeds.hostnames.len() * MAX_ADDRESSES_PER_SEED);
-    for hostname in &seeds.hostnames {
-        dial_addresses.extend(resolve_dns_seed(hostname, seeds.port).await);
+    for entry in &seeds.hostnames {
+        let (hostname, port) = seed_host_and_port(entry, seeds.port);
+        dial_addresses.extend(resolve_dns_seed(hostname, port).await);
     }
     dial_addresses
+}
+
+/// Splits a seed entry into its hostname and port. `host:port` names its
+/// own port; a bare `host`, or one whose part after the last colon is not a
+/// port, listens on `default_port`.
+fn seed_host_and_port(entry: &str, default_port: u16) -> (&str, u16) {
+    match entry.rsplit_once(':') {
+        Some((host, port)) if !host.is_empty() && !host.contains(':') => match port.parse() {
+            Ok(port) => (host, port),
+            Err(_) => (entry, default_port),
+        },
+        _ => (entry, default_port),
+    }
 }
 
 /// Resolves one seed hostname through the system resolver and returns at
@@ -269,6 +286,44 @@ mod tests {
             seed_dial_addresses(resolved.into_iter(), 2),
             vec![first, second]
         );
+    }
+
+    /// A seed entry may carry its own port; a bare hostname, or a suffix
+    /// that is no port, keeps the network's.
+    #[test]
+    fn a_seed_entry_may_name_its_own_port() {
+        assert_eq!(
+            seed_host_and_port("p2poolv2-chipnet.realbitcoin.cash:6886", 6884),
+            ("p2poolv2-chipnet.realbitcoin.cash", 6886)
+        );
+        assert_eq!(
+            seed_host_and_port("seed.example.org", 6884),
+            ("seed.example.org", 6884)
+        );
+        assert_eq!(
+            seed_host_and_port("seed.example.org:notaport", 6884),
+            ("seed.example.org:notaport", 6884)
+        );
+        assert_eq!(seed_host_and_port(":6886", 6884), (":6886", 6884));
+    }
+
+    /// An entry's own port is the port its addresses are dialed on.
+    #[tokio::test]
+    async fn a_seed_with_its_own_port_is_dialed_on_that_port() {
+        let seeds = DnsSeeds::new(&["23.227.187.89:6886"], DEFAULT_P2P_PORT).unwrap();
+        let expected: Multiaddr = "/ip4/23.227.187.89/tcp/6886".parse().unwrap();
+        assert_eq!(resolve_dns_seeds(seeds).await, HashSet::from([expected]));
+    }
+
+    /// Chipnet has one built-in seed node, listening on its own port.
+    #[test]
+    fn chipnet_has_a_built_in_seed() {
+        let seeds = dns_seeds_for_bitcoin_cash(BitcoinCashNetwork::Chipnet).unwrap();
+        assert_eq!(
+            seeds.hostnames,
+            vec!["p2poolv2-chipnet.realbitcoin.cash:6886".to_string()]
+        );
+        assert_eq!(seeds.port, DEFAULT_P2P_PORT);
     }
 
     #[test]

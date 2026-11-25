@@ -1390,7 +1390,8 @@ pub struct NetworkConfig {
     pub dns_seed: bool,
     /// DNS seed hostnames that replace the built-in ones, so a new seed can
     /// be used before a release names it. Their A/AAAA records list
-    /// long-running nodes on the network's seed port (6884 on Bitcoin Cash).
+    /// long-running nodes on the network's seed port (6884 on Bitcoin Cash),
+    /// or on the port an entry names as `host:port`.
     #[serde(default)]
     pub dns_seed_hosts: Vec<String>,
     /// File holding this node's libp2p identity, whose public key is its

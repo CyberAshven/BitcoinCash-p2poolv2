@@ -98,9 +98,11 @@ format and genesis re-pin.
 ### Added
 
 - Bitcoin Cash DNS seeds: a node takes the seeds of its
-  `bitcoin_cash_network` (lists for mainnet and chipnet, empty until
-  operators run seeds), and `[network] dns_seed_hosts` replaces the built-in
-  list. `dns_seed` is no longer forced off on Bitcoin Cash.
+  `bitcoin_cash_network` (chipnet has one seed node,
+  `p2poolv2-chipnet.realbitcoin.cash:6886`; mainnet none yet), and
+  `[network] dns_seed_hosts` replaces the built-in list; an entry may name
+  its own port as `host:port`. `dns_seed` is no longer forced off on Bitcoin
+  Cash.
 - The dashboard, server-rendered and WASM, gains a Sharechain chart tab
   (served as JSON at `/sharechain`), income tiles and weak share detail on
   the miner pages. The miner report shows each share's weak count; payouts

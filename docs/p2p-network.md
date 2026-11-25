@@ -123,14 +123,17 @@ when no `dial_peers` entry connected. It dials at most 16 addresses from any
 one seed, so no seed operator can fill a node's connections.
 
 - **Which seeds:** a Bitcoin Cash node takes the seeds of its
-  `bitcoin_cash_network` (`node/dns_seeds.rs`), never Bitcoin's. Mainnet and
-  chipnet have lists, empty until operators run seeds; regtest and scalenet
-  have none. `[network] dns_seed_hosts` replaces the built-in list, so a new
-  seed works before a release names it. `dns_seed = false` skips seeds.
+  `bitcoin_cash_network` (`node/dns_seeds.rs`), never Bitcoin's. Chipnet's
+  list has one seed node, `p2poolv2-chipnet.realbitcoin.cash:6886`; mainnet's
+  is empty until operators run seeds; regtest and scalenet have none.
+  `[network] dns_seed_hosts` replaces the built-in list, so a new seed works
+  before a release names it. `dns_seed = false` skips seeds.
 - **Running a seed:** point a host name's A/AAAA records at long-running
   nodes of one network that listen on port 6884. No crawler is needed; keep
   the records to nodes that stay up. Each seed should have its own operator,
-  so one person's mistake or outage leaves the others.
+  so one person's mistake or outage leaves the others. A seed whose nodes
+  listen on another port is written `host:port`, in the built-in lists and
+  in `dns_seed_hosts`.
 - **Names outside DNS:** the node resolves seeds through the system resolver.
   A `.fn` name from [Freedom Names](https://github.com/FreedomNames/FreedomNames)
   works when the system resolver asks a Freedom Names node, as its README
