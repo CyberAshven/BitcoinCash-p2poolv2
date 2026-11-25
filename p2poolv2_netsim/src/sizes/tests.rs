@@ -239,7 +239,7 @@ fn an_uncapped_coinbase_for_a_million_payees_breaks_bch_consensus() {
         vec![
             "BCH 1 MB transaction",
             "hybrid 1,204,800-byte share body",
-            "1.25 MiB P2P message",
+            "2,144 KiB P2P message",
             "pre-hybrid 200 KiB share body",
             "SV2 extended 64 KiB field"
         ]
@@ -276,14 +276,16 @@ fn bch_transaction_limit_allows_29402_direct_payees() {
     assert_eq!(largest, 29_402);
 }
 
+/// With 960 KiB of weak shares the message still holds a share past the
+/// hybrid body limit's 35,422 payees, so the share-chain rule binds first.
 #[test]
-fn the_p2p_message_limit_allows_38525_direct_payees() {
+fn the_p2p_message_limit_allows_35634_direct_payees() {
     let largest = largest_direct_payee_count(|sizes| {
         sizes
             .limit_check(CoinbaseLayout::Uncapped)
             .message_within_p2p_limit
     });
-    assert_eq!(largest, 38_525);
+    assert_eq!(largest, 35_634);
 }
 
 #[test]

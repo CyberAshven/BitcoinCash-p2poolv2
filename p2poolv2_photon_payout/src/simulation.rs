@@ -8,7 +8,8 @@
 //! is selected here. The diagnostic mode permits new wins with unspendable
 //! payout commitments; its results do not establish a realizable protocol.
 //!
-//! `Rules::Candidate` applies four changes that await the owner's decision:
+//! `Rules::Candidate` applies the four changes the owner adopted on
+//! 2026-10-30 (design document section 10):
 //! first eligible, first paid; the rest of a win paid ahead, bounded by the
 //! expected credit of shares already in the window; no window script stop;
 //! and no launch history or custody.
@@ -40,7 +41,8 @@ impl Population {
 /// Largest PHOTON tail; a committed list must pay correctly at every tail.
 pub const TAIL_SPAN: u64 = 65_535;
 
-/// Which list rules the study applies. Neither is an owner decision.
+/// Which list rules the study applies: section 5 as first written, or the
+/// four changes the owner adopted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Rules {
     /// Section 5 as written: most owed first, never paid ahead.
