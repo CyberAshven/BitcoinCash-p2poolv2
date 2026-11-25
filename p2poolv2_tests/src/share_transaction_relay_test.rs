@@ -99,13 +99,15 @@ async fn test_a_submitted_share_transaction_is_relayed_to_a_peer() {
     .await
     .expect("Failed to create node 2");
 
+    // Relay goes only to a peer whose handshake has arrived, which can be a
+    // moment after the connection: wait for that, not just the connection.
     tokio::time::timeout(RELAY_TIMEOUT, async {
-        while node1.get_peers().await.unwrap().is_empty() {
+        while node1.get_share_chain_peers().await.unwrap().is_empty() {
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
     })
     .await
-    .expect("the nodes did not connect");
+    .expect("node 2 never became node 1's share-chain peer");
 
     let contract = HtlcContract::new(
         secret_hash(&TRADE_SECRET),
