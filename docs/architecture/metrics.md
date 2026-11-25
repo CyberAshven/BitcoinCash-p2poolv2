@@ -60,11 +60,7 @@ series count bounded:
 - Address- and worker-labeled series (`user_shares_valid_total`,
   `worker_*`, `coinbase_output`, and the planned
   `pplns_hashrate_distribution`) are bounded by the number of pool
-  participants. Acceptable, but watch the active worker count. Every
-  worker label is a name: the login's own suffix, or one the node
-  assigns to a bare-address login (`addr.bitaxe`, then `addr.worker1`;
-  see `stratum/message_handlers/authorize_response.rs`). The `unnamed`
-  label is only a fallback for entries persisted before that.
+  participants. Acceptable, but watch the active worker count.
 - An SV2 extended channel that negotiated Worker-Specific Hashrate Tracking
   (`0x0002`) adds one worker per machine its shares name, at most 1,024 per
   channel (`MAX_WORKER_NAMES_PER_CHANNEL` in `stratum/sv2/mining.rs`); a
