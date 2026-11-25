@@ -144,9 +144,9 @@ impl Encodable for HashrateSample {
 impl Decodable for HashrateSample {
     /// Reads the fields in order and stops when input ends: a row written
     /// before the count fields existed ends after `network` and decodes
-    /// with `None` counts, and a row from a future format with more
-    /// fields still decodes here (the unread tail is ignored, as the
-    /// fixed layout before the counts always was).
+    /// with `None` counts. Rows are loaded with `encode::deserialize`,
+    /// which refuses unread bytes, so a binary older than the counts skips
+    /// these rows as corrupt.
     fn consensus_decode<R: Read + ?Sized>(reader: &mut R) -> Result<Self, encode::Error> {
         Ok(HashrateSample {
             time: u64::consensus_decode(reader)?,

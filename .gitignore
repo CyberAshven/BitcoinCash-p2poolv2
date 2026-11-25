@@ -20,6 +20,7 @@ config.toml
 !.cargo/config.toml
 config-dev.toml
 config-*-copy.toml
+config-node2.toml
 config-node1-chipnet.toml
 config-node2-chipnet.toml
 # The cargo aliases for the developer tools (docs/tooling.md) are not a node

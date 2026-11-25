@@ -173,9 +173,12 @@ pub struct SharechainSeries {
     pub uncles: Vec<SharechainPoint>,
     pub weak: Vec<SharechainPoint>,
     /// The opt-in active-miner counts; a sample taken before the metric
-    /// was available carries no point.
+    /// was available carries no point. Default empty, so the chart still
+    /// loads from a node older than the counts.
+    #[serde(default)]
     pub miners: Vec<SharechainPoint>,
     /// The opt-in active-worker counts, sampled the same way.
+    #[serde(default)]
     pub workers: Vec<SharechainPoint>,
 }
 
