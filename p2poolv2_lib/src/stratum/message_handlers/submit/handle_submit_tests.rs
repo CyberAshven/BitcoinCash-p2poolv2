@@ -1346,7 +1346,7 @@ async fn test_handle_submit_validation_failure_returns_other_unknown_with_messag
         4,
         "worker".to_string(),
         "1".to_string(),
-        "00000000".to_string(),
+        "0000000000000000".to_string(),
         "504e86ed".to_string(),
         "e9695791".to_string(),
     );
@@ -1397,10 +1397,9 @@ async fn test_handle_submit_validation_failure_returns_other_unknown_with_messag
     assert_eq!(response.result, None);
     let err = response.error.as_ref().unwrap();
     assert_eq!(err.code, 20, "should be OtherUnknown (code 20)");
-    assert!(
-        err.message.starts_with("Invalid parameters provided:"),
-        "error message should contain the validation failure reason, got: {}",
-        err.message
+    assert_eq!(
+        err.message,
+        "Invalid parameters provided: Failed to build coinbase transaction"
     );
 }
 
@@ -1585,7 +1584,7 @@ async fn test_handle_submit_none_version_bits_returns_error_not_panic() {
 }
 
 #[tokio::test]
-async fn test_handle_submit_extranonce2_too_short_returns_error_not_panic() {
+async fn test_handle_submit_rejects_short_extranonce2() {
     let mut session = Session::<DifficultyAdjuster>::new(1, 1, None, DEFAULT_VERSION_MASK);
     session.subscribed = true;
     let tracker_handle = start_tracker_actor();
@@ -1631,7 +1630,7 @@ async fn test_handle_submit_extranonce2_too_short_returns_error_not_panic() {
         .await
         .unwrap();
 
-    let ctx = StratumContext {
+    let stratum_context = StratumContext {
         found_block_submitter: FoundBlockSubmitter::single_attempt(),
         tracker_handle: tracker_handle.clone(),
         bitcoindrpc_client: BitcoindRpcClient::new(
@@ -1660,16 +1659,18 @@ async fn test_handle_submit_extranonce2_too_short_returns_error_not_panic() {
         weak_share_tx: None,
     };
 
-    let messages = handle_submit(submit, &mut session, ctx).await.unwrap();
+    let messages = handle_submit(submit, &mut session, stratum_context)
+        .await
+        .unwrap();
     let response = match &messages[..] {
-        [Message::Response(r)] => r,
+        [Message::Response(response_message)] => response_message,
         _ => panic!("expected Response"),
     };
     assert_eq!(response.result, None);
-    let err = response.error.as_ref().unwrap();
-    assert_eq!(err.code, 20, "should be OtherUnknown (code 20)");
+    let error = response.error.as_ref().unwrap();
+    assert_eq!(error.code, 20, "should be OtherUnknown (code 20)");
     assert_eq!(
-        err.message,
+        error.message,
         "Invalid parameters provided: extranonce2 must be 8 bytes"
     );
 
@@ -1680,7 +1681,7 @@ async fn test_handle_submit_extranonce2_too_short_returns_error_not_panic() {
 }
 
 #[tokio::test]
-async fn test_handle_submit_extranonce2_too_long_returns_error_not_panic() {
+async fn test_handle_submit_rejects_long_extranonce2() {
     let mut session = Session::<DifficultyAdjuster>::new(1, 1, None, DEFAULT_VERSION_MASK);
     session.subscribed = true;
     let tracker_handle = start_tracker_actor();
@@ -1726,7 +1727,7 @@ async fn test_handle_submit_extranonce2_too_long_returns_error_not_panic() {
         .await
         .unwrap();
 
-    let ctx = StratumContext {
+    let stratum_context = StratumContext {
         found_block_submitter: FoundBlockSubmitter::single_attempt(),
         tracker_handle: tracker_handle.clone(),
         bitcoindrpc_client: BitcoindRpcClient::new(
@@ -1755,16 +1756,18 @@ async fn test_handle_submit_extranonce2_too_long_returns_error_not_panic() {
         weak_share_tx: None,
     };
 
-    let messages = handle_submit(submit, &mut session, ctx).await.unwrap();
+    let messages = handle_submit(submit, &mut session, stratum_context)
+        .await
+        .unwrap();
     let response = match &messages[..] {
-        [Message::Response(r)] => r,
+        [Message::Response(response_message)] => response_message,
         _ => panic!("expected Response"),
     };
     assert_eq!(response.result, None);
-    let err = response.error.as_ref().unwrap();
-    assert_eq!(err.code, 20, "should be OtherUnknown (code 20)");
+    let error = response.error.as_ref().unwrap();
+    assert_eq!(error.code, 20, "should be OtherUnknown (code 20)");
     assert_eq!(
-        err.message,
+        error.message,
         "Invalid parameters provided: extranonce2 must be 8 bytes"
     );
 
