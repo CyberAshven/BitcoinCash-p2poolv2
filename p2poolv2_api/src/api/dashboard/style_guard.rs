@@ -371,6 +371,8 @@ fn site() -> Site {
         network: "Bitcoin Cash chipnet".to_string(),
         badge: "chipnet".to_string(),
         auth: true,
+        stratum_port: 3333,
+        sv2_port: Some(3336),
     }
 }
 
@@ -478,6 +480,8 @@ fn overview(samples: Vec<Sample>, shares: Vec<ShareRow>, blocks: Vec<FoundBlockR
         dmax_on: true,
         uncles_on: true,
         weak_on: true,
+        miners_on: false,
+        workers_on: false,
         share_series: Vec::new(),
     })
     .into_string()
@@ -596,12 +600,16 @@ fn every_page() -> String {
             pool: Some(1e12),
             local: Some(1e9),
             network: Some(1e15),
+            miners: Some(1),
+            workers: Some(1),
         },
         Sample {
             time: 60,
             pool: Some(2e12),
             local: Some(2e9),
             network: Some(1e15),
+            miners: Some(1),
+            workers: Some(1),
         },
     ];
     let miners = vec![
@@ -727,7 +735,7 @@ fn every_page() -> String {
             is_block: false,
         })
         .into_string(),
-        pages::help(&site()).into_string(),
+        pages::help(&site(), "pool.example.org", "", "", "").into_string(),
         pages::signin(&site()).into_string(),
         pages::error(&site(), "Not here").into_string(),
     ]
@@ -893,7 +901,7 @@ fn the_wasm_views_load_only_bundled_images() {
 
 #[test]
 fn the_node_links_the_same_stylesheets() {
-    let page = pages::help(&site()).into_string();
+    let page = pages::help(&site(), "pool.example.org", "", "", "").into_string();
     assert!(page.contains(&assets::href("pico.min.css")));
     assert!(page.contains(&assets::href("dashboard.css")));
 }

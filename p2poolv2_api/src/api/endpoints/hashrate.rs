@@ -8,6 +8,7 @@
 //! draws, so both show the same numbers. No sampling happens here.
 
 use crate::api::dashboard::history::{self, HashrateHistory, Sample};
+use crate::api::dashboard::online_counts_from_metrics;
 use crate::api::error::ApiError;
 use crate::api::server::AppState;
 use axum::{
@@ -31,12 +32,15 @@ pub struct HashrateQuery {
 }
 
 /// One sample, in hashes per second; `null` where it could not be known.
+/// The counts are this node's online miners and workers at that minute.
 #[derive(Serialize, Debug, PartialEq)]
 pub struct HashratePoint {
     pub time: u64,
     pub pool_hashrate: Option<f64>,
     pub local_hashrate: Option<f64>,
     pub network_hashrate: Option<f64>,
+    pub miners: Option<u64>,
+    pub workers: Option<u64>,
 }
 
 impl From<&Sample> for HashratePoint {
@@ -46,6 +50,8 @@ impl From<&Sample> for HashratePoint {
             pool_hashrate: sample.pool,
             local_hashrate: sample.local,
             network_hashrate: sample.network,
+            miners: sample.miners,
+            workers: sample.workers,
         }
     }
 }
@@ -58,6 +64,11 @@ pub struct HashrateResponse {
     pub pool_hashrate: Option<f64>,
     pub local_hashrate: Option<f64>,
     pub network_hashrate: Option<f64>,
+    /// Current online miner and worker counts on this node, from the same
+    /// definition the dashboard's `/miners` page counts with: the newest
+    /// sample's, or read live from the metrics actor before the first one.
+    pub miners: Option<u64>,
+    pub workers: Option<u64>,
     /// Current pool share difficulty (the ASERT target of the newest
     /// prepared notify, in the share chain's units). Live tracker read,
     /// independent of the samples: None until the first notify is built.
@@ -147,6 +158,7 @@ async fn hashrate(
             })
             .await
             .unwrap_or_default();
+            let (miners_online, workers_online) = online_counts_from_metrics(&metrics);
             HashratePoint {
                 time: 0,
                 pool_hashrate: history::normalize_rate(pool),
@@ -156,6 +168,8 @@ async fn hashrate(
                     .tracker_handle
                     .get_network_difficulty()
                     .map(|difficulty| history::network_hashrate(difficulty, block_interval)),
+                miners: u64::try_from(miners_online).ok(),
+                workers: u64::try_from(workers_online).ok(),
             }
         }
     };
@@ -165,6 +179,8 @@ async fn hashrate(
         pool_hashrate: current.pool_hashrate,
         local_hashrate: current.local_hashrate,
         network_hashrate: current.network_hashrate,
+        miners: current.miners,
+        workers: current.workers,
         share_difficulty: state.app.tracker_handle.get_pool_difficulty(),
         work_since_last_block: Some(metrics.work_since_last_block),
         network_difficulty: state.app.tracker_handle.get_network_difficulty(),
@@ -183,6 +199,8 @@ mod tests {
             pool: Some(1.0),
             local: None,
             network: Some(2.0),
+            miners: Some(1),
+            workers: Some(2),
         }
     }
 
@@ -196,6 +214,8 @@ mod tests {
         );
         assert_eq!(points[0].pool_hashrate, Some(1.0));
         assert_eq!(points[0].local_hashrate, None);
+        assert_eq!(points[0].miners, Some(1));
+        assert_eq!(points[0].workers, Some(2));
         assert!(in_window(&[], 60).is_empty());
     }
 

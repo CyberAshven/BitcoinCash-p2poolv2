@@ -19,7 +19,10 @@ pub const INITIAL_USER_MAP_CAPACITY: usize = 1000;
 const METRICS_SAVE_INTERVAL: u64 = 5;
 /// The sliding window the local (this node's miners) hashrate is computed
 /// over, in seconds: ten minutes, matching p2poolv1's local hash rate.
-const SUBMISSION_WINDOW_SECS: u64 = 600;
+/// The dashboard's Node hashrate card uses the same horizon for the stored
+/// sample it falls back to: a sample older than the window it measures
+/// cannot speak for the rate the live window would report now.
+pub const SUBMISSION_WINDOW_SECS: u64 = 600;
 /// Hashes a difficulty-1 share takes on average (2^32).
 const HASHES_PER_DIFFICULTY: f64 = 4_294_967_296.0;
 /// Confirmed share headers summed per store read when the block effort

@@ -19,16 +19,9 @@
 //! Deliberately takes an address and never a private key: no P2Poolv2 crate
 //! generates private keys, and only `bch-trade` reads one, to sign a trade.
 
-use bitcoin::ScriptBuf;
-use p2poolv2_lib::address::bch_share::BchShareAddress;
-use p2poolv2_lib::config::{BitcoinCashNetwork, Chain, parse_payout_address};
+use p2poolv2_lib::config::{BitcoinCashNetwork, payout_to_share_address};
 use std::error::Error;
 use std::io::Read;
-
-/// Bytes of the public key hash inside a P2PKH script:
-/// `OP_DUP OP_HASH160 <20> <hash> OP_EQUALVERIFY OP_CHECKSIG`.
-const PUBKEY_HASH_START: usize = 3;
-const PUBKEY_HASH_END: usize = 23;
 
 /// Parse a Bitcoin Cash network name as the config spells it.
 ///
@@ -47,28 +40,11 @@ pub fn parse_network(value: &str) -> Result<BitcoinCashNetwork, String> {
 
 /// Build the share chain address for a P2PKH CashAddr on `network`.
 ///
-/// A P2SH CashAddr is rejected: a share is owned by a P2PKH script.
+/// The rule itself lives in [`payout_to_share_address`], shared with the
+/// dashboard's help page; this wrapper keeps the CLI's error type. A P2SH
+/// CashAddr is rejected: a share is owned by a P2PKH script.
 fn encode(cash_address: &str, network: BitcoinCashNetwork) -> Result<String, Box<dyn Error>> {
-    let decoded = parse_payout_address(
-        cash_address,
-        Chain::BitcoinCash,
-        network.legacy_network(),
-        Some(network),
-    )?;
-    let script = decoded.script_pubkey();
-    let hash = pubkey_hash(&script).ok_or(
-        "only a P2PKH CashAddr (q... or its token-aware z...) can own shares. Ask the wallet for a regular receiving address.",
-    )?;
-    Ok(BchShareAddress::new(network.share_network(), hash).encode())
-}
-
-fn pubkey_hash(script: &ScriptBuf) -> Option<[u8; 20]> {
-    if !script.is_p2pkh() {
-        return None;
-    }
-    let mut hash = [0u8; 20];
-    hash.copy_from_slice(&script.as_bytes()[PUBKEY_HASH_START..PUBKEY_HASH_END]);
-    Some(hash)
+    Ok(payout_to_share_address(cash_address, network)?)
 }
 
 /// Read the CashAddr from the argument, or from stdin when none was given.

@@ -429,16 +429,22 @@ store and a rollback starts from an empty chart.
 **HashrateSample Structure:**
 ```rust
 pub struct HashrateSample {
-    pub time: u64,            // Unix seconds the sample was taken
-    pub pool: Option<f64>,     // Whole pool, hashes per second
-    pub local: Option<f64>,    // This node's miners, hashes per second
-    pub network: Option<f64>,  // Bitcoin Cash network, hashes per second
+    pub time: u64,             // Unix seconds the sample was taken
+    pub pool: Option<f64>,      // Whole pool, hashes per second
+    pub local: Option<f64>,     // This node's miners, hashes per second
+    pub network: Option<f64>,   // Bitcoin Cash network, hashes per second
+    pub miners: Option<u64>,    // This node's miners with a worker online
+    pub workers: Option<u64>,   // This node's online workers in all
 }
 ```
 
-Each `Option<f64>` is a tag byte (`1` = value, `0` = `None`, else a
-decode error) then the `f64` little endian when present. Loading skips a
-corrupt, key-mismatched or future-dated row with a warning.
+Each `Option` is a tag byte (`1` = value, `0` = `None`, else a decode
+error) then the value (`f64` or `u64`, little endian) when present. A row
+written before the count fields existed ends after `network`; a clean end
+of input where a tag would sit decodes as `None`, so old rows load with
+unknown counts. A row is read to its end, so a binary older than the count
+fields skips the newer rows as corrupt. Loading skips a corrupt,
+key-mismatched or future-dated row with a warning.
 
 ---
 

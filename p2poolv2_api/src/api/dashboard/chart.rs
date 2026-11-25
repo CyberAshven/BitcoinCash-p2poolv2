@@ -73,12 +73,21 @@ fn area_color(class: &str) -> &'static str {
         "network" => "#8b5cf6",
         "pool" => "#0ac18e",
         "height" => "#ffffff",
-        "dmin" => "#06b6d4",
-        "dmax" => "#a78bfa",
-        "uncles" => "#f43f5e",
+        "dmin" => "#3b82f6",
+        "dmax" => "#67e8f9",
+        "uncles" => "#facc15",
         "weak" => "#f59e0b",
+        "miners" => "#7a4f2d",
+        "workers" => "#D2A679",
         _ => "#0ac18e",
     }
+}
+
+/// Series drawn as a stroke only, with no gradient band under their line:
+/// the miners/workers count lines, whose whole-number values would smear a
+/// fill across the shared log10 axis. Everything else keeps its area.
+fn no_fill(class: &str) -> bool {
+    matches!(class, "miners" | "workers")
 }
 
 /// One line of a chart.
@@ -450,6 +459,13 @@ pub(crate) fn line_chart_with(
             ));
             let polyline = html! {
                 polyline class=(format!("line {}", line.class)) points=(points_attr) {}
+            };
+            // The count lines draw stroke-only: their empty grad/area never
+            // reach the figure (see [no_fill]).
+            let (grad, area) = if no_fill(line.class) {
+                (html! {}, html! {})
+            } else {
+                (grad, area)
             };
             let dots = points
                 .iter()

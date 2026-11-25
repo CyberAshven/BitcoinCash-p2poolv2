@@ -21,7 +21,8 @@ use bitcoin::io::{Read, Write};
 /// cap from this constant.
 pub const RETENTION_SECS: u64 = 30 * 24 * 60 * 60;
 
-/// The hashrates the dashboard charts at one minute, in hashes per second.
+/// The hashrates the dashboard charts at one minute, in hashes per second,
+/// plus the node's online miner and worker counts at that minute.
 /// `None` where the value could not be known at that time.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct HashrateSample {
@@ -35,11 +36,16 @@ pub struct HashrateSample {
     pub local: Option<f64>,
     /// The Bitcoin Cash network, from the block template's difficulty.
     pub network: Option<f64>,
+    /// This node's miners with at least one active worker, as the
+    /// dashboard's `/miners` page counts them.
+    pub miners: Option<u64>,
+    /// This node's active workers in all, counted the same way.
+    pub workers: Option<u64>,
 }
 
-/// Tag byte marking an `Option<f64>` that carries a value.
+/// Tag byte marking an `Option` that carries a value.
 const SOME_TAG: u8 = 1;
-/// Tag byte marking an `Option<f64>` that is `None`.
+/// Tag byte marking an `Option` that is `None`.
 const NONE_TAG: u8 = 0;
 
 impl HashrateSample {
@@ -85,6 +91,41 @@ fn decode_f64_or_none<R: Read + ?Sized>(reader: &mut R) -> Result<Option<f64>, e
     }
 }
 
+fn encode_u64_or_none<W: Write + ?Sized>(
+    value: &Option<u64>,
+    writer: &mut W,
+) -> Result<usize, bitcoin::io::Error> {
+    match value {
+        Some(value) => {
+            let tag = SOME_TAG.consensus_encode(writer)?;
+            Ok(tag + value.consensus_encode(writer)?)
+        }
+        None => Ok(NONE_TAG.consensus_encode(writer)?),
+    }
+}
+
+/// Decode one count field: its tag byte, then the value when present. A
+/// clean end of input where the tag would sit means the row was written
+/// before the count fields existed (or by an older binary), so `None` is
+/// the right answer there; anything else is a decode error like
+/// [`decode_f64_or_none`]'s.
+fn decode_count_or_none<R: Read + ?Sized>(reader: &mut R) -> Result<Option<u64>, encode::Error> {
+    let mut tag = [0u8; 1];
+    match reader.read(&mut tag) {
+        Ok(0) => return Ok(None),
+        Ok(_) => {}
+        Err(error) if error.kind() == bitcoin::io::ErrorKind::UnexpectedEof => return Ok(None),
+        Err(error) => return Err(encode::Error::Io(error)),
+    }
+    match tag[0] {
+        SOME_TAG => u64::consensus_decode(reader).map(Some),
+        NONE_TAG => Ok(None),
+        _tag => Err(encode::Error::ParseFailed(
+            "unknown Option<u64> tag in hashrate sample",
+        )),
+    }
+}
+
 impl Encodable for HashrateSample {
     fn consensus_encode<W: Write + ?Sized>(
         &self,
@@ -94,17 +135,26 @@ impl Encodable for HashrateSample {
         length += encode_f64_or_none(&self.pool, writer)?;
         length += encode_f64_or_none(&self.local, writer)?;
         length += encode_f64_or_none(&self.network, writer)?;
+        length += encode_u64_or_none(&self.miners, writer)?;
+        length += encode_u64_or_none(&self.workers, writer)?;
         Ok(length)
     }
 }
 
 impl Decodable for HashrateSample {
+    /// Reads the fields in order and stops when input ends: a row written
+    /// before the count fields existed ends after `network` and decodes
+    /// with `None` counts. Rows are loaded with `encode::deserialize`,
+    /// which refuses unread bytes, so a binary older than the counts skips
+    /// these rows as corrupt.
     fn consensus_decode<R: Read + ?Sized>(reader: &mut R) -> Result<Self, encode::Error> {
         Ok(HashrateSample {
             time: u64::consensus_decode(reader)?,
             pool: decode_f64_or_none(reader)?,
             local: decode_f64_or_none(reader)?,
             network: decode_f64_or_none(reader)?,
+            miners: decode_count_or_none(reader)?,
+            workers: decode_count_or_none(reader)?,
         })
     }
 }
@@ -120,6 +170,8 @@ mod tests {
             pool: Some(1.5),
             local: None,
             network: Some(2.5),
+            miners: Some(3),
+            workers: Some(7),
         }
     }
 
@@ -138,10 +190,29 @@ mod tests {
             pool: None,
             local: None,
             network: None,
+            miners: None,
+            workers: None,
         };
         let decoded =
             encode::deserialize::<HashrateSample>(&serialize(&original)).expect("decodes");
         assert_eq!(decoded, original);
+    }
+
+    #[test]
+    fn a_row_from_before_the_count_fields_decodes_with_none_counts() {
+        // The layout an older binary wrote: time (8), pool tag + value
+        // (9), local tag (1), network tag + value (9), and nothing after.
+        // The counts were not recorded then, so `None` is the faithful
+        // answer rather than a decode error.
+        let mut bytes = serialize(&sample(1_000));
+        bytes.truncate(8 + 9 + 1 + 9);
+        let decoded = encode::deserialize::<HashrateSample>(&bytes).expect("decodes");
+        assert_eq!(decoded.time, 1_000);
+        assert_eq!(decoded.pool, Some(1.5));
+        assert_eq!(decoded.local, None);
+        assert_eq!(decoded.network, Some(2.5));
+        assert_eq!(decoded.miners, None);
+        assert_eq!(decoded.workers, None);
     }
 
     #[test]

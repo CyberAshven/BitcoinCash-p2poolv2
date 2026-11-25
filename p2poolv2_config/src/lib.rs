@@ -7,7 +7,7 @@ mod cashaddr;
 use bitcoin::base58;
 use bitcoin::hashes::Hash;
 use bitcoin::secp256k1::{Keypair, Secp256k1, SecretKey};
-use bitcoin::{Address, Network, PubkeyHash};
+use bitcoin::{Address, Network, PubkeyHash, ScriptBuf};
 use bitcoindrpc::BitcoinRpcConfig;
 use ipnet::IpNet;
 use p2poolv2_wallet::Address as ShareAddress;
@@ -198,6 +198,51 @@ pub fn parse_share_address(address: &str, network: Network) -> Result<ShareAddre
         .map_err(|error| ConfigError {
             message: format!("Invalid share chain address: {error}"),
         })
+}
+
+/// Bytes of the public key hash inside a P2PKH script:
+/// `OP_DUP OP_HASH160 <20> <hash> OP_EQUALVERIFY OP_CHECKSIG`.
+const P2PKH_HASH_START: usize = 3;
+const P2PKH_HASH_END: usize = 23;
+
+/// The share chain address for a payout CashAddr on `network`.
+///
+/// The single source behind every way a miner obtains one: the
+/// `bch-share-address` CLI command and the dashboard's help page. The
+/// payout address is a P2PKH CashAddr from the miner's own wallet, naming
+/// the key that will own shares; only the prefix changes (`bitcoincash:`
+/// to `p2pool:`, `bchtest:` to `tp2pool:`, `bchreg:` to `rp2pool:`) and
+/// with it the checksum, which keeps the two strings from being mistaken
+/// for each other. No private key is read: the wallet that holds the key
+/// spends the share output through the same P2PKH script.
+///
+/// A P2SH CashAddr is rejected: a share is owned by a P2PKH script.
+pub fn payout_to_share_address(
+    cash_address: &str,
+    network: BitcoinCashNetwork,
+) -> Result<String, ConfigError> {
+    let decoded = parse_payout_address(
+        cash_address,
+        Chain::BitcoinCash,
+        network.legacy_network(),
+        Some(network),
+    )?;
+    let script = decoded.script_pubkey();
+    let hash = p2pkh_hash(&script).ok_or(ConfigError {
+        message: "only a P2PKH CashAddr (q... or its token-aware z...) can own shares. Ask the wallet for a regular receiving address.".to_string(),
+    })?;
+    Ok(BchShareAddress::new(network.share_network(), hash).encode())
+}
+
+/// The 20-byte key hash inside a P2PKH script, or none when the script is
+/// not P2PKH.
+fn p2pkh_hash(script: &ScriptBuf) -> Option<[u8; 20]> {
+    if !script.is_p2pkh() {
+        return None;
+    }
+    let mut hash = [0u8; 20];
+    hash.copy_from_slice(&script.as_bytes()[P2PKH_HASH_START..P2PKH_HASH_END]);
+    Some(hash)
 }
 
 /// Max length for pool signature P2Poolv2 + 8 more bytes for users to add
@@ -2079,6 +2124,109 @@ mod tests {
     use p2poolv2_wallet::bch_share::{BchShareAddress, BchShareNetwork};
     use temp_env::{with_var, with_vars};
     use tokio_test::assert_err;
+
+    /// A mainnet P2PKH payout re-encodes under the `p2pool:` prefix with the
+    /// same 20-byte key hash, which the share address parser reads back.
+    #[test]
+    fn a_mainnet_payout_re_encodes_under_the_share_prefix_keeping_its_hash() {
+        let encoded = payout_to_share_address(
+            "bitcoincash:qr6m7j9njldwwzlg9v7v53unlr4jkmx6eylep8ekg2",
+            BitcoinCashNetwork::Mainnet,
+        )
+        .unwrap();
+        assert!(encoded.starts_with("p2pool:q"), "{encoded}");
+        let decoded =
+            bch_share::parse(&encoded, BitcoinCashNetwork::Mainnet.share_network()).unwrap();
+        assert_eq!(
+            decoded.hash,
+            [
+                0xf5, 0xbf, 0x48, 0xb3, 0x97, 0xda, 0xe7, 0x0b, 0xe8, 0x2b, 0x3c, 0xca, 0x47, 0x93,
+                0xf8, 0xeb, 0x2b, 0x6c, 0xda, 0xc9,
+            ]
+        );
+    }
+
+    /// A regtest payout lands under `rp2pool:`, encoding the full expected
+    /// string so the prefix and the checksum are both pinned.
+    #[test]
+    fn a_regtest_payout_re_encodes_under_rp2pool() {
+        let encoded = payout_to_share_address(
+            "bchreg:qrr4pe4ret3zwmj0428rtksq83ql80w6myqjlk828q",
+            BitcoinCashNetwork::Regtest,
+        )
+        .unwrap();
+        assert_eq!(
+            encoded,
+            "rp2pool:qrr4pe4ret3zwmj0428rtksq83ql80w6my7w2wp75h"
+        );
+    }
+
+    /// A chipnet payout is the help page's common case: the same key lands
+    /// under `tp2pool:`, ready for a miner's `p2p=` value.
+    #[test]
+    fn a_chipnet_payout_re_encodes_under_tp2pool() {
+        let encoded = payout_to_share_address(
+            "bchtest:qr7fzmep8g7h7ymfxy74lgc0v950j3r295pdnvy3hr",
+            BitcoinCashNetwork::Chipnet,
+        )
+        .unwrap();
+        assert!(encoded.starts_with("tp2pool:q"), "{encoded}");
+    }
+
+    /// A token-aware CashAddr names the same key as its plain form, so both
+    /// give the same share address (CashTokens test vectors).
+    #[test]
+    fn a_token_aware_payout_re_encodes_to_the_same_share_address_as_its_plain_form() {
+        let token_aware = payout_to_share_address(
+            "bchtest:zr7fzmep8g7h7ymfxy74lgc0v950j3r295x8qj2hgs",
+            BitcoinCashNetwork::Chipnet,
+        )
+        .unwrap();
+        let plain = payout_to_share_address(
+            "bchtest:qr7fzmep8g7h7ymfxy74lgc0v950j3r295pdnvy3hr",
+            BitcoinCashNetwork::Chipnet,
+        )
+        .unwrap();
+        assert_eq!(token_aware, plain);
+    }
+
+    /// A share is owned by a P2PKH script, so a P2SH payout cannot stand in
+    /// for one and the refusal names P2PKH.
+    #[test]
+    fn a_p2sh_payout_is_rejected() {
+        let error = payout_to_share_address(
+            "bchtest:pr6m7j9njldwwzlg9v7v53unlr4jkmx6eyvwc0uz5t",
+            BitcoinCashNetwork::Chipnet,
+        )
+        .unwrap_err();
+        assert!(error.message.contains("P2PKH"), "{}", error.message);
+    }
+
+    /// The payout prefix must match the network the share prefix is picked
+    /// from, so a mainnet payout cannot be re-encoded for chipnet.
+    #[test]
+    fn a_payout_of_another_network_is_rejected() {
+        assert!(
+            payout_to_share_address(
+                "bitcoincash:qr6m7j9njldwwzlg9v7v53unlr4jkmx6eylep8ekg2",
+                BitcoinCashNetwork::Chipnet,
+            )
+            .is_err()
+        );
+    }
+
+    /// Garbage in the input field comes back as a readable parse error, not
+    /// a panic: the help page's endpoint shows it verbatim to the user.
+    #[test]
+    fn an_unparseable_payout_is_reported_as_a_config_error() {
+        let error =
+            payout_to_share_address("not-an-address", BitcoinCashNetwork::Chipnet).unwrap_err();
+        assert!(
+            error.message.contains("Invalid Bitcoin Cash"),
+            "{}",
+            error.message
+        );
+    }
 
     /// The node key sits beside the store unless `node_key_path` names a
     /// file, and an ephemeral node keeps none.

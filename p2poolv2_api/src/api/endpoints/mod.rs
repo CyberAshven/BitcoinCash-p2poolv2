@@ -13,6 +13,7 @@ pub mod miners;
 pub mod network;
 pub mod payout_trees;
 pub mod share;
+pub mod share_address;
 pub mod share_headers;
 pub mod share_transaction;
 pub mod sharechain;
