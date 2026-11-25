@@ -1756,10 +1756,11 @@ mod tests {
         assert!(node.dns_seeds.is_none());
     }
 
-    /// A Bitcoin Cash node gets no DNS seeds even with `dns_seed` on and a
-    /// network that has Bitcoin seeds: those seeds are Bitcoin nodes.
+    /// A Bitcoin Cash node with `dns_seed` on gets its own network's seeds,
+    /// never Bitcoin's, even on a `stratum.network` that has Bitcoin seeds:
+    /// those seeds are Bitcoin nodes.
     #[tokio::test]
-    async fn test_dns_seeds_disabled_on_bitcoin_cash() {
+    async fn test_a_bitcoin_cash_node_gets_its_own_seeds_not_bitcoins() {
         let mut config = build_test_config("", None);
         config.stratum.chain = Chain::BitcoinCash;
         config.stratum.bitcoin_cash_network = Some(BitcoinCashNetwork::Chipnet);
@@ -1767,7 +1768,14 @@ mod tests {
         config.network.dns_seed = true;
         let node = build_test_node(config);
 
-        assert!(node.dns_seeds.is_none());
+        assert_eq!(
+            node.dns_seeds,
+            super::dns_seeds::dns_seeds_for_bitcoin_cash(BitcoinCashNetwork::Chipnet)
+        );
+        assert_ne!(
+            node.dns_seeds,
+            super::dns_seeds::dns_seeds_for_network(bitcoin::Network::Testnet4)
+        );
     }
 
     /// A node that does not listen still dials its configured peers.
