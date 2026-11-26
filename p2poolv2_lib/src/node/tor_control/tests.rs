@@ -192,6 +192,42 @@ async fn a_node_authenticates_with_tors_cookie() {
     assert!(expected_client_hash.lock().unwrap().is_some());
 }
 
+/// A control port that does not know the cookie, so not Tor, sends a server
+/// hash that does not match it. The node stops there and sends no client
+/// hash, which would prove it read the cookie.
+#[tokio::test]
+async fn a_server_hash_that_does_not_match_the_cookie_is_refused() {
+    let dir = tempdir().unwrap();
+    let cookie_path = dir.path().join("control_auth_cookie");
+    std::fs::write(&cookie_path, [0x5au8; COOKIE_BYTES]).unwrap();
+    let answers = tor_answers("COOKIE,SAFECOOKIE", Some(cookie_path.display().to_string()));
+    let tor = FakeTor::start(move |command| {
+        if command.starts_with("AUTHCHALLENGE SAFECOOKIE ") {
+            format!(
+                "250 AUTHCHALLENGE SERVERHASH={} SERVERNONCE={}\r\n",
+                hex::encode([0u8; 32]),
+                hex::encode([0x17u8; NONCE_BYTES])
+            )
+        } else {
+            answers(command)
+        }
+    })
+    .await;
+
+    match open(&service(&tor.address, None)).await {
+        Err(Failure::Refused(error)) => assert!(error.contains("SERVERHASH"), "{error}"),
+        Err(other) => panic!("expected a refusal, got {other:?}"),
+        Ok(_) => panic!("the node logged in to a control port that does not know the cookie"),
+    }
+    assert!(
+        !tor.commands()
+            .iter()
+            .any(|command| command.starts_with("AUTHENTICATE")),
+        "{:?}",
+        tor.commands()
+    );
+}
+
 /// The first service's key is saved, readable by its owner only, and sent
 /// again on the next start, so the onion address stays; a node with an
 /// ephemeral key has Tor discard the key and saves none.
