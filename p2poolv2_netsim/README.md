@@ -18,7 +18,7 @@ cargo netsim run
 # The same with merge-mined tokens and a million miners
 cargo netsim run --tokens --miners 1000000
 
-# A sweep as a Markdown table, or every sweep
+# A sweep as a Markdown table, or the nine main sweeps
 cargo netsim sweep payees
 cargo netsim sweep all
 
@@ -27,6 +27,9 @@ cargo netsim sweep all
 # 1,000 nodes stay within today's stale rate at 10-second shares
 cargo netsim sweep scaling --threads 10
 cargo netsim interval-limit scaling --nodes 1000 --threads 10
+
+# The limits study: each of upstream's objections
+cargo netsim sweep limits
 
 # The payee counts at which a coinbase meets each limit
 cargo netsim limits
@@ -39,10 +42,13 @@ cargo netsim limits
 hashrate is spread, payees, the pool's share of BCH, share interval, block
 size, payout rule and tokens, bandwidth and latency distributions
 (`50`, `uniform:10:100`, `lognormal:50:0.8`), validation and work-switch
-delays, Stratum protocol, duration and seed, and the studied changes that
-are not built: weak shares (`--weak-shares`, `--weak-share-carriage`),
-forwarding after the header check (`--forward after-header-check`) and the
-uncle cap (`--max-uncles`). A run is a pure function of its inputs and seed.
+delays, Stratum protocol, duration and seed, and the studied changes: weak
+shares (`--weak-shares`, `--weak-share-carriage`), forwarding after the
+header check (`--forward after-header-check`) and the uncle cap
+(`--max-uncles`). The node now has weak shares and forwards after the
+header check; the model's versions of those are estimates. A larger uncle
+cap than the node's three (`MAX_UNCLES`) is not built. A run is a pure
+function of its inputs and seed.
 
 ## Credit and licence
 
