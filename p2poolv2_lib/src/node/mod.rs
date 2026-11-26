@@ -64,7 +64,7 @@ use libp2p::tcp::tokio::{TcpStream, Transport as TcpTransport};
 use libp2p::{
     Multiaddr, Swarm,
     kad::{Event as KademliaEvent, QueryResult},
-    swarm::{DialError, SwarmEvent, dial_opts::DialOpts},
+    swarm::{DialError, ListenError, SwarmEvent, dial_opts::DialOpts},
 };
 use std::collections::HashSet;
 use std::error::Error;
@@ -549,6 +549,7 @@ impl Node {
             connections_closed_unresponsive_total: self
                 .connection_tracker
                 .connections_closed_unresponsive_total(),
+            connections_refused_total: self.connection_tracker.connections_refused_total(),
             outbound_failures_total: self.request_response_handler.outbound_failures_total(),
             inbound_failures_total: self.request_response_handler.inbound_failures_total(),
             responses_dropped_total: self.request_response_handler.responses_dropped_total(),
@@ -866,6 +867,30 @@ impl Node {
                 {
                     debug!("Removing unreachable peer {peer_id} from the routing table");
                     self.swarm.behaviour_mut().remove_peer(&peer_id);
+                }
+                if matches!(error, DialError::Denied { .. }) {
+                    self.connection_tracker.record_refused_connection();
+                }
+                Ok(())
+            }
+            // Counted so `/metrics` shows the connection limits at work; a
+            // refusal is not logged above debug, since a peer can repeat it.
+            SwarmEvent::IncomingConnectionError {
+                connection_id,
+                send_back_addr,
+                error,
+                peer_id,
+                ..
+            } => {
+                if matches!(error, ListenError::Denied { .. }) {
+                    self.connection_tracker.record_refused_connection();
+                    debug!(
+                        "Refused incoming connection {connection_id} from {peer_id:?} at {send_back_addr}: {error}"
+                    );
+                } else {
+                    debug!(
+                        "Incoming connection {connection_id} from {send_back_addr} failed: {error}"
+                    );
                 }
                 Ok(())
             }
@@ -2064,6 +2089,43 @@ mod tests {
         let health = node.p2p_health();
         assert_eq!(health.ping_failures_total, 3);
         assert_eq!(health.connections_closed_unresponsive_total, 1);
+    }
+
+    /// Connections the limits refuse, incoming and outgoing, show on
+    /// `/metrics`; other connection errors do not count as refusals.
+    #[tokio::test]
+    async fn refused_connections_are_counted() {
+        use libp2p::swarm::{ConnectionDenied, ListenError};
+
+        let mut node = build_test_node(build_test_config("/ip4/127.0.0.1/tcp/0", None));
+        let address: Multiaddr = "/ip4/11.6.0.1/tcp/7005".parse().unwrap();
+        let incoming = |id, error| SwarmEvent::IncomingConnectionError {
+            connection_id: ConnectionId::new_unchecked(id),
+            local_addr: address.clone(),
+            send_back_addr: address.clone(),
+            error,
+            peer_id: Some(PeerId::random()),
+        };
+
+        node.handle_swarm_event(incoming(
+            1,
+            ListenError::Denied {
+                cause: ConnectionDenied::new(io::Error::other("max_established_per_peer")),
+            },
+        ))
+        .unwrap();
+        node.handle_swarm_event(incoming(2, ListenError::Aborted))
+            .unwrap();
+        node.handle_swarm_event(SwarmEvent::OutgoingConnectionError {
+            connection_id: ConnectionId::new_unchecked(3),
+            peer_id: Some(PeerId::random()),
+            error: DialError::Denied {
+                cause: ConnectionDenied::new(io::Error::other("max_established_outgoing")),
+            },
+        })
+        .unwrap();
+
+        assert_eq!(node.p2p_health().connections_refused_total, 2);
     }
 
     #[tokio::test]

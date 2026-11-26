@@ -97,6 +97,9 @@ format and genesis re-pin.
 
 ### Added
 
+- `/metrics` counts the connections the connection limits refused,
+  incoming and outgoing (`p2p_connections_refused_total`); the node had
+  ignored refused incoming connections.
 - Bitcoin Cash DNS seeds: a node takes the seeds of its
   `bitcoin_cash_network` (chipnet has one seed node,
   `p2poolv2-chipnet.realbitcoin.cash:6886`; mainnet none yet), and
@@ -381,6 +384,14 @@ format and genesis re-pin.
 
 ### Fixed
 
+- A Bitcoin Cash window no longer pays from a paying chain cut short by a
+  header the node lacks. The walk from the paying block's prev stopped at
+  the first unknown header and paid only the shares above it, so a node
+  missing a header in the middle built or checked a different coinbase than
+  a node with every header, and called the other's share invalid. On
+  chipnet a node restarted while its BCH node caught up refused its peer's
+  next share and fell 1,000 shares behind. The window now waits for the
+  header, as it does for an unknown share prev.
 - Requests to a peer no longer vanish after the connection limits refuse a
   connection to it. Request-response recorded the refused connection and
   routed some requests there, which got no answer, timeout or failure; the

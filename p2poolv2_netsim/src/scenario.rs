@@ -8,9 +8,10 @@
 //! home and data-centre links, a thousand miners, a pool with 1% of BCH's
 //! hashrate, 3.2 MB one-minute blocks (mainnet's ABLA floor), 10-second
 //! shares, the hybrid payout rule for a share without merge-mined tokens,
-//! whole shares on the wire as today, and a day of mining (8,640 shares).
-//! Shares are forwarded after validation, name at most three uncles and
-//! travel without weak shares, as today.
+//! whole shares on the wire, and a day of mining (8,640 shares). Shares are
+//! forwarded after validation, name at most three uncles and travel without
+//! weak shares: the design the scaling study started from, before the node
+//! built weak shares and forwarding after the header check.
 
 use crate::constants::{
     BCH_BLOCK_INTERVAL_SECONDS, BCH_MAINNET_ABLA_FLOOR_BYTES, BCHN_OUTBOUND_PEERS,
@@ -199,12 +200,12 @@ impl WeakShareCarriage {
 /// How a share travels between nodes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum ShareRelay {
-    /// The whole `ShareBlock`, coinbase included, as nodes send it today.
+    /// The whole `ShareBlock`, coinbase included.
     Full,
     /// Without the payout outputs, which every peer rebuilds from its own
     /// window to validate the share anyway: the compact share the hybrid
-    /// payout design suggests (`bch-hybrid-payouts.md`, section 8.1).
-    /// Not built; its size here is an estimate.
+    /// payout design suggests (`bch-hybrid-payouts.md`, section 8.1). The
+    /// node relays shares so since #131; its size here is an estimate.
     WithoutPayouts,
 }
 

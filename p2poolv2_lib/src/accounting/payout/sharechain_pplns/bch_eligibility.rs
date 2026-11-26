@@ -35,19 +35,23 @@ pub(super) struct BchPlace {
 pub(super) struct PayingChain {
     /// Height of the paying block's BCH prev, `hashes[0]`.
     top_height: u32,
-    /// The lowest height the walk was asked to reach. The chain stops above
-    /// it only at a block whose parent is not known.
+    /// The lowest height the walk was asked to reach.
     walked_to: u32,
     /// One block per height, from the top down.
     hashes: Vec<BlockHash>,
+    /// A block above `walked_to` whose place is not known, where the walk
+    /// had to stop short.
+    missing: Option<BlockHash>,
 }
 
 impl PayingChain {
     /// Walk down from `top`, the paying block's BCH prev at `top_place`, to
     /// `low_height`. `place` gives a known block's place, or `None` for a
-    /// block not known: the walk then ends at that block, which a known
-    /// child names, so the chain still holds its hash. The walk also ends at
-    /// the chain's first block.
+    /// block not known. A block not known at `low_height` ends the walk
+    /// there: its known child names it, so the chain still holds its hash.
+    /// One above `low_height` leaves the chain short of the heights the
+    /// window needs, and is reported by [`Self::missing`]. The walk also
+    /// ends at the chain's first block.
     pub(super) fn walk<E>(
         top: BlockHash,
         top_place: BchPlace,
@@ -56,18 +60,34 @@ impl PayingChain {
     ) -> Result<Self, E> {
         let mut hashes = vec![top];
         let mut current = top_place;
+        let mut missing = None;
         while current.height > low_height && current.height > 0 {
             hashes.push(current.parent);
             match place(&current.parent)? {
                 Some(parent) => current = parent,
-                None => break,
+                None => {
+                    if current.height - 1 > low_height {
+                        missing = Some(current.parent);
+                    }
+                    break;
+                }
             }
         }
         Ok(Self {
             top_height: top_place.height,
             walked_to: low_height,
             hashes,
+            missing,
         })
+    }
+
+    /// The block not known that stopped the walk above the height it was
+    /// asked to reach, or `None` when the chain reaches that height. Which
+    /// window shares a short chain pays depends on the headers this node
+    /// happens to have, so such a chain must not decide a payout: the
+    /// window waits for the header.
+    pub(super) fn missing(&self) -> Option<&BlockHash> {
+        self.missing.as_ref()
     }
 
     /// Whether this chain, walked down to `low_height` or lower, is the one
@@ -161,18 +181,32 @@ mod tests {
         assert!(!chain.serves(&hash(3), 2));
     }
 
-    /// A chain whose oldest known block's parent is unknown still names that
-    /// parent, as its known child does, and ends there.
+    /// A block not known at the lowest height asked for still ends a
+    /// complete chain: its known child names it.
     #[test]
-    fn the_walk_ends_at_the_oldest_known_block() {
+    fn a_block_not_known_at_the_lowest_height_ends_a_complete_chain() {
+        let mut tree = tree();
+        tree.remove(&hash(2));
+        let chain = walk(&tree, 4, 1);
+
+        assert_eq!(chain.hashes(), [hash(4), hash(3), hash(2)]);
+        assert_eq!(chain.missing(), None);
+        assert!(chain.serves(&hash(4), 1));
+        assert!(chain.pays(&hash(3), &tree[&hash(3)]));
+        assert!(chain.pays(&hash(12), &tree[&hash(12)]));
+    }
+
+    /// A block not known above the lowest height asked for leaves the chain
+    /// short, though blocks below it are known: the walk reports it instead
+    /// of deciding with what it reached.
+    #[test]
+    fn a_block_not_known_above_the_lowest_height_is_reported() {
         let mut tree = tree();
         tree.remove(&hash(2));
         let chain = walk(&tree, 4, 0);
 
         assert_eq!(chain.hashes(), [hash(4), hash(3), hash(2)]);
-        assert!(chain.serves(&hash(4), 0));
-        assert!(chain.pays(&hash(3), &tree[&hash(3)]));
-        assert!(chain.pays(&hash(12), &tree[&hash(12)]));
+        assert_eq!(chain.missing(), Some(&hash(2)));
     }
 
     #[test]
