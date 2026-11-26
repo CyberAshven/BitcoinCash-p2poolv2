@@ -321,7 +321,8 @@ fn toml_basic_string(value: &str) -> String {
 /// the nodes would all read one key and refuse to dial each other as
 /// themselves. A node with a new identity also keeps no peer list there.
 /// Nostr stays off (`nostr_relays = []`): a regtest swarm finds its peers in
-/// `dial_peers`.
+/// `dial_peers`. So does Tor's control port (`listen_onion = false`): on a
+/// machine running Tor, every node would make itself an onion service.
 pub fn node_config(settings: &SwarmSettings, node: &NodeIdentity<'_>) -> String {
     let index = node.index;
     let p2p_port = settings.base_p2p + index as u32;
@@ -339,6 +340,7 @@ listen_address = "/ip4/127.0.0.1/tcp/{p2p_port}"
 dial_peers = [{dial}]
 ephemeral_node_key = true
 nostr_relays = []
+listen_onion = false
 max_pending_incoming = 10
 max_pending_outgoing = 10
 max_established_incoming = 50

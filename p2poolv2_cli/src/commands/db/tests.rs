@@ -320,3 +320,18 @@ async fn test_cleanup_dense_heights_invalidates_uncle_of_dead_sibling() {
         .count();
     assert_eq!(live_h1, 0, "all h1 flood siblings should be invalidated");
 }
+
+/// `db version` opens a store as it is and reads it, and a path that holds
+/// no store is an error rather than a new, empty store.
+#[test]
+fn test_version_reads_a_store_and_creates_none() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let path = temp_dir.path().join("store");
+    let path = path.to_str().unwrap();
+
+    assert!(execute(&DbCommands::Version, path).is_err());
+    assert!(!std::path::Path::new(path).exists());
+
+    drop(Store::new(path.to_string(), false).unwrap());
+    execute(&DbCommands::Version, path).unwrap();
+}

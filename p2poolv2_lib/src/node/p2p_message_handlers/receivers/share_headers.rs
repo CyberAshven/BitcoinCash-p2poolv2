@@ -419,7 +419,7 @@ fn validate_dag_connectivity_and_difficulty(
         HashMap::with_capacity(share_headers.len() + MTP_WINDOW);
 
     for (position, header) in share_headers.iter().enumerate() {
-        share_validator.validate_header_minimum_difficulty(header)?;
+        share_validator.validate_header_on_arrival(header)?;
         share_validator.validate_coinbase_proof(header, header_batch.branch(position))?;
 
         let parent_hash = header.prev_share_blockhash;
