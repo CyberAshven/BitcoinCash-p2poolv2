@@ -97,8 +97,9 @@ the chain from 9.69% to 12.37%.
 
 ## Finding peers
 
-Bitcoin Cash has no P2Poolv2 DNS seeds. A new node finds its first peers in
-`[network] dial_peers` or through Nostr. A `dial_peers` entry is an IP
+A new node finds its first peers in `[network] dial_peers`, through Nostr,
+from DNS seeds once its network has some, and after a restart from the peers
+it saved. A `dial_peers` entry is an IP
 address (`/ip4/`, `/ip6/`) or host name (`/dns4/`, `/dns6/`, `/dns/`), port
 6884 by default ([Requirements](requirements.md#ports)). A host name is
 resolved through the system's DNS on every dial, reconnects included. Only
@@ -130,6 +131,33 @@ To be reachable as an onion service today, point a torrc
 `external_address` to the service's `/onion3/<address>:6884`. Creating the
 service through Tor's control port, onion-only mode and onion announcements
 on Nostr come next.
+
+### DNS seeds
+
+A seed is a host name whose A and AAAA records list long-running nodes. The
+node asks the seeds once: at start without `dial_peers`, or 10 seconds in
+when no `dial_peers` entry connected. It dials at most 16 addresses from any
+one seed, so no seed operator can fill a node's connections.
+
+- **Which seeds:** a Bitcoin Cash node takes the seeds of its
+  `bitcoin_cash_network` (`node/dns_seeds.rs`), never Bitcoin's. Chipnet's
+  list has one seed node, `p2poolv2-chipnet.realbitcoin.cash:6886`; mainnet's
+  is empty until operators run seeds; regtest and scalenet have none.
+  `[network] dns_seed_hosts` replaces the built-in list, so a new seed works
+  before a release names it. `dns_seed = false` skips seeds.
+- **Running a seed:** point a host name's A/AAAA records at long-running
+  nodes of one network that listen on port 6884. No crawler is needed; keep
+  the records to nodes that stay up. Each seed should have its own operator,
+  so one person's mistake or outage leaves the others. A seed whose nodes
+  listen on another port is written `host:port`, in the built-in lists and
+  in `dns_seed_hosts`.
+- **Names outside DNS:** the node resolves seeds through the system resolver.
+  A `.fn` name from [Freedom Names](https://github.com/FreedomNames/FreedomNames)
+  works when the system resolver asks a Freedom Names node, as its README
+  describes; the node itself needs no change for that.
+- **Yggdrasil:** a node's Yggdrasil address (`200::/7`) counts as routable,
+  so it can be the node's `external_address`, a seed's AAAA record or a
+  `dial_peers` entry. Only nodes on Yggdrasil can reach it.
 
 ### Finding peers through Nostr
 

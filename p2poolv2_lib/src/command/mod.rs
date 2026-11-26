@@ -36,6 +36,9 @@ pub enum Command {
     ),
     /// Command to get a list of connected peers
     GetPeers(oneshot::Sender<Vec<libp2p::PeerId>>),
+    /// The connected peers share-chain traffic goes to: each sent a handshake
+    /// and is not reached only through this node's Kademlia lookup
+    GetShareChainPeers(oneshot::Sender<Vec<libp2p::PeerId>>),
     /// Command to shutdown node
     Shutdown(oneshot::Sender<()>),
     /// Get PPLNS shares from the node with optional filtering
