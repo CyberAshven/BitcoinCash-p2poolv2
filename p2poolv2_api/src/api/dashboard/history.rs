@@ -4,12 +4,14 @@
 
 //! Hashrate history the node keeps for its dashboard.
 //!
-//! A sampler task records the pool's, this node's and the network's hashrate
-//! once a minute into a bounded ring, and queues the same sample to the
+//! A sampler task records the pool's, this node's and the network's
+//! hashrate, and this node's online miner and worker counts, once a
+//! minute into a bounded ring, and queues the same sample to the
 //! store's `HashrateSamples` column family so a restart reloads the
 //! history instead of starting empty. The ring is bounded to the store's
 //! 30-day retention, so the in-memory history cannot grow without limit.
 
+use super::online_counts_from_metrics;
 use crate::api::server::AppState;
 use bitcoin::{CompactTarget, Target};
 use p2poolv2_lib::store::dag_store::ShareInfo;
@@ -46,8 +48,9 @@ const BLOCK_INTERVAL_SECONDS: f64 = 600.0;
 /// Hashes a difficulty-1 share takes on average.
 const HASHES_PER_DIFFICULTY: f64 = 4_294_967_296.0;
 
-/// One sample of the hashrates the dashboard charts, in hashes per second.
-/// `None` where the value could not be known at that time.
+/// One sample of the hashrates the dashboard charts, plus the node's
+/// online miner and worker counts, at one minute. `None` where the value
+/// could not be known at that time.
 ///
 /// The same shape the store persists (`p2poolv2_lib`'s `HashrateSample`),
 /// re-exported so the API never field-renames on the write-through path.
@@ -248,13 +251,13 @@ async fn tick(state: &Arc<AppState>, history: &Arc<HashrateHistory>) {
         .tracker_handle
         .get_network_difficulty()
         .map(|difficulty| network_hashrate(difficulty, interval));
-    // This node's hashrate from the metrics actor's sliding window of
-    // accepted submissions: an async channel read, before the store read.
-    let local = state
-        .metrics_handle
-        .get_metrics()
-        .await
-        .local_submission_hashrate(time);
+    // This node's hashrate and its online miner/worker counts from one
+    // metrics actor round-trip, before the store read: the counts are the
+    // dashboard's own definition applied to the snapshot (see
+    // `online_counts_from_metrics`).
+    let metrics = state.metrics_handle.get_metrics().await;
+    let local = metrics.local_submission_hashrate(time);
+    let (miners_online, workers_online) = online_counts_from_metrics(&metrics);
 
     // The store is read synchronously; keep that off the async workers.
     let blocking_state = Arc::clone(state);
@@ -280,6 +283,8 @@ async fn tick(state: &Arc<AppState>, history: &Arc<HashrateHistory>) {
         pool: normalize_rate(pool),
         local: normalize_rate(local),
         network,
+        miners: u64::try_from(miners_online).ok(),
+        workers: u64::try_from(workers_online).ok(),
     };
     history.push_sample(sample);
     // Queue the same sample to the store, off the hot path: the channel is
@@ -500,6 +505,8 @@ mod tests {
             pool: Some(5.0),
             local: Some(-0.0),
             network: None,
+            miners: Some(1),
+            workers: Some(2),
         }]);
         let sample = history.samples().remove(0);
         assert!(!sample.local.expect("value").is_sign_negative());
@@ -530,6 +537,8 @@ mod tests {
                 pool: None,
                 local: None,
                 network: None,
+                miners: None,
+                workers: None,
             });
         }
         let samples = history.samples();
@@ -546,6 +555,8 @@ mod tests {
                 pool: None,
                 local: None,
                 network: None,
+                miners: None,
+                workers: None,
             })
             .collect();
         history.load(loaded);

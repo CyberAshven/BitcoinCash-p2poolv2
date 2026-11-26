@@ -696,6 +696,8 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
         bch_share_network,
         stratum_config.pool_signature,
         api_pplns_window,
+        stratum_config.port,
+        stratum_config.sv2_port,
     )
     .await
     {

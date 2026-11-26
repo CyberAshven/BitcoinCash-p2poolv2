@@ -1,9 +1,12 @@
+use super::history::Sample;
 use super::*;
 use crate::api::server::{AppConfig, WebOptions, build_router_with_history};
 use axum::body::Body;
 use axum::http::{HeaderMap, Request, header};
 use p2poolv2_lib::accounting::payout::simple_pplns::SimplePplnsShare;
 use p2poolv2_lib::accounting::stats::metrics;
+use p2poolv2_lib::accounting::stats::user::User;
+use p2poolv2_lib::accounting::stats::worker::Worker;
 use p2poolv2_lib::monitoring_events::create_monitoring_event_channel;
 use p2poolv2_lib::node::actor::NodeHandle;
 use p2poolv2_lib::stratum::work::tracker::start_tracker_actor;
@@ -47,6 +50,8 @@ async fn build_state(
         monitoring_event_sender: create_monitoring_event_channel(),
         auth_user,
         auth_token,
+        stratum_port: 3333,
+        sv2_port: Some(3336),
         pplns_window: None,
     });
     (state, store_dir, metrics_dir)
@@ -88,6 +93,22 @@ fn recent_share_row_heights(body: &str) -> Vec<u32> {
         .collect()
 }
 
+/// For each row of the Shares table, whether it renders as an uncle, in
+/// the same order as `recent_share_row_heights`.
+fn recent_share_row_is_uncle(body: &str) -> Vec<bool> {
+    let table = body
+        .split_once("<h2>Shares")
+        .and_then(|(_, rest)| rest.split_once("</table>"))
+        .map(|(table, _)| table)
+        .expect("overview has a Shares table");
+    table
+        .split("<tr")
+        .skip(1)
+        .filter(|row| row.contains("<td"))
+        .map(|row| row.contains("class=\"uncle-row\""))
+        .collect()
+}
+
 async fn get_with(
     state: &Arc<AppState>,
     uri: &str,
@@ -102,12 +123,26 @@ async fn get_with_headers(
     web: WebOptions,
     headers: &[(&str, &str)],
 ) -> (StatusCode, String, HeaderMap) {
-    let app = build_router_with_history(
-        Arc::clone(state),
-        state.app_config.clone(),
-        Arc::new(HashrateHistory::default()),
+    get_with_history(
+        state,
+        uri,
         web,
-    );
+        Arc::new(HashrateHistory::default()),
+        headers,
+    )
+    .await
+}
+
+/// `get_with_headers` over `history` instead of an empty ring, so a test
+/// can seed the samples the overview's KPI fallbacks read.
+async fn get_with_history(
+    state: &Arc<AppState>,
+    uri: &str,
+    web: WebOptions,
+    history: Arc<HashrateHistory>,
+    headers: &[(&str, &str)],
+) -> (StatusCode, String, HeaderMap) {
+    let app = build_router_with_history(Arc::clone(state), state.app_config.clone(), history, web);
     let mut builder = Request::builder().uri(uri);
     for (name, value) in headers {
         builder = builder.header(*name, *value);
@@ -476,6 +511,26 @@ async fn every_page_has_the_menu_and_no_script() {
 }
 
 #[tokio::test]
+async fn the_help_page_builds_the_stratum_url_from_the_hosts_header() {
+    let (state, _store, _metrics) = build_state(None, Some(BchShareNetwork::Chipnet)).await;
+    let (status, body, _) = get_with_headers(
+        &state,
+        "/dashboard/help",
+        WebOptions::default(),
+        &[("host", "pool.example.org")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("stratum+tcp://pool.example.org:3333"));
+    assert!(body.contains("Host: <code>pool.example.org:3336</code>"));
+    // Without a Host header the page keeps its placeholder.
+    let (status, body, _) =
+        get_with_headers(&state, "/dashboard/help", WebOptions::default(), &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("stratum+tcp://&lt;this node&gt;:3333"));
+}
+
+#[tokio::test]
 async fn the_assets_are_served_from_the_binary() {
     let (state, _store, _metrics) = build_state(None, None).await;
     let (status, body, headers) = get(&state, "/dashboard/assets/dashboard.css").await;
@@ -558,7 +613,7 @@ async fn the_network_is_named_as_the_header_names_it() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
         body,
-        r#"{"network":"Bitcoin Cash chipnet","badge":"chipnet","auth":false}"#
+        r#"{"network":"Bitcoin Cash chipnet","badge":"chipnet","auth":false,"stratum_port":3333,"sv2_port":3336}"#
     );
 }
 
@@ -691,6 +746,57 @@ fn online_counts_count_active_workers() {
 }
 
 #[test]
+fn online_counts_from_metrics_counts_the_same_way_as_online_counts() {
+    // One miner with two workers, one of them active, and one miner whose
+    // only worker is idle: the metrics-side counts must read (1, 1) as
+    // the row-based counts do.
+    let active_worker = Worker {
+        active: true,
+        ..Worker::default()
+    };
+    let idle_worker = Worker {
+        active: false,
+        ..Worker::default()
+    };
+    let mut busy_user = User::default();
+    busy_user.workers.insert("rig-a".to_string(), active_worker);
+    busy_user.workers.insert("rig-b".to_string(), idle_worker);
+    let mut quiet_user = User::default();
+    quiet_user
+        .workers
+        .insert("rig-c".to_string(), Worker::default());
+    let mut metrics = metrics::PoolMetrics::default();
+    metrics.users.insert("miner1".to_string(), busy_user);
+    metrics.users.insert("miner2".to_string(), quiet_user);
+
+    // The same two miners as rows: the first with an active and an idle
+    // worker, the second with only an idle one.
+    let miner = |active: &[bool]| MinerRow {
+        address: "bchtest:q".to_string(),
+        workers: active
+            .iter()
+            .enumerate()
+            .map(|(index, active)| WorkerRow {
+                name: format!("rig-{index}"),
+                active: *active,
+                accepted_work: 1,
+                best_share: 1,
+                last_share_at: 1,
+                hashrate: None,
+            })
+            .collect(),
+        accepted_work: 1,
+        best_share: 1,
+        last_share_at: 1,
+        payout_fraction: None,
+        hashrate: None,
+    };
+    let rows = [miner(&[true, false]), miner(&[false])];
+    assert_eq!(online_counts(&rows), (1, 1));
+    assert_eq!(online_counts_from_metrics(&metrics), online_counts(&rows));
+}
+
+#[test]
 fn a_looked_up_miner_matches_either_spelling() {
     let miner = MinerRow {
         address: "qpayout".to_string(),
@@ -728,6 +834,95 @@ async fn the_overview_recent_shares_stop_at_five_heights() {
 }
 
 #[tokio::test]
+async fn the_overview_recent_shares_hold_five_rows_when_a_share_carries_an_uncle() {
+    let (state, _store, _metrics) = build_state(None, None).await;
+    let genesis_block = genesis_for_tests();
+    state
+        .chain_store_handle
+        .init_or_setup_genesis(genesis_block.clone())
+        .await
+        .unwrap();
+    let share1 = TestShareBlockBuilder::new()
+        .prev_share_blockhash(genesis_block.block_hash().to_string())
+        .build();
+    confirm_share(&state, &share1).await;
+    let share2 = TestShareBlockBuilder::new()
+        .prev_share_blockhash(share1.block_hash().to_string())
+        .build();
+    confirm_share(&state, &share2).await;
+    let share3 = TestShareBlockBuilder::new()
+        .prev_share_blockhash(share2.block_hash().to_string())
+        .build();
+    confirm_share(&state, &share3).await;
+    // An off-chain sibling of share3: share4 names it as an uncle, the
+    // shape a race between two miners leaves behind. Its nonce differs so
+    // it does not hash to the same block as share3, its sibling.
+    let uncle = TestShareBlockBuilder::new()
+        .prev_share_blockhash(share2.block_hash().to_string())
+        .nonce(0xe9695799)
+        .build();
+    confirm_share(&state, &uncle).await;
+    let share4 = TestShareBlockBuilder::new()
+        .prev_share_blockhash(share3.block_hash().to_string())
+        .uncles(vec![uncle.block_hash()])
+        .build();
+    confirm_share(&state, &share4).await;
+    let share5 = TestShareBlockBuilder::new()
+        .prev_share_blockhash(share4.block_hash().to_string())
+        .build();
+    confirm_share(&state, &share5).await;
+    let share6 = TestShareBlockBuilder::new()
+        .prev_share_blockhash(share5.block_hash().to_string())
+        .build();
+    confirm_share(&state, &share6).await;
+    let share7 = TestShareBlockBuilder::new()
+        .prev_share_blockhash(share6.block_hash().to_string())
+        .build();
+    confirm_share(&state, &share7).await;
+
+    let (status, body, _) = get(&state, "/dashboard").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        recent_share_row_heights(&body),
+        vec![7, 6, 5, 4, 3],
+        "the overview holds five rows, dropping share3's row to keep the uncle under share4"
+    );
+    assert_eq!(
+        recent_share_row_is_uncle(&body),
+        vec![false, false, false, false, true],
+        "the kept fifth row is the uncle, directly under the share that includes it"
+    );
+    assert_eq!(
+        body.matches("class=\"uncle-row\"").count(),
+        1,
+        "the overview renders the uncle once"
+    );
+
+    let (status, body, _) = get(&state, "/dashboard/shares").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        recent_share_row_heights(&body),
+        vec![7, 6, 5, 4, 3, 3, 2, 1, 0],
+        "the shares page lists every height, the uncle under the share that includes it"
+    );
+    assert_eq!(
+        recent_share_row_is_uncle(&body),
+        vec![false, false, false, false, true, false, false, false, false],
+        "the shares page keeps the uncle between share4 and share3"
+    );
+}
+
+#[tokio::test]
+async fn the_peers_page_is_served() {
+    let (state, _store, _metrics) = build_state(None, None).await;
+    let (status, body, _) = get(&state, "/dashboard/peers").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.starts_with("<!DOCTYPE html>"));
+    assert!(body.contains("<h2>Peers"));
+    assert!(!body.contains("<script"));
+}
+
+#[tokio::test]
 async fn the_overview_links_to_the_shares_page_instead_of_a_pager() {
     let (state, _store, _metrics) = build_state(None, None).await;
     build_confirmed_test_chain(&state.chain_store_handle, 8).await;
@@ -752,6 +947,70 @@ async fn the_overview_ignores_its_page_parameter() {
         "the overview shows the same recent shares on every request"
     );
     assert_eq!(recent_share_row_heights(&paged), vec![8, 7, 6, 5, 4]);
+}
+
+/// One stored hashrate sample stamped `time`, with this node's rate on it.
+fn local_sample(time: u64, local: f64) -> Sample {
+    Sample {
+        time,
+        pool: None,
+        local: Some(local),
+        network: None,
+        miners: None,
+        workers: None,
+    }
+}
+
+/// The Node hashrate card's value: it sits after the card's label, before
+/// the next card opens.
+fn node_hashrate_value(body: &str) -> &str {
+    let card = body
+        .split(r#"class="kpi-label">Node hashrate"#)
+        .nth(1)
+        .expect("overview has a Node hashrate card");
+    let (_, value) = card
+        .split_once(r#"class="kpi-value kpi-value-local">"#)
+        .expect("the card carries its value");
+    value
+        .split_once('<')
+        .map(|(value, _)| value)
+        .expect("the value closes")
+}
+
+#[tokio::test]
+async fn the_node_hashrate_card_drops_a_sample_older_than_the_window() {
+    let (state, _store, _metrics) = build_state(None, None).await;
+    // A miner stopped and the sample froze on its last decay value; the
+    // card must age to a dash rather than carry it past the window it
+    // measures (the live rate is None with no submissions at all).
+    let history = Arc::new(HashrateHistory::default());
+    history.load(vec![local_sample(unix_now() - 1200, 37.3e9)]);
+    let (status, body, _) =
+        get_with_history(&state, "/dashboard", WebOptions::default(), history, &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        node_hashrate_value(&body),
+        "—",
+        "a sample outside the submission window cannot stand in for the live rate"
+    );
+}
+
+#[tokio::test]
+async fn the_node_hashrate_card_still_falls_back_inside_the_window() {
+    let (state, _store, _metrics) = build_state(None, None).await;
+    // Before the first sample lands the ring is empty and the card reads
+    // the live rate; this is the gap the sample fallback bridges, for a
+    // sample young enough to still describe the window.
+    let history = Arc::new(HashrateHistory::default());
+    history.load(vec![local_sample(unix_now() - 120, 37.3e9)]);
+    let (status, body, _) =
+        get_with_history(&state, "/dashboard", WebOptions::default(), history, &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        node_hashrate_value(&body),
+        "37.3 GH/s",
+        "a sample inside the submission window keeps the card alive"
+    );
 }
 
 #[tokio::test]

@@ -127,6 +127,8 @@ mod tests {
             monitoring_event_sender: create_monitoring_event_channel(),
             auth_user: None,
             auth_token: None,
+            stratum_port: 3333,
+            sv2_port: None,
             pplns_window: None,
         });
         (state, temp_dir)
