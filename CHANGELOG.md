@@ -97,6 +97,16 @@ format and genesis re-pin.
 
 ### Added
 
+- `/found_blocks?num=N` returns the N most recent found blocks (1 to 100),
+  read newest first from the end of the store without walking the rest, from
+  upstream `64934868` and `9afcdeff`. The response stays a bare array, and
+  without `num` it still lists every found block, as the dashboards need.
+- `p2poolv2_cli --db-path <store> db version` prints the store format version
+  a store records and the one the binary writes. It opens the store
+  read-only as it is on disk and reports an older or newer store instead of
+  refusing it, from upstream `1bc752a6`.
+- The node logs the full path of its store directory when it opens the
+  store, from upstream `4b3edbc1`.
 - `/metrics` counts the connections the connection limits refused,
   incoming and outgoing (`p2p_connections_refused_total`); the node had
   ignored refused incoming connections.
@@ -409,6 +419,15 @@ format and genesis re-pin.
   longer makes the node panic after it has opened its store and waited for
   its Bitcoin node. The node now refuses to start at once and logs the
   reason as an error.
+- A read-only store open (`p2poolv2_cli --db-path`, `verify_chain`) opens
+  every column family with its own options. It had reopened them with
+  default options, without the merge operators of the height, child, txid
+  and uncle indexes, so a read of a value not yet merged failed and, for
+  example, a height read as holding no shares; and it left out the hashrate
+  history and effort snapshots, which it now reads. It refuses a store with
+  a column family this build does not know, or without one it uses, instead
+  of leaving it out; the node creates missing ones when it starts. From
+  upstream `abcbbbe9`.
 - A Bitcoin Cash window no longer pays from a paying chain cut short by a
   header the node lacks. The walk from the paying block's prev stopped at
   the first unknown header and paid only the shares above it, so a node

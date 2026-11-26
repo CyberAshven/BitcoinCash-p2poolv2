@@ -245,6 +245,13 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
             .with_script_history(config.electrum.enabled)
             .unwrap(),
     );
+    match std::fs::canonicalize(&config.store.path) {
+        Ok(store_directory) => info!("Using store directory {}", store_directory.display()),
+        Err(error) => warn!(
+            "Using store directory {}, could not resolve its full path: {error}",
+            config.store.path
+        ),
+    }
 
     let (write_tx, write_rx) = write_channel();
     let store_writer = StoreWriter::new(store.clone(), write_rx);

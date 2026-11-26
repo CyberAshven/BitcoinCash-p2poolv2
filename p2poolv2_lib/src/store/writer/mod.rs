@@ -56,6 +56,10 @@ pub enum StoreError {
     /// (`STORE_FORMAT_VERSION`). Raised at startup; the operator must
     /// delete the store and resync.
     OutdatedStore(String),
+    /// The column families of a store on disk differ from the ones this
+    /// build uses. Raised by a read-only open, which opens exactly the
+    /// column families this build uses and so cannot leave one out.
+    ColumnFamilyMismatch(String),
 }
 
 impl fmt::Display for StoreError {
@@ -73,6 +77,7 @@ impl fmt::Display for StoreError {
                 write!(f, "Block {blockhash} is below the prune target")
             }
             StoreError::OutdatedStore(msg) => write!(f, "Outdated store: {msg}"),
+            StoreError::ColumnFamilyMismatch(msg) => write!(f, "Column family mismatch: {msg}"),
         }
     }
 }
