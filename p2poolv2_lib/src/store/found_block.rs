@@ -322,7 +322,9 @@ impl Store {
             .cf_handle(&ColumnFamily::AcceptedFoundBlocks)
             .unwrap();
         let mut iterator = self.db.raw_iterator_cf(&column_family);
-        let mut found_blocks = Vec::with_capacity(limit.min(scan_limit));
+        // Not pre-sized from `limit`, which comes from a request: the vector
+        // grows only with the blocks actually read.
+        let mut found_blocks = Vec::new();
         let mut counted = 0;
         iterator.seek_to_last();
         while counted < scan_limit
