@@ -58,6 +58,8 @@ async fn build_test_state(node_handle: NodeHandle) -> (Arc<AppState>, tempfile::
         monitoring_event_sender: create_monitoring_event_channel(),
         auth_user: None,
         auth_token: None,
+        stratum_port: 3333,
+        sv2_port: None,
         pplns_window: None,
     });
     (state, temp_dir)
@@ -397,6 +399,8 @@ async fn test_metrics_endpoint_exposes_coinbase_split() {
         monitoring_event_sender: create_monitoring_event_channel(),
         auth_user: None,
         auth_token: None,
+        stratum_port: 3333,
+        sv2_port: None,
         pplns_window: None,
     });
 
@@ -506,6 +510,8 @@ async fn build_auth_test_state() -> (Arc<AppState>, tempfile::TempDir, String) {
         monitoring_event_sender: create_monitoring_event_channel(),
         auth_user: Some(username.to_string()),
         auth_token: Some(token),
+        stratum_port: 3333,
+        sv2_port: None,
         pplns_window: None,
     });
     (state, temp_dir, base64_credentials)
@@ -834,6 +840,8 @@ async fn test_cors_headers_present_when_enabled() {
         monitoring_event_sender: create_monitoring_event_channel(),
         auth_user: None,
         auth_token: None,
+        stratum_port: 3333,
+        sv2_port: None,
         pplns_window: None,
     });
 
@@ -904,6 +912,8 @@ async fn test_hashrate_route_serves_history() {
         pool: Some(5.0),
         local: None,
         network: Some(7.0),
+        miners: Some(1),
+        workers: Some(1),
     });
     let app = build_router_with_history(
         state.clone(),
@@ -1020,6 +1030,108 @@ async fn test_found_blocks_route_reports_effort_snapshots() {
     );
     assert_eq!(blocks[1]["bitcoin_height"], 99);
     assert!(blocks[1]["effort"].is_null());
+}
+
+#[tokio::test]
+async fn test_found_blocks_rejects_num_zero() {
+    let (state, _temp_dir) = build_test_state(NodeHandle::new_for_test()).await;
+    let app = build_router(state.clone(), state.app_config.clone());
+
+    let (status, _) = get_json(app, "/found_blocks?num=0").await;
+    assert_eq!(status, http::StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_found_blocks_rejects_num_above_max() {
+    let (state, _temp_dir) = build_test_state(NodeHandle::new_for_test()).await;
+    let app = build_router(state.clone(), state.app_config.clone());
+
+    let (status, _) = get_json(app, "/found_blocks?num=101").await;
+    assert_eq!(status, http::StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_found_blocks_empty_store_returns_no_blocks() {
+    let (state, _temp_dir) = build_test_state(NodeHandle::new_for_test()).await;
+    let app = build_router(state.clone(), state.app_config.clone());
+
+    let (status, body) = get_json(app, "/found_blocks?num=10").await;
+    assert_eq!(status, http::StatusCode::OK);
+    assert!(body.as_array().unwrap().is_empty());
+}
+
+/// `num` keeps the bare array of the full list, newest first, cut to the
+/// `num` most recent blocks, each with the effort kept for it.
+#[tokio::test]
+async fn test_found_blocks_returns_newest_first_limited_by_num() {
+    let (state, _temp_dir) = build_test_state(NodeHandle::new_for_test()).await;
+    let older = FoundBlock {
+        bitcoin_height: 100,
+        bitcoin_blockhash: bitcoin::BlockHash::from_str(&"aa".repeat(32)).unwrap(),
+        share_blockhash: bitcoin::BlockHash::from_str(&"bb".repeat(32)).unwrap(),
+        bitcoin_time: 1_700_000_000,
+        miner_bitcoin_address: "miner".to_string(),
+        effort: None,
+    };
+    let newest = FoundBlock {
+        bitcoin_height: 101,
+        bitcoin_blockhash: bitcoin::BlockHash::from_str(&"cc".repeat(32)).unwrap(),
+        share_blockhash: bitcoin::BlockHash::from_str(&"dd".repeat(32)).unwrap(),
+        bitcoin_time: 1_700_000_600,
+        miner_bitcoin_address: "miner".to_string(),
+        effort: None,
+    };
+    for found_block in [older, newest.clone()] {
+        state
+            .chain_store_handle
+            .record_accepted_found_block(found_block)
+            .await
+            .unwrap();
+    }
+    state
+        .chain_store_handle
+        .set_accepted_found_block_effort(
+            newest.bitcoin_blockhash,
+            EffortSnapshot {
+                work: 900_000.0,
+                network_difficulty: Some(600_000.0),
+            },
+        )
+        .await
+        .unwrap();
+
+    let (status, body) = get_json(
+        build_router(state.clone(), state.app_config.clone()),
+        "/found_blocks?num=1",
+    )
+    .await;
+    assert_eq!(status, http::StatusCode::OK);
+    let blocks = body.as_array().unwrap();
+    assert_eq!(blocks.len(), 1);
+    assert_eq!(blocks[0]["bitcoin_height"], 101);
+    assert_eq!(
+        blocks[0]["bitcoin_blockhash"],
+        newest.bitcoin_blockhash.to_string()
+    );
+    assert_eq!(
+        blocks[0]["share_blockhash"],
+        newest.share_blockhash.to_string()
+    );
+    assert_eq!(blocks[0]["bitcoin_time"], newest.bitcoin_time);
+    assert_eq!(blocks[0]["miner_bitcoin_address"], "miner");
+    assert_eq!(blocks[0]["effort"]["work"], serde_json::json!(900_000.0));
+
+    //* Without `num` the full list comes back, as before.
+    let (status, body) = get_json(
+        build_router(state.clone(), state.app_config.clone()),
+        "/found_blocks",
+    )
+    .await;
+    assert_eq!(status, http::StatusCode::OK);
+    let blocks = body.as_array().unwrap();
+    assert_eq!(blocks.len(), 2);
+    assert_eq!(blocks[0]["bitcoin_height"], 101);
+    assert_eq!(blocks[1]["bitcoin_height"], 100);
 }
 
 #[tokio::test]

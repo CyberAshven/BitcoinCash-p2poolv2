@@ -47,6 +47,19 @@ pub struct FoundBlock {
     pub effort: Option<EffortSnapshot>,
 }
 
+/// The most recent found blocks and a bounded count of all entries, as
+/// returned by `Store::get_latest_found_blocks`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LatestFoundBlocks {
+    /// The most recent found blocks, highest bitcoin height first
+    pub found_blocks: Vec<FoundBlock>,
+    /// Number of entries counted, at most the scan limit
+    pub counted: usize,
+    /// True when more entries exist beyond the scan limit, so `counted`
+    /// is a lower bound rather than the total
+    pub scan_limit_reached: bool,
+}
+
 /// The block effort metric captured when a find resets it: the confirmed
 /// sharechain work since the previous find (the numerator of the effort
 /// ratio) and the network difficulty of the block's header at that moment
@@ -251,9 +264,9 @@ impl Store {
     }
 
     /// The effort snapshot kept for an accepted block, `None` when the
-    /// block was accepted before snapshots were kept, its snapshot failed
-    /// to write, or the open has no effort column family: read-only tools
-    /// never request it and so report accepted finds without effort.
+    /// block was accepted before snapshots were kept or its snapshot failed
+    /// to write. Read-write and read-only opens both open the effort column
+    /// family; a store without one reads as having no snapshots.
     pub fn get_accepted_found_block_effort(
         &self,
         bitcoin_blockhash: &BlockHash,
@@ -288,6 +301,53 @@ impl Store {
             found_blocks.push(found_block);
         }
         Ok(found_blocks)
+    }
+
+    /// Return the `limit` most recent BCHN-accepted pool blocks, highest
+    /// bitcoin height first, with a count of entries bounded by
+    /// `scan_limit`.
+    ///
+    /// Walks the keys from the end so only the returned entries are
+    /// decoded and joined to their effort snapshots; the rest are counted
+    /// without reading their values. The walk stops after `scan_limit`
+    /// keys, so the cost of a call is bounded however many blocks have
+    /// been found.
+    pub fn get_latest_found_blocks(
+        &self,
+        limit: usize,
+        scan_limit: usize,
+    ) -> Result<LatestFoundBlocks, StoreError> {
+        let column_family = self
+            .db
+            .cf_handle(&ColumnFamily::AcceptedFoundBlocks)
+            .unwrap();
+        let mut iterator = self.db.raw_iterator_cf(&column_family);
+        // Not pre-sized from `limit`, which comes from a request: the vector
+        // grows only with the blocks actually read.
+        let mut found_blocks = Vec::new();
+        let mut counted = 0;
+        iterator.seek_to_last();
+        while counted < scan_limit
+            && let Some(key) = iterator.key()
+        {
+            if found_blocks.len() < limit {
+                let value = iterator.value().ok_or_else(|| {
+                    StoreError::Serialization(format!("Found block value missing for {key:?}"))
+                })?;
+                let mut found_block = decode_found_block(key, value)?;
+                found_block.effort =
+                    self.get_accepted_found_block_effort(&found_block.bitcoin_blockhash)?;
+                found_blocks.push(found_block);
+            }
+            counted += 1;
+            iterator.prev();
+        }
+        iterator.status()?;
+        Ok(LatestFoundBlocks {
+            found_blocks,
+            counted,
+            scan_limit_reached: iterator.valid(),
+        })
     }
 
     /// Return claimed block candidates still awaiting BCHN verification.

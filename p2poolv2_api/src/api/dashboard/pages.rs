@@ -101,11 +101,20 @@ pub(crate) fn network_on(value: Option<&str>) -> bool {
     value == Some("1")
 }
 
+/// The opt-in toggle the Sharechain tab's miners/workers count lines use,
+/// the same rule as [`network_on`]: only `?miners=1`/`?workers=1` shows
+/// them, so the default Sharechain URL stays clean of both.
+pub(crate) fn series_opt_in_on(value: Option<&str>) -> bool {
+    value == Some("1")
+}
+
 /// The query fragment carrying the chart series toggles: pool, node
 /// and the found-block diamonds carry their turns off, network carries its
 /// turn on (it is opt-in), so `""` is the default state. The Sharechain
 /// tab's height/dmin/dmax/uncles/weak toggles are emitted only when
-/// `chart_key` is `"sharechain"`, so the hashrate tab's URLs never change.
+/// `chart_key` is `"sharechain"`, so the hashrate tab's URLs never change;
+/// its miners/workers count lines are opt-in too, so they carry their
+/// turns on there (both off by default, like network).
 #[allow(clippy::too_many_arguments)] // one bool per toggle series: a state struct would only move the list
 pub(crate) fn series_q(
     pool_on: bool,
@@ -117,6 +126,8 @@ pub(crate) fn series_q(
     dmax_on: bool,
     uncles_on: bool,
     weak_on: bool,
+    miners_on: bool,
+    workers_on: bool,
     chart_key: &str,
 ) -> String {
     let mut query = String::new();
@@ -147,6 +158,12 @@ pub(crate) fn series_q(
         }
         if !weak_on {
             query.push_str("&weak=0");
+        }
+        if miners_on {
+            query.push_str("&miners=1");
+        }
+        if workers_on {
+            query.push_str("&workers=1");
         }
     }
     query
@@ -186,6 +203,12 @@ pub(crate) struct Site {
     /// Whether the node has an API login, so the header offers the Admin
     /// button that leads to `/dashboard/signin`.
     pub(crate) auth: bool,
+    /// The port the stratum server listens on, which the help page prints
+    /// in the URL a miner points at.
+    pub(crate) stratum_port: u16,
+    /// The port the stratum V2 endpoint listens on, or `None` when the node
+    /// runs without SV2; the help page then prints a placeholder.
+    pub(crate) sv2_port: Option<u16>,
 }
 
 /// The menu bar's pages.
@@ -310,7 +333,9 @@ pub(crate) struct Overview {
     /// The newest of them, newest first.
     pub(crate) blocks: Vec<FoundBlockRow>,
     /// The newest confirmed shares, newest first, uncles under the share that
-    /// includes them, at most `super::OVERVIEW_SHARES` heights.
+    /// includes them, at most `super::OVERVIEW_SHARES` heights and at most
+    /// `super::OVERVIEW_ROWS` rows, so the panel keeps the same size on
+    /// every refresh.
     pub(crate) shares: Vec<ShareRow>,
     /// Connected libp2p peers, longest uptime first, as `/peers` answers.
     pub(crate) peers: Vec<PeerInfoResponse>,
@@ -342,6 +367,10 @@ pub(crate) struct Overview {
     pub(crate) uncles_on: bool,
     /// Whether the weak count line shows (true by default).
     pub(crate) weak_on: bool,
+    /// Whether the active-miners count line shows (opt-in, from `?miners=1`).
+    pub(crate) miners_on: bool,
+    /// Whether the active-workers count line shows (opt-in, from `?workers=1`).
+    pub(crate) workers_on: bool,
     /// Shares fetched for the sharechain tab: time, height, difficulty,
     /// uncle timestamps and weak count, oldest first.
     pub(crate) share_series: Vec<ShareSeriesItem>,
@@ -364,6 +393,14 @@ pub(crate) struct SharesView {
     /// This page of the share chain, newest first.
     pub(crate) shares: Vec<ShareRow>,
     pub(crate) paging: Paging,
+}
+
+/// The peers page: every connected peer, longest uptime first. The
+/// overview's Peers panel shows at most `super::OVERVIEW_PEERS` of them;
+/// this page carries the whole list the node reports.
+pub(crate) struct PeersView {
+    pub(crate) site: Site,
+    pub(crate) peers: Vec<PeerInfoResponse>,
 }
 
 /// One found block's page.
@@ -786,22 +823,22 @@ fn series_toggles(
         span.series-toggles role="group" aria-label="Chart series" {
             a.legend-chip.off[!pool_on] role="button" aria-pressed=(pool_on.to_string())
                 href=(format!("/dashboard?range={range_key}{auto_query}{chart_query}{}",
-                    series_q(!pool_on, node_on, network_on, blocks_on, true, true, true, true, true, chart_key))) {
+                    series_q(!pool_on, node_on, network_on, blocks_on, true, true, true, true, true, false, false, chart_key))) {
                 span.legend-dot.pool {} "Pool"
             }
             a.legend-chip.off[!node_on] role="button" aria-pressed=(node_on.to_string())
                 href=(format!("/dashboard?range={range_key}{auto_query}{chart_query}{}",
-                    series_q(pool_on, !node_on, network_on, blocks_on, true, true, true, true, true, chart_key))) {
+                    series_q(pool_on, !node_on, network_on, blocks_on, true, true, true, true, true, false, false, chart_key))) {
                 span.legend-dot.local {} "Node"
             }
             a.legend-chip.off[!network_on] role="button" aria-pressed=(network_on.to_string())
                 href=(format!("/dashboard?range={range_key}{auto_query}{chart_query}{}",
-                    series_q(pool_on, node_on, !network_on, blocks_on, true, true, true, true, true, chart_key))) {
+                    series_q(pool_on, node_on, !network_on, blocks_on, true, true, true, true, true, false, false, chart_key))) {
                 span.legend-dot.network {} "Network"
             }
             a.legend-chip.off[!blocks_on] role="button" aria-pressed=(blocks_on.to_string())
                 href=(format!("/dashboard?range={range_key}{auto_query}{chart_query}{}",
-                    series_q(pool_on, node_on, network_on, !blocks_on, true, true, true, true, true, chart_key))) {
+                    series_q(pool_on, node_on, network_on, !blocks_on, true, true, true, true, true, false, false, chart_key))) {
                 span.legend-dot.blocks {} "Blocks"
             }
         }
@@ -809,9 +846,11 @@ fn series_toggles(
 }
 
 /// The Sharechain tab's chips, in the series' own order: Height,
-/// Uncle, Weak, Min diff, Max diff and the found-block diamonds, same
-/// stateless-link pattern as the hashrate tab's chips. The height
-/// chip's dot is white, the colour of its line.
+/// Uncle, Weak, Min diff, Max diff, Miners, Workers and the found-block
+/// diamonds, same stateless-link pattern as the hashrate tab's chips.
+/// The height chip's dot is white, the colour of its line. Miners and
+/// Workers are opt-in (like the hashrate tab's Network), so their chips
+/// start off and carry their turns on.
 #[allow(clippy::too_many_arguments)] // one bool per chip: each chip links its own flip
 fn sharechain_toggles(
     height_on: bool,
@@ -819,6 +858,8 @@ fn sharechain_toggles(
     dmax_on: bool,
     uncles_on: bool,
     weak_on: bool,
+    miners_on: bool,
+    workers_on: bool,
     blocks_on: bool,
     range_key: &str,
     auto: Auto,
@@ -832,32 +873,42 @@ fn sharechain_toggles(
         span.series-toggles role="group" aria-label="Chart series" {
             a.legend-chip.off[!height_on] role="button" aria-pressed=(height_on.to_string())
                 href=(format!("/dashboard?chart=sharechain&range={range_key}{auto_query}{}",
-                    series_q(true, true, false, true, !height_on, dmin_on, dmax_on, uncles_on, weak_on, "sharechain"))) {
+                    series_q(true, true, false, true, !height_on, dmin_on, dmax_on, uncles_on, weak_on, miners_on, workers_on, "sharechain"))) {
                 span.legend-dot style="background:#ffffff;border-radius:50%" {} "Height"
             }
             a.legend-chip.off[!uncles_on] role="button" aria-pressed=(uncles_on.to_string())
                 href=(format!("/dashboard?chart=sharechain&range={range_key}{auto_query}{}",
-                    series_q(true, true, false, true, height_on, dmin_on, dmax_on, !uncles_on, weak_on, "sharechain"))) {
-                span.legend-dot style="background:#f43f5e;border-radius:50%" {} "Uncle"
+                    series_q(true, true, false, true, height_on, dmin_on, dmax_on, !uncles_on, weak_on, miners_on, workers_on, "sharechain"))) {
+                span.legend-dot style="background:#facc15;border-radius:50%" {} "Uncle"
             }
             a.legend-chip.off[!weak_on] role="button" aria-pressed=(weak_on.to_string())
                 href=(format!("/dashboard?chart=sharechain&range={range_key}{auto_query}{}",
-                    series_q(true, true, false, true, height_on, dmin_on, dmax_on, uncles_on, !weak_on, "sharechain"))) {
+                    series_q(true, true, false, true, height_on, dmin_on, dmax_on, uncles_on, !weak_on, miners_on, workers_on, "sharechain"))) {
                 span.legend-dot style="background:#f59e0b;border-radius:50%" {} "Weak"
             }
             a.legend-chip.off[!dmin_on] role="button" aria-pressed=(dmin_on.to_string())
                 href=(format!("/dashboard?chart=sharechain&range={range_key}{auto_query}{}",
-                    series_q(true, true, false, true, height_on, !dmin_on, dmax_on, uncles_on, weak_on, "sharechain"))) {
-                span.legend-dot style="background:#06b6d4;border-radius:50%" {} "Min diff"
+                    series_q(true, true, false, true, height_on, !dmin_on, dmax_on, uncles_on, weak_on, miners_on, workers_on, "sharechain"))) {
+                span.legend-dot style="background:#3b82f6;border-radius:50%" {} "Min diff"
             }
             a.legend-chip.off[!dmax_on] role="button" aria-pressed=(dmax_on.to_string())
                 href=(format!("/dashboard?chart=sharechain&range={range_key}{auto_query}{}",
-                    series_q(true, true, false, true, height_on, dmin_on, !dmax_on, uncles_on, weak_on, "sharechain"))) {
-                span.legend-dot style="background:#a78bfa;border-radius:50%" {} "Max diff"
+                    series_q(true, true, false, true, height_on, dmin_on, !dmax_on, uncles_on, weak_on, miners_on, workers_on, "sharechain"))) {
+                span.legend-dot style="background:#67e8f9;border-radius:50%" {} "Max diff"
+            }
+            a.legend-chip.off[!miners_on] role="button" aria-pressed=(miners_on.to_string())
+                href=(format!("/dashboard?chart=sharechain&range={range_key}{auto_query}{}",
+                    series_q(true, true, false, true, height_on, dmin_on, dmax_on, uncles_on, weak_on, !miners_on, workers_on, "sharechain"))) {
+                span.legend-dot style="background:#7a4f2d;border-radius:50%" {} "Miners"
+            }
+            a.legend-chip.off[!workers_on] role="button" aria-pressed=(workers_on.to_string())
+                href=(format!("/dashboard?chart=sharechain&range={range_key}{auto_query}{}",
+                    series_q(true, true, false, true, height_on, dmin_on, dmax_on, uncles_on, weak_on, miners_on, !workers_on, "sharechain"))) {
+                span.legend-dot style="background:#D2A679;border-radius:50%" {} "Workers"
             }
             a.legend-chip.off[!blocks_on] role="button" aria-pressed=(blocks_on.to_string())
                 href=(format!("/dashboard?chart=sharechain&range={range_key}{auto_query}{}",
-                    series_q(true, true, false, !blocks_on, height_on, dmin_on, dmax_on, uncles_on, weak_on, "sharechain"))) {
+                    series_q(true, true, false, !blocks_on, height_on, dmin_on, dmax_on, uncles_on, weak_on, miners_on, workers_on, "sharechain"))) {
                 span.legend-dot style="background:var(--ms-green);border-radius:1px;transform:rotate(45deg)" {} "Blocks"
             }
         }
@@ -884,6 +935,8 @@ fn chart_switch(
     dmax_on: bool,
     uncles_on: bool,
     weak_on: bool,
+    miners_on: bool,
+    workers_on: bool,
 ) -> Markup {
     let auto_query = if matches!(auto, Auto::Off) {
         "&auto=off"
@@ -895,7 +948,7 @@ fn chart_switch(
             @let is_active = *key == *chart_key;
             @let query_prefix = if *key == *"hashrate" { "" } else { "chart=sharechain&" };
             @let series_arg = series_q(pool_on, node_on, network_on, blocks_on,
-                height_on, dmin_on, dmax_on, uncles_on, weak_on, key);
+                height_on, dmin_on, dmax_on, uncles_on, weak_on, miners_on, workers_on, key);
             a.head-switch.dim[!is_active] aria-current=[is_active.then_some("true")]
                 title=[(!is_active).then(|| format!("Switch to the {label} chart"))]
                 href=(format!("/dashboard?{query_prefix}range={range_key}{auto_query}{series_arg}")) {
@@ -1169,11 +1222,30 @@ fn blocks_table(now: u64, blocks: &[FoundBlockRow]) -> Markup {
     }
 }
 
-/// A peer's address cell: its IP, or the full multiaddr when the IP is not
-/// known, or the dash when neither is there.
-fn peer_address(peer: &PeerInfoResponse) -> &str {
-    let address = peer.ip.as_deref().unwrap_or(peer.address.as_str());
-    if address.is_empty() { "—" } else { address }
+/// A peer's address cell: its IP with the connection's port, or the full
+/// multiaddr when the IP is not known (its own `/tcp/` component already
+/// carries the port), or the dash when neither is there.
+fn peer_address(peer: &PeerInfoResponse) -> String {
+    let ip = peer.ip.as_deref().filter(|ip| !ip.is_empty());
+    if let Some(ip) = ip {
+        return match peer_port(&peer.address) {
+            Some(port) => format!("{ip}:{port}"),
+            None => ip.to_string(),
+        };
+    }
+    if peer.address.is_empty() {
+        "—".to_string()
+    } else {
+        peer.address.clone()
+    }
+}
+
+/// The TCP port in a peer's multiaddr: the digits after `/tcp/` up to the
+/// next component, or none when the address carries no transport port.
+fn peer_port(address: &str) -> Option<&str> {
+    let (_, tail) = address.split_once("/tcp/")?;
+    let port = tail.split('/').next().unwrap_or("");
+    (!port.is_empty() && port.bytes().all(|byte| byte.is_ascii_digit())).then_some(port)
 }
 
 /// The direction cell's label, as the JSON API serializes it.
@@ -1244,12 +1316,22 @@ pub(crate) fn overview(view: &Overview) -> Markup {
         )
     };
     // The sharechain tab's chart: rendering is conditional on toggles.
+    // The miners/workers count lines are sampled straight off the hashrate
+    // samples (same round-trip as their KPI cards), so no share read is
+    // needed for them beyond the samples the page already holds.
     let sharechain_chart = if view.chart_key == "sharechain" {
         let (height_pts, dmin_pts, dmax_pts, uncle_pts, weak_pts) =
             sharechain_series(&view.share_series, &samples);
-        let mut share_series_list = Vec::with_capacity(5);
-        let any_on =
-            view.height_on || view.dmin_on || view.dmax_on || view.uncles_on || view.weak_on;
+        let miners_pts = series(&samples, |sample| sample.miners.map(|count| count as f64));
+        let workers_pts = series(&samples, |sample| sample.workers.map(|count| count as f64));
+        let mut share_series_list = Vec::with_capacity(7);
+        let any_on = view.height_on
+            || view.dmin_on
+            || view.dmax_on
+            || view.uncles_on
+            || view.weak_on
+            || view.miners_on
+            || view.workers_on;
         if view.height_on {
             share_series_list.push(Series {
                 label: "Height",
@@ -1285,6 +1367,20 @@ pub(crate) fn overview(view: &Overview) -> Markup {
                 points: weak_pts,
             });
         }
+        if view.miners_on {
+            share_series_list.push(Series {
+                label: "Active miners",
+                class: "miners",
+                points: miners_pts,
+            });
+        }
+        if view.workers_on {
+            share_series_list.push(Series {
+                label: "Active workers",
+                class: "workers",
+                points: workers_pts,
+            });
+        }
         if !any_on {
             html! {
                 p.empty { "All series hidden. Click a legend chip to show one." }
@@ -1304,13 +1400,15 @@ pub(crate) fn overview(view: &Overview) -> Markup {
                 fmt_hour_tick,
                 fmt_hour_edge,
                 Some(1.0),
-                &["uncles", "weak"],
+                &["uncles", "weak", "miners", "workers"],
                 &[
                     ("height", "Height"),
                     ("dmin", "Min"),
                     ("dmax", "Max"),
                     ("uncles", "Uncle"),
                     ("weak", "Weak"),
+                    ("miners", "Miners"),
+                    ("workers", "Workers"),
                 ],
                 "tight",
             )
@@ -1328,6 +1426,8 @@ pub(crate) fn overview(view: &Overview) -> Markup {
         view.dmax_on,
         view.uncles_on,
         view.weak_on,
+        view.miners_on,
+        view.workers_on,
         view.chart_key,
     );
     let last_block = view.blocks.first().map(|block| block.time);
@@ -1354,14 +1454,15 @@ pub(crate) fn overview(view: &Overview) -> Markup {
             h2.hashrate-head {
                 (chart_switch(view.chart_key, view.range_key, view.auto,
                     view.pool_on, view.node_on, view.network_on, view.blocks_on,
-                    view.height_on, view.dmin_on, view.dmax_on, view.uncles_on, view.weak_on))
+                    view.height_on, view.dmin_on, view.dmax_on, view.uncles_on, view.weak_on,
+                    view.miners_on, view.workers_on))
                 (range_buttons(view.range_key, view.auto, &series_arg, view.chart_key))
             }
             @if view.chart_key == "hashrate" {
                 (series_toggles(view.pool_on, view.node_on, view.network_on, view.blocks_on, view.range_key, view.auto, view.chart_key))
                 div.chart-wrap { (hashrate_chart) }
             } @else {
-                (sharechain_toggles(view.height_on, view.dmin_on, view.dmax_on, view.uncles_on, view.weak_on, view.blocks_on, view.range_key, view.auto))
+                (sharechain_toggles(view.height_on, view.dmin_on, view.dmax_on, view.uncles_on, view.weak_on, view.miners_on, view.workers_on, view.blocks_on, view.range_key, view.auto))
                 div.chart-wrap { (sharechain_chart) }
             }
         }
@@ -1426,9 +1527,9 @@ pub(crate) fn overview(view: &Overview) -> Markup {
             } @else {
                 div.table-wrap {
                     table.table {
-                        thead { tr { th { "Address" } th { "Version" } th { "Direction" } th { "Uptime" } th { "Latency" } } }
+                        thead { tr { th { "Address:port" } th { "Version" } th { "Direction" } th { "Uptime" } th { "Latency" } } }
                         tbody {
-                            @for peer in &view.peers {
+                            @for peer in view.peers.iter().take(super::OVERVIEW_PEERS) {
                                 tr {
                                     td.mono.peer-addr { (peer_address(peer)) }
                                     td { (agent_version(peer.version.as_deref())) }
@@ -1440,6 +1541,7 @@ pub(crate) fn overview(view: &Overview) -> Markup {
                         }
                     }
                 }
+                div.panel-more { a href="/dashboard/peers" { "All connected peers →" } }
             }
         }
     };
@@ -1529,6 +1631,55 @@ pub(crate) fn shares(view: &SharesView) -> Markup {
         "Shares",
         Tab::None,
         &[dashboard_crumb(), Crumb::here("Shares")],
+        None,
+        None,
+        None,
+        "",
+        body,
+    )
+}
+
+/// The peers page: the whole connected list the overview's panel caps, in
+/// the panel's own columns. The list is never long enough to page, so the
+/// page renders every peer the node reports.
+pub(crate) fn peers(view: &PeersView) -> Markup {
+    let body = html! {
+        div.panel {
+            h2 {
+                "Peers"
+                span.panel-note {
+                    "longest uptime first"
+                    @if view.peers.is_empty() { " · none connected" }
+                    @else { " · " (view.peers.len()) " connected" }
+                }
+            }
+            @if view.peers.is_empty() {
+                p.empty-state { "No p2pool peers connected right now. They appear here once the node dials or accepts a peer." }
+            } @else {
+                div.table-wrap {
+                    table.table {
+                        thead { tr { th { "Address:port" } th { "Version" } th { "Direction" } th { "Uptime" } th { "Latency" } } }
+                        tbody {
+                            @for peer in &view.peers {
+                                tr {
+                                    td.mono.peer-addr { (peer_address(peer)) }
+                                    td { (agent_version(peer.version.as_deref())) }
+                                    td { (direction_label(&peer.direction)) }
+                                    td { (fmt_duration(peer.connected_secs)) }
+                                    td.mono { (optional(peer.latency_ms, fmt_latency)) }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    };
+    layout(
+        &view.site,
+        "Peers",
+        Tab::None,
+        &[dashboard_crumb(), Crumb::here("Peers")],
         None,
         None,
         None,
@@ -1885,30 +2036,50 @@ pub(crate) fn share(view: &ShareView) -> Markup {
     )
 }
 
-pub(crate) fn help(site: &Site) -> Markup {
+pub(crate) fn help(site: &Site, host: &str) -> Markup {
+    // The host the operator browsed the dashboard with: a miner on the
+    // same network reaches this node at it. Absent (HTTP/1.0, or a client
+    // that sent no Host header) falls back to the placeholder.
+    let stratum_host = if host.is_empty() { "<this node>" } else { host };
+    let stratum_url = format!("stratum+tcp://{stratum_host}:{}", site.stratum_port);
+    // SV2 mirrors the SV1 list: the same host on the SV2 port, the
+    // identity packed into SV2's user_identity field, and the authority
+    // public key pinned instead of a password (SV2 has none; the pin
+    // matters only when the node runs Noise keys).
+    let sv2_port = site
+        .sv2_port
+        .map_or_else(|| "<sv2 port>".to_string(), |port| port.to_string());
+    let sv2_host = format!("{stratum_host}:{sv2_port}");
     let body = html! {
         div.panel {
+            div.banner-warn role="status" {
+                "P2Poolv2 is alpha software, mine at your own risk!"
+            }
             div.help-section {
                 h3 { "Connect a miner" }
                 p { "Stratum V1: point the miner at this node's stratum port." }
                 ul {
-                    li { "URL: " code { "stratum+tcp://<this node>:<stratum port>" } }
+                    li { "URL: " code { (stratum_url) } }
                     li { "User: " code { "<payout address>.<worker name>" } }
                     li { "Password: " code { "p2p=<share chain address>" } ", which names who owns your shares." }
                 }
-                p {
-                    "Stratum V2: connect to the node's SV2 port and pin its authority key. Use "
-                    code { "<payout address>.<worker>,p2p=<share chain address>" } " as the user identity. "
-                    "SV1 devices can mine through an SV2 translator."
+                p { "Stratum V2: point the miner at this node's SV2 port and pin its authority key." }
+                ul {
+                    li { "Host: " code { (sv2_host) } }
+                    li { "User: " code { "<payout address>.<worker>,p2p=<share chain address>" } }
+                    li { "Key: pin the node's authority public key" }
                 }
+                p { "SV1 devices can mine through an SV2 translator." }
                 p { "Get a share chain address with " code { "p2poolv2_cli bch-share-address" } "." }
             }
             div.help-section {
                 h3 { "Pages" }
                 ul {
                     li { a href="/dashboard" { "Dashboard" } ": hashrate, found blocks and the newest shares." }
+                    li { a href="/dashboard/shares" { "Shares" } ": the confirmed share chain, newest first." }
                     li { a href="/dashboard/blocks" { "Blocks" } ": every block the pool found." }
                     li { a href="/dashboard/miners" { "Miners" } ": the miners on this node and their workers." }
+                    li { a href="/dashboard/peers" { "Peers" } ": the peers connected to this node, longest uptime first." }
                     li { "Search: a payout or share chain address opens the miner, a share hash opens the share." }
                 }
             }
@@ -1930,7 +2101,7 @@ pub(crate) fn help(site: &Site) -> Markup {
                 h3 { "About this dashboard" }
                 p {
                     "This node renders these pages in Rust, from the same store and PPLNS window the API reads. "
-                    "They load no scripts. The design is CashDragon0's."
+                    "They load no scripts."
                 }
             }
             div.help-section {
@@ -2035,6 +2206,8 @@ mod tests {
             network: "Bitcoin Cash chipnet".to_string(),
             badge: "chipnet".to_string(),
             auth: true,
+            stratum_port: 3333,
+            sv2_port: Some(3336),
         }
     }
 
@@ -2085,6 +2258,20 @@ mod tests {
         }
     }
 
+    /// A connected peer row, as the panel and the peers page list them:
+    /// inbound, a version, a latency, longest uptime first.
+    fn connected_peer(peer_id: &str, ip: &str) -> PeerInfoResponse {
+        PeerInfoResponse {
+            peer_id: peer_id.to_string(),
+            ip: Some(ip.to_string()),
+            address: format!("/ip4/{ip}/tcp/6884"),
+            direction: ConnectionDirection::Inbound,
+            connected_secs: 1_337,
+            version: Some("p2poolv2/0.0.1-alpha".to_string()),
+            latency_ms: Some(0.914),
+        }
+    }
+
     fn empty_overview() -> Overview {
         Overview {
             site: site(),
@@ -2118,6 +2305,8 @@ mod tests {
             dmax_on: true,
             uncles_on: true,
             weak_on: true,
+            miners_on: false,
+            workers_on: false,
             share_series: Vec::new(),
         }
     }
@@ -2198,25 +2387,25 @@ mod tests {
     fn the_series_query_lists_only_the_hidden_series() {
         assert_eq!(
             series_q(
-                true, true, false, true, true, true, true, true, true, "hashrate"
+                true, true, false, true, true, true, true, true, true, false, false, "hashrate"
             ),
             ""
         );
         assert_eq!(
             series_q(
-                false, true, false, true, true, true, true, true, true, "hashrate"
+                false, true, false, true, true, true, true, true, true, false, false, "hashrate"
             ),
             "&pool=0"
         );
         assert_eq!(
             series_q(
-                true, false, false, true, true, true, true, true, true, "hashrate"
+                true, false, false, true, true, true, true, true, true, false, false, "hashrate"
             ),
             "&node=0"
         );
         assert_eq!(
             series_q(
-                false, false, false, true, true, true, true, true, true, "hashrate"
+                false, false, false, true, true, true, true, true, true, false, false, "hashrate"
             ),
             "&pool=0&node=0"
         );
@@ -2226,15 +2415,80 @@ mod tests {
     fn the_series_query_carries_the_network_turn_on() {
         assert_eq!(
             series_q(
-                true, true, true, true, true, true, true, true, true, "hashrate"
+                true, true, true, true, true, true, true, true, true, false, false, "hashrate"
             ),
             "&network=1"
         );
         assert_eq!(
             series_q(
-                false, false, true, true, true, true, true, true, true, "hashrate"
+                false, false, true, true, true, true, true, true, true, false, false, "hashrate"
             ),
             "&pool=0&node=0&network=1"
+        );
+    }
+
+    #[test]
+    fn the_series_query_carries_the_miners_and_workers_turn_on() {
+        assert_eq!(
+            series_q(
+                true,
+                true,
+                false,
+                true,
+                true,
+                true,
+                true,
+                true,
+                true,
+                true,
+                false,
+                "sharechain"
+            ),
+            "&miners=1"
+        );
+        assert_eq!(
+            series_q(
+                true,
+                true,
+                false,
+                true,
+                true,
+                true,
+                true,
+                true,
+                true,
+                false,
+                true,
+                "sharechain"
+            ),
+            "&workers=1"
+        );
+        assert_eq!(
+            series_q(
+                true,
+                true,
+                false,
+                true,
+                true,
+                true,
+                true,
+                true,
+                true,
+                true,
+                true,
+                "sharechain"
+            ),
+            "&miners=1&workers=1"
+        );
+    }
+
+    #[test]
+    fn the_series_query_stays_clean_of_miners_and_workers_on_hashrate() {
+        assert_eq!(
+            series_q(
+                true, true, false, true, true, true, true, true, true, true, true, "hashrate"
+            ),
+            ""
         );
     }
 
@@ -2285,13 +2539,13 @@ mod tests {
     fn the_series_query_carries_the_blocks_turn_off() {
         assert_eq!(
             series_q(
-                true, true, false, false, true, true, true, true, true, "hashrate"
+                true, true, false, false, true, true, true, true, true, false, false, "hashrate"
             ),
             "&blocks=0"
         );
         assert_eq!(
             series_q(
-                false, true, false, false, true, true, true, true, true, "hashrate"
+                false, true, false, false, true, true, true, true, true, false, false, "hashrate"
             ),
             "&pool=0&blocks=0"
         );
@@ -2430,6 +2684,8 @@ mod tests {
                 network: "Bitcoin Cash chipnet".to_string(),
                 badge: "chipnet".to_string(),
                 auth: false,
+                stratum_port: 3333,
+                sv2_port: None,
             },
             "Dashboard",
             Tab::Dashboard,
@@ -2458,7 +2714,7 @@ mod tests {
 
     #[test]
     fn the_help_page_explains_signing_in_and_out() {
-        let page = help(&site()).into_string();
+        let page = help(&site(), "pool.example.org").into_string();
         assert!(!page.contains("<script"));
         assert!(page.contains("/dashboard/signin"));
         assert!(page.contains("wrong password"));
@@ -2497,12 +2753,16 @@ mod tests {
                 pool: Some(100.0),
                 local: Some(50.0),
                 network: Some(4.0e6),
+                miners: Some(2),
+                workers: Some(3),
             },
             Sample {
                 time: 1_060,
                 pool: Some(200.0),
                 local: Some(60.0),
                 network: Some(5.0e6),
+                miners: Some(2),
+                workers: Some(4),
             },
         ];
         view.network_on = true;
@@ -2524,12 +2784,16 @@ mod tests {
                 pool: Some(100.0),
                 local: Some(50.0),
                 network: None,
+                miners: None,
+                workers: None,
             },
             Sample {
                 time: 1_060,
                 pool: Some(200.0),
                 local: Some(60.0),
                 network: None,
+                miners: None,
+                workers: None,
             },
         ];
         view.pool_on = false;
@@ -2564,12 +2828,16 @@ mod tests {
                 pool: Some(100.0),
                 local: Some(50.0),
                 network: None,
+                miners: None,
+                workers: None,
             },
             Sample {
                 time: 1_060,
                 pool: Some(200.0),
                 local: Some(60.0),
                 network: None,
+                miners: None,
+                workers: None,
             },
         ];
         view.chart_blocks = vec![ChartBlock {
@@ -2611,9 +2879,50 @@ mod tests {
 
     #[test]
     fn the_help_page_explains_the_share_address() {
-        let page = help(&site()).into_string();
+        let page = help(&site(), "").into_string();
         assert!(page.contains("p2p=&lt;share chain address&gt;"));
-        assert!(page.contains("CashDragon0"));
+        assert!(page.contains("renders these pages in Rust"));
+    }
+
+    #[test]
+    fn the_help_page_points_a_miner_at_the_real_ports() {
+        let page = help(&site(), "pool.example.org").into_string();
+        assert!(page.contains("stratum+tcp://pool.example.org:3333"));
+        assert!(page.contains("Host: <code>pool.example.org:3336</code>"));
+        assert!(
+            page.contains("&lt;payout address&gt;.&lt;worker&gt;,p2p=&lt;share chain address&gt;")
+        );
+        assert!(page.contains("Key: pin the node's authority public key"));
+        assert!(page.contains("SV1 devices can mine through an SV2 translator."));
+        assert!(!page.contains("&lt;stratum port&gt;"));
+        assert!(!page.contains("&lt;sv2 port&gt;"));
+    }
+
+    #[test]
+    fn the_help_page_keeps_its_placeholders_without_a_host_or_an_sv2_port() {
+        let mut site = site();
+        site.sv2_port = None;
+        let page = help(&site, "").into_string();
+        assert!(page.contains("stratum+tcp://&lt;this node&gt;:3333"));
+        assert!(page.contains("&lt;this node&gt;:&lt;sv2 port&gt;"));
+    }
+
+    #[test]
+    fn the_help_page_brackets_an_ipv6_host() {
+        let page = help(&site(), "[::1]").into_string();
+        assert!(page.contains("stratum+tcp://[::1]:3333"));
+        assert!(page.contains("Host: <code>[::1]:3336</code>"));
+    }
+
+    #[test]
+    fn the_help_page_carries_the_alpha_warning() {
+        let page = help(&site(), "").into_string();
+        assert!(page.contains(r#"class="banner-warn""#));
+        assert!(page.contains("mine at your own risk"));
+        // The banner opens the panel, before the first section.
+        let panel = page.split(r#"class="panel""#).nth(1).unwrap();
+        let panel = panel.split("help-section").next().unwrap();
+        assert!(panel.contains("banner-warn"));
     }
 
     #[test]
@@ -2789,12 +3098,12 @@ mod tests {
 
         assert!(page.contains("<h2>Peers"));
         assert!(page.contains("1 connected"));
-        assert!(page.contains("<th>Address</th>"));
+        assert!(page.contains("<th>Address:port</th>"));
         assert!(page.contains("<th>Version</th>"));
         assert!(page.contains("<th>Direction</th>"));
         assert!(page.contains("<th>Uptime</th>"));
         assert!(page.contains("<th>Latency</th>"));
-        assert!(page.contains("<td class=\"mono peer-addr\">127.0.0.1</td>"));
+        assert!(page.contains("<td class=\"mono peer-addr\">127.0.0.1:6884</td>"));
         assert!(page.contains("<td>0.0.1-alpha</td>"));
         assert!(!page.contains("p2poolv2/"));
         assert!(page.contains("<td>Inbound</td>"));
@@ -2824,11 +3133,113 @@ mod tests {
     }
 
     #[test]
+    fn the_overview_peers_panel_keeps_an_ip_whose_address_has_no_port() {
+        let mut view = empty_overview();
+        view.peers = vec![PeerInfoResponse {
+            peer_id: "12D3KooWNoPort".to_string(),
+            ip: Some("10.0.0.1".to_string()),
+            address: "/dns4/seed.example".to_string(),
+            direction: ConnectionDirection::Outbound,
+            connected_secs: 7,
+            version: None,
+            latency_ms: None,
+        }];
+        let page = overview(&view).into_string();
+
+        assert!(
+            page.contains("<td class=\"mono peer-addr\">10.0.0.1</td>"),
+            "an address without a /tcp/ component leaves the IP alone"
+        );
+    }
+
+    #[test]
+    fn the_overview_peers_panel_shows_a_dash_for_a_peer_of_nothing() {
+        let mut view = empty_overview();
+        view.peers = vec![PeerInfoResponse {
+            peer_id: "12D3KooWNothing".to_string(),
+            ip: None,
+            address: String::new(),
+            direction: ConnectionDirection::Inbound,
+            connected_secs: 7,
+            version: None,
+            latency_ms: None,
+        }];
+        let page = overview(&view).into_string();
+
+        assert!(page.contains("<td class=\"mono peer-addr\">—</td>"));
+    }
+
+    #[test]
     fn the_overview_peers_panel_says_so_without_peers() {
         let page = overview(&empty_overview()).into_string();
 
         assert!(page.contains("libp2p"));
         assert!(page.contains("No p2pool peers connected right now."));
+    }
+
+    #[test]
+    fn the_overview_peers_panel_lists_five_of_six_peers_and_counts_six() {
+        let mut view = empty_overview();
+        view.peers = vec![
+            connected_peer("12D3KooWFirst", "10.0.0.1"),
+            connected_peer("12D3KooWSecond", "10.0.0.2"),
+            connected_peer("12D3KooWThird", "10.0.0.3"),
+            connected_peer("12D3KooWFourth", "10.0.0.4"),
+            connected_peer("12D3KooWFifth", "10.0.0.5"),
+            connected_peer("12D3KooWSixth", "10.0.0.6"),
+        ];
+        let page = overview(&view).into_string();
+
+        assert!(page.contains("6 connected"), "the header counts every peer");
+        assert!(page.contains("10.0.0.1"));
+        assert!(page.contains("10.0.0.5"), "the fifth peer stays listed");
+        assert!(
+            !page.contains("10.0.0.6"),
+            "the sixth peer falls off the capped panel"
+        );
+        assert!(page.contains("href=\"/dashboard/peers\""));
+        assert!(page.contains("All connected peers"));
+    }
+
+    #[test]
+    fn the_peers_page_lists_every_connected_peer() {
+        let view = PeersView {
+            site: site(),
+            peers: vec![
+                connected_peer("12D3KooWFirst", "10.0.0.1"),
+                connected_peer("12D3KooWSecond", "10.0.0.2"),
+                connected_peer("12D3KooWThird", "10.0.0.3"),
+                connected_peer("12D3KooWFourth", "10.0.0.4"),
+                connected_peer("12D3KooWFifth", "10.0.0.5"),
+                connected_peer("12D3KooWSixth", "10.0.0.6"),
+            ],
+        };
+        let page = peers(&view).into_string();
+
+        assert!(page.contains("<h2>Peers"));
+        assert!(page.contains("longest uptime first"));
+        assert!(page.contains("6 connected"));
+        assert!(page.contains("10.0.0.1"));
+        assert!(page.contains("10.0.0.4"));
+        assert!(
+            page.contains("10.0.0.6"),
+            "no peer is dropped without a cap"
+        );
+        assert!(!page.contains("page="));
+        assert!(!page.contains("<script"));
+    }
+
+    #[test]
+    fn the_peers_page_without_peers_says_so() {
+        let view = PeersView {
+            site: site(),
+            peers: Vec::new(),
+        };
+        let page = peers(&view).into_string();
+
+        assert!(page.contains("none connected"));
+        assert!(page.contains("No p2pool peers connected right now."));
+        assert!(!page.contains("href=\"/dashboard/peers\""));
     }
 
     #[test]

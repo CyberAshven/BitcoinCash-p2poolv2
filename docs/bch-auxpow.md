@@ -213,7 +213,7 @@ chipnet's minimum-difficulty block 300,001.
 **Where P2Pool runs it.** On every proof `AuxProof::verify` checks with a
 network, and on every **token share's** bitcoin header, with the node's
 `bitcoin_cash_network`: at the header gate peers run
-(`validate_header_minimum_difficulty`), and again in
+(`validate_header_on_arrival`), and again in
 `validate_share_block`, which a share the node mined itself reaches
 without that gate. A node builds no token job on a template whose nBits
 fail the band at its height and `curtime`; it mines that template without

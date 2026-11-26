@@ -97,6 +97,16 @@ format and genesis re-pin.
 
 ### Added
 
+- `/found_blocks?num=N` returns the N most recent found blocks (1 to 100),
+  read newest first from the end of the store without walking the rest, from
+  upstream `64934868` and `9afcdeff`. The response stays a bare array, and
+  without `num` it still lists every found block, as the dashboards need.
+- `p2poolv2_cli --db-path <store> db version` prints the store format version
+  a store records and the one the binary writes. It opens the store
+  read-only as it is on disk and reports an older or newer store instead of
+  refusing it, from upstream `1bc752a6`.
+- The node logs the full path of its store directory when it opens the
+  store, from upstream `4b3edbc1`.
 - Onion peers: with `[network] tor_proxy`, the node dials
   `/onion3/<address>:<port>` peers through a Tor SOCKS5 proxy, as
   `-onion` does in Bitcoin Cash Node, and learns onion addresses from peers. Without
@@ -271,6 +281,13 @@ format and genesis re-pin.
 
 ### Changed
 
+- A Bitcoin node stops mining on a block template that marks required (`!`
+  prefix) a rule P2Poolv2 does not implement, and logs an error naming the
+  rule, instead of building blocks that may be invalid (from upstream).
+- Stratum rejects a share whose extranonce2 is not the 8 bytes announced in
+  `mining.subscribe`, and a coinbase with bytes left over after decoding, so
+  a miner can no longer shift which coinbase bytes are read as nSequence and
+  nLockTime (from upstream).
 - Connections Kademlia opens for a lookup close once no query needs them, so
   `target_outgoing_peers` and its /16 rule set a node's outgoing peers; the
   peer stays in the routing table. A lookup only discovers addresses: no
@@ -419,6 +436,33 @@ format and genesis re-pin.
 
 ### Fixed
 
+- A share more than 120 seconds ahead of the local clock is no longer marked
+  invalid for good. The verdict depends on the clock of each node, so the
+  share is refused for now and accepted when offered again once its time has
+  come; the share chain rules are unchanged. The check also runs as a share
+  arrives, before it is buffered, and `validate_header_minimum_difficulty`
+  is now `validate_header_on_arrival` (upstream `e6a297aa`, `9f1ebed8`).
+- A declared Stratum V2 job is no longer refused as `invalid-template` when
+  the node behind the pool checks no block proposals. Knuth answers every
+  proposal "only template mode is supported", and the pool took that for a
+  verdict on the block, so a pool on Knuth refused every declared job. Such
+  a node now gets `template-unavailable` and a warning that Job Declaration
+  needs a node that checks proposals, such as BCHN. Every refused
+  declaration is now logged at warn with the reason from the node; it was
+  debug only.
+- A bad `[stratum]` setting, such as a `pool_signature` over 16 bytes, no
+  longer makes the node panic after it has opened its store and waited for
+  its Bitcoin node. The node now refuses to start at once and logs the
+  reason as an error.
+- A read-only store open (`p2poolv2_cli --db-path`, `verify_chain`) opens
+  every column family with its own options. It had reopened them with
+  default options, without the merge operators of the height, child, txid
+  and uncle indexes, so a read of a value not yet merged failed and, for
+  example, a height read as holding no shares; and it left out the hashrate
+  history and effort snapshots, which it now reads. It refuses a store with
+  a column family this build does not know, or without one it uses, instead
+  of leaving it out; the node creates missing ones when it starts. From
+  upstream `abcbbbe9`.
 - A Bitcoin Cash window no longer pays from a paying chain cut short by a
   header the node lacks. The walk from the paying block's prev stopped at
   the first unknown header and paid only the shares above it, so a node

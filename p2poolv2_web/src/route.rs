@@ -36,6 +36,9 @@ pub enum Route {
         page: usize,
     },
     Share(String),
+    /// The peers page: every connected peer, longest uptime first. The
+    /// overview lists the few longest-connected ones.
+    Peers,
     Help,
     /// The API URL and login; the node's own pages need none.
     Settings,
@@ -147,6 +150,7 @@ impl Route {
                 page: page_of(query),
             },
             ("share", hash) if !hash.is_empty() => Route::Share(url_decode(hash)),
+            ("peers", _) => Route::Peers,
             ("help", _) => Route::Help,
             ("settings", _) => Route::Settings,
             ("search", _) => Route::Search(query_value(query, "q").unwrap_or_default()),
@@ -170,6 +174,7 @@ impl Route {
                 page_suffix('&', *page)
             ),
             Route::Share(hash) => format!("#/share/{}", url_component(hash)),
+            Route::Peers => "#/peers".to_string(),
             Route::Help => "#/help".to_string(),
             Route::Settings => "#/settings".to_string(),
             Route::Search(text) => format!("#/search?q={}", url_component(text)),
@@ -245,6 +250,13 @@ mod tests {
         let block = Route::Block("cd".repeat(32));
         assert_eq!(Route::parse(&block.href()), block);
         assert_eq!(Route::parse("#/share/"), Route::Dashboard { page: 1 });
+    }
+
+    #[test]
+    fn test_the_peers_route_round_trips() {
+        assert_eq!(Route::parse("#/peers"), Route::Peers);
+        assert_eq!(Route::Peers.href(), "#/peers");
+        assert_eq!(Route::parse(&Route::Peers.href()), Route::Peers);
     }
 
     #[test]

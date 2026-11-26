@@ -4,15 +4,16 @@
 
 //! Database maintenance commands that operate directly on the RocksDB store.
 //!
-//! These commands require `--db-path` and open the store in read-write mode.
-//! The node must be stopped before running these commands.
+//! These commands require `--db-path`. Commands that change the store open
+//! it in read-write mode; `version` opens it read-only. The node must be
+//! stopped before running these commands.
 
 use super::DbCommands;
 use bitcoin::BlockHash;
-use p2poolv2_lib::store::Store;
 use p2poolv2_lib::store::block_tx_metadata::{ChainMembership, Status};
 use p2poolv2_lib::store::dag_store::MAX_BLOCKS_PER_HEIGHT;
 use p2poolv2_lib::store::writer::StoreError;
+use p2poolv2_lib::store::{STORE_FORMAT_VERSION, Store, StoredStoreFormat};
 use std::error::Error;
 
 /// Open a RocksDB store in read-write mode for maintenance operations.
@@ -23,9 +24,35 @@ fn open_store_readwrite(db_path: &str) -> Result<Store, Box<dyn Error>> {
 
 /// Dispatch a db subcommand.
 pub fn execute(command: &DbCommands, db_path: &str) -> Result<(), Box<dyn Error>> {
-    let store = open_store_readwrite(db_path)?;
     match command {
-        DbCommands::CleanupDenseHeights => cleanup_dense_heights(&store),
+        DbCommands::CleanupDenseHeights => cleanup_dense_heights(&open_store_readwrite(db_path)?),
+        DbCommands::Version => print_store_format(db_path),
+    }
+}
+
+/// Print the store format version of the store at `db_path` next to the
+/// one this binary writes.
+///
+/// Reads the format without checking it, so it reports a store in any
+/// format, older or newer than the one this binary writes, which the node
+/// would refuse at startup.
+fn print_store_format(db_path: &str) -> Result<(), Box<dyn Error>> {
+    let format = Store::read_store_format(db_path)
+        .map_err(|error| format!("Failed to open database at {db_path}: {error}"))?;
+    println!("Store format version: {}", describe_store_format(format));
+    println!("Binary store format version: {STORE_FORMAT_VERSION}");
+    Ok(())
+}
+
+/// The store format as `db version` prints it.
+fn describe_store_format(format: StoredStoreFormat) -> String {
+    match format {
+        StoredStoreFormat::Version(version) => version.to_string(),
+        StoredStoreFormat::Unreadable => "unreadable".to_string(),
+        StoredStoreFormat::Unrecorded => {
+            "none (the store was written before 2026-10-30)".to_string()
+        }
+        StoredStoreFormat::Fresh => "none (empty store)".to_string(),
     }
 }
 

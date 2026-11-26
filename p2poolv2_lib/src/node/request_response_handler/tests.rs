@@ -114,7 +114,7 @@ async fn test_dispatch_response_share_headers() {
 
     let mut mock_validator = MockDefaultShareValidator::default();
     mock_validator
-        .expect_validate_header_minimum_difficulty()
+        .expect_validate_header_on_arrival()
         .returning(|_| Ok(()));
     let mut pool_difficulty = PoolDifficulty::default();
     pool_difficulty
@@ -619,7 +619,7 @@ async fn test_dispatch_response_records_share_block_knowledge() {
 
     let mut mock_validator = MockDefaultShareValidator::default();
     mock_validator
-        .expect_validate_share_header()
+        .expect_validate_header_on_arrival()
         .returning(|_| Ok(()));
     mock_validator
         .expect_validate_block_size()

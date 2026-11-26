@@ -15,6 +15,33 @@ use tracing::{debug, error};
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_utils;
 
+/// The signet template rule. Declared only when requesting signet templates.
+const SIGNET_RULE: &str = "signet";
+
+/// Template rules P2Poolv2 declares in `getblocktemplate` and builds valid
+/// blocks for. bitcoind marks a rule it requires the client to understand
+/// with a `!` prefix, and a template requiring any rule outside this list is
+/// refused.
+///
+/// - `segwit`: the coinbase carries the BIP141 witness commitment.
+/// - `signet`: declared so signet bitcoind serves templates. The coinbase
+///   carries no signet solution, so found blocks are valid only on a signet
+///   whose challenge needs none (such as `OP_TRUE`).
+/// - `consensuscleanup`: BIP54. The coinbase always sets nLockTime to
+///   `height - 1` and a non-final nSequence, and can never serialize to 64
+///   bytes.
+pub const SUPPORTED_RULES: [&str; 3] = ["segwit", SIGNET_RULE, "consensuscleanup"];
+
+/// The rules to declare in a `getblocktemplate` request for `network`: every
+/// supported rule, with `signet` only on signet.
+fn getblocktemplate_rules(network: bitcoin::Network) -> Vec<&'static str> {
+    SUPPORTED_RULES
+        .iter()
+        .copied()
+        .filter(|rule| *rule != SIGNET_RULE || network == bitcoin::Network::Signet)
+        .collect()
+}
+
 /// JSON-RPC 1.0 request structure (Bitcoin Core format)
 #[derive(Serialize)]
 struct JsonRpcRequest {
@@ -64,6 +91,15 @@ const RPC_IN_WARMUP: i32 = -28;
 
 /// `RPC_METHOD_NOT_FOUND`: the node has no RPC of that name.
 const RPC_METHOD_NOT_FOUND: i32 = -32601;
+
+/// JSON-RPC invalid params: the Knuth answer to every `getblocktemplate`
+/// proposal, "only template mode is supported" (`get_block_template` in
+/// `src/node/src/rpc/methods.cpp`).
+const RPC_INVALID_PARAMS: i32 = -32602;
+
+/// `RPC_INVALID_PARAMETER`: the BCHN answer to a `getblocktemplate` mode it
+/// does not know, "Invalid mode" (`src/rpc/mining.cpp`).
+const RPC_INVALID_PARAMETER: i32 = -8;
 
 /// What a node answers a block proposal whose parent is not its best block.
 /// It has no verdict on such a block: it only checks one built on its tip.
@@ -148,6 +184,18 @@ impl BitcoindRpcError {
     /// not reached yet; the node says nothing about the block itself.
     pub fn is_proposal_off_best_block(&self) -> bool {
         matches!(self, BitcoindRpcError::ProposalRejected { reason } if reason == PROPOSAL_NOT_BEST_PREVBLK)
+    }
+
+    /// Whether the node answered a block proposal that it checks no
+    /// proposals at all: it has no `getblocktemplate`, or no `proposal`
+    /// mode, as Knuth answers every proposal ("only template mode is
+    /// supported"). The node says nothing about the block.
+    pub fn is_proposal_unsupported(&self) -> bool {
+        matches!(
+            self,
+            BitcoindRpcError::RpcError { code, .. }
+                if [RPC_METHOD_NOT_FOUND, RPC_INVALID_PARAMS, RPC_INVALID_PARAMETER].contains(code)
+        )
     }
 }
 
@@ -567,29 +615,19 @@ impl BitcoindRpcClient {
 
     /// Fetch a Bitcoin template, negotiating SegWit and Signet when required.
     ///
-    /// Signet adds the signet rule. Every network declares the BIP 54
-    /// `consensuscleanup` rule: testnet5 marks it required (`!consensuscleanup`)
-    /// and refuses templates to clients that do not declare it, and the
-    /// coinbase we build already follows BIP 54. Nodes that do not know the
-    /// rule ignore it.
+    /// Declares the rules from `getblocktemplate_rules`. Signet adds the
+    /// signet rule. Every network declares the BIP 54 `consensuscleanup`
+    /// rule: testnet5 marks it required (`!consensuscleanup`) and refuses
+    /// templates to clients that do not declare it, and the coinbase we build
+    /// already follows BIP 54. Nodes that do not know the rule ignore it.
     pub async fn getblocktemplate(
         &self,
         network: bitcoin::Network,
     ) -> Result<String, BitcoindRpcError> {
-        let params = match network {
-            bitcoin::Network::Signet => {
-                vec![serde_json::json!({
-                    "capabilities": ["coinbasetxn", "coinbase/append", "workid"],
-                    "rules": ["segwit", "signet", "consensuscleanup"],
-                })]
-            }
-            _ => {
-                vec![serde_json::json!({
-                    "capabilities": ["coinbasetxn", "coinbase/append", "workid"],
-                    "rules": ["segwit", "consensuscleanup"],
-                })]
-            }
-        };
+        let params = vec![serde_json::json!({
+            "capabilities": ["coinbasetxn", "coinbase/append", "workid"],
+            "rules": getblocktemplate_rules(network),
+        })];
         self.request_block_template(params).await
     }
 
