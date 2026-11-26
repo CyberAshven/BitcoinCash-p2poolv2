@@ -98,12 +98,12 @@ format and genesis re-pin.
 ### Added
 
 - Onion peers: with `[network] tor_proxy`, the node dials
-  `/onion3/<address>:<port>` peers through a Tor SOCKS5 proxy, as Bitcoin
-  Cash Node's `-onion` does, and learns onion addresses from peers. Without
+  `/onion3/<address>:<port>` peers through a Tor SOCKS5 proxy, as
+  `-onion` does in Bitcoin Cash Node, and learns onion addresses from peers. Without
   it, onion addresses are ignored.
-- Onion services set up by hand: `external_address` may be the service's
-  `/onion3/<address>:6884`. With `[network] onion_only`, the node announces
-  only that address: no address from peers' observations or its listen
+- Onion services set up by hand: `external_address` may be the address of the
+  service, `/onion3/<address>:6884`. With `[network] onion_only`, the node announces
+  only that address: no address from what peers observe or from its listen
   addresses, no listen addresses in Identify, and no Nostr announcement
   while it reaches the relays directly.
 - Onion services through the Tor control port, on by default as
@@ -117,8 +117,8 @@ format and genesis re-pin.
   service. Without a `tor_proxy` it then dials onion peers through
   `127.0.0.1:9050`. `listen_onion = false` turns it off; with no Tor running
   the node retries quietly.
-- Onion-only mode and no clearnet leaks: `[network] onlynet` (Bitcoin Cash
-  Node's `-onlynet`, for example `["onion"]`) limits the networks the node
+- Onion-only mode and no clearnet leaks: `[network] onlynet` (`-onlynet` in
+  Bitcoin Cash Node, for example `["onion"]`) limits the networks the node
   dials, and `proxy_clearnet` (`-proxy`) sends IPv4, IPv6 and host-name
   dials through `tor_proxy` too, names unresolved. A node that opens no
   clearnet connection of its own skips DNS seeds, resolves no names and
