@@ -289,6 +289,7 @@ the simulation count nothing.
 | `p2p_connections_total` | counter | node connection tracker |
 | `p2p_ping_failures_total` | counter | node connection tracker |
 | `p2p_connections_closed_unresponsive_total` | counter | node connection tracker |
+| `p2p_connections_refused_total` | counter | node connection tracker |
 | `p2p_outbound_failures_total` | counter | node request-response handler |
 | `p2p_inbound_failures_total` | counter | node request-response handler |
 | `p2p_responses_dropped_total` | counter | node request-response handler |
@@ -315,6 +316,12 @@ unbounded and churn.
 `p2p_connections_closed_unresponsive_total` counts connections closed after
 `PING_FAILURE_THRESHOLD` consecutive ping failures -- a connection that
 negotiated but could not exchange messages (the 2026-09-17 fork).
+
+`p2p_connections_refused_total` counts connections, incoming and outgoing,
+that the connection limits (`max_established_*`, `max_pending_*`) refused. A
+peer that dials again while connected, or more peers than
+`max_established_incoming`, shows here. Before #160 each such refusal also
+lost requests without an outcome.
 
 `p2p_outgoing_peers` counts connected peers with at least one outgoing
 connection and `p2p_incoming_peers` the rest of `p2p_connected_peers`.
