@@ -32,11 +32,17 @@
 //! decides whether a peer is on our network, as for DNS seeds.
 //!
 //! A node that opens no clearnet connection of its own (`proxy_clearnet`, or
-//! an onion-only `onlynet`) reaches its relays through `tor_proxy`, the
-//! relay's name unresolved, so neither a relay nor a resolver sees its IP.
+//! an onion-only `onlynet`) reaches its relays through Tor, the name of the
+//! relay unresolved, so neither a relay nor a resolver sees its IP: through
+//! `tor_proxy`, or the default Tor SOCKS port once the Tor control port has
+//! made its onion service, and not at all before. An onion-only node
+//! (`onion_only`, or such an `onlynet`) announces only when it reaches its
+//! relays through Tor: a relay it reached directly would see its IP beside
+//! its onion address.
 
 use super::SwarmSend;
 use super::address_filter;
+use super::onion::OnionProxy;
 use crate::stratum::sv2::socks5;
 use bitcoin::hashes::{Hash, sha256};
 use bitcoin::secp256k1::{self, Keypair, Message, Secp256k1, SecretKey, XOnlyPublicKey};
@@ -47,7 +53,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio::time::timeout;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -69,6 +75,10 @@ pub(crate) const ANNOUNCEMENT_LIFETIME: Duration = Duration::from_secs(3 * 60 * 
 
 /// How often a node publishes its announcement again.
 pub(crate) const ANNOUNCE_EVERY: Duration = Duration::from_secs(60 * 60);
+
+/// The shortest time between two announcements, so an onion service that
+/// comes and goes does not flood the relays.
+const ANNOUNCE_GAP: Duration = Duration::from_secs(60);
 
 /// How often a node short of peers asks the relays.
 pub(crate) const LOOKUP_EVERY: Duration = Duration::from_secs(10 * 60);
@@ -544,6 +554,9 @@ pub(crate) struct NostrSeeds {
     pub(crate) tag: String,
     pub(crate) keys: Keypair,
     pub(crate) own_peer: PeerId,
+    /// Whether this node announces at all: `nostr_announce` is on, and an
+    /// onion-only node reaches the relays through Tor.
+    pub(crate) announces: bool,
     /// This node's addresses, each ending in its peer ID; empty when it does
     /// not announce.
     pub(crate) announce: Vec<Multiaddr>,
@@ -552,24 +565,67 @@ pub(crate) struct NostrSeeds {
     /// Proof of work an announcement needs, and this node's carry:
     /// [`MIN_POW_BITS`].
     pub(crate) pow_bits: u32,
-    /// The networks this node dials (`onlynet`, and onion only with a
-    /// `tor_proxy`); announced addresses on others are skipped.
+    /// The networks this node dials from the start (`onlynet`, and onion
+    /// only with a `tor_proxy`); announced addresses on others are skipped.
     reachable: address_filter::Reachable,
-    /// The SOCKS5 proxy the relays are reached through (`tor_proxy`) when
-    /// the node opens no clearnet connection of its own; None to reach them
-    /// directly.
-    relay_proxy: Option<String>,
+    /// The Tor proxy this node dials onion peers through, shared with its
+    /// transport: `tor_proxy`, or the default Tor SOCKS port once the Tor
+    /// control port has made its onion service. Announced onion addresses
+    /// count once it is set. None when the node never dials through Tor.
+    onion_proxy: Option<OnionProxy>,
+    /// The same proxy when the node opens no clearnet connection of its own
+    /// and reaches the relays only through Tor; None to reach them directly.
+    relay_proxy: Option<OnionProxy>,
 }
 
 impl NostrSeeds {
     /// Whether to dial an announced `address`: on a network this node
     /// dials, at a routable IP or an onion address, or at any IP on regtest.
     fn accepts(&self, address: &Multiaddr) -> bool {
+        let reachable = self.reachable();
         if self.accept_local {
-            self.reachable.allows(address)
+            reachable.allows(address)
         } else {
-            address_filter::is_reachable(address, self.reachable)
+            address_filter::is_reachable(address, reachable)
         }
+    }
+
+    /// The networks this node dials now: onion too once its Tor proxy is
+    /// set, unless `onlynet` leaves onion out.
+    fn reachable(&self) -> address_filter::Reachable {
+        match &self.onion_proxy {
+            Some(proxy) if proxy.get().is_some() => self.reachable.with_onion_proxy(),
+            _ => self.reachable,
+        }
+    }
+
+    /// How the relays are reached now: `Ok(None)` directly, `Ok(Some(proxy))`
+    /// through the Tor SOCKS port at `proxy`, and an error while a node that
+    /// reaches them only through Tor has no proxy yet.
+    pub(crate) fn relay_route(&self) -> Result<Option<String>, &'static str> {
+        match &self.relay_proxy {
+            None => Ok(None),
+            Some(proxy) => proxy.get().map(Some).ok_or(
+                "this node reaches its relays only through Tor, and the Tor control port has not made its onion service yet",
+            ),
+        }
+    }
+
+    /// What this node announces: its `external_address`, then the
+    /// addresses it gained while it runs (`run_time`), each ending in its
+    /// peer ID; nothing when it does not announce.
+    pub(crate) fn addresses(&self, run_time: &[Multiaddr]) -> Vec<Multiaddr> {
+        if !self.announces {
+            return Vec::new();
+        }
+        let mut addresses = self.announce.clone();
+        for address in run_time {
+            let address = with_peer(address.clone(), self.own_peer);
+            if !addresses.contains(&address) {
+                addresses.push(address);
+            }
+        }
+        addresses
     }
 
     /// The newest valid announcement per peer from `events`, newest first,
@@ -622,13 +678,17 @@ fn with_peer(mut address: Multiaddr, peer: PeerId) -> Multiaddr {
 
 /// The Nostr setup `config` asks for, or `None` without relays. The node
 /// announces its `external_address` when `nostr_announce` is on; on regtest
-/// it dials loopback and private addresses too. A node that opens no
-/// clearnet connection of its own reaches the relays through `tor_proxy`,
-/// and stays off Nostr without one.
+/// it dials loopback and private addresses too. `onion_proxy` is the Tor
+/// proxy the node dials onion peers through, None when it never can. A node
+/// that opens no clearnet connection of its own reaches the relays through
+/// it, and stays off Nostr without one. An onion-only node announces only
+/// then: one that reached the relays directly would show them its IP beside
+/// its onion address.
 pub(crate) fn from_config(
     config: &crate::config::Config,
     node_key: &libp2p::identity::Keypair,
     network_protocol: &str,
+    onion_proxy: Option<&OnionProxy>,
 ) -> Result<Option<NostrSeeds>, String> {
     use crate::config::{BitcoinCashNetwork, Chain};
     if config.network.nostr_relays.is_empty() {
@@ -637,9 +697,9 @@ pub(crate) fn from_config(
     let relay_proxy = if config.network.dials_clearnet_directly() {
         None
     } else {
-        let Some(proxy) = &config.network.tor_proxy else {
+        let Some(proxy) = onion_proxy else {
             info!(
-                "Nostr is off: this node opens no clearnet connection of its own and has no tor_proxy to reach the relays through"
+                "Nostr is off: this node opens no clearnet connection of its own and has no Tor proxy to reach the relays through, neither tor_proxy nor an onion service from the Tor control port"
             );
             return Ok(None);
         };
@@ -657,7 +717,14 @@ pub(crate) fn from_config(
             config.stratum.network == bitcoin::Network::Regtest,
         ),
     };
-    let announce = if config.network.nostr_announce {
+    let onion_only = config.network.announces_only_onion();
+    if config.network.nostr_announce && onion_only && relay_proxy.is_none() {
+        info!(
+            "Not announcing on Nostr: an onion-only node that reaches the relays directly would show them its IP beside its onion address"
+        );
+    }
+    let announces = config.network.nostr_announce && (!onion_only || relay_proxy.is_some());
+    let announce = if announces {
         config
             .network
             .external_address
@@ -674,10 +741,12 @@ pub(crate) fn from_config(
         tag: announcement_tag(&network_name, network_protocol),
         keys: nostr_keys(node_key)?,
         own_peer,
+        announces,
         announce,
         accept_local: regtest,
         pow_bits: MIN_POW_BITS,
         reachable: address_filter::Reachable::from_config(&config.network),
+        onion_proxy: onion_proxy.cloned(),
         relay_proxy,
     }))
 }
@@ -690,10 +759,20 @@ pub(crate) fn spawn_lookup<C: Send + 'static>(
     swarm_tx: mpsc::Sender<SwarmSend<C>>,
 ) {
     tokio::spawn(async move {
+        let proxy = match seeds.relay_route() {
+            Ok(proxy) => proxy,
+            Err(why) => {
+                debug!("Nostr lookup skipped: {why}");
+                return;
+            }
+        };
         let now = unix_now();
-        let answers = join_all(seeds.relays.iter().map(|relay| {
-            fetch_announcements(relay, seeds.relay_proxy.as_deref(), &seeds.tag, now)
-        }))
+        let answers = join_all(
+            seeds
+                .relays
+                .iter()
+                .map(|relay| fetch_announcements(relay, proxy.as_deref(), &seeds.tag, now)),
+        )
         .await;
         let mut events = Vec::new();
         for answer in answers {
@@ -713,19 +792,46 @@ pub(crate) fn spawn_lookup<C: Send + 'static>(
 }
 
 /// Spawns a task that publishes this node's announcement on every relay now
-/// and every [`ANNOUNCE_EVERY`] after.
-pub(crate) fn spawn_announcer(seeds: Arc<NostrSeeds>) -> tokio::task::JoinHandle<()> {
+/// and every [`ANNOUNCE_EVERY`] after, and again when `run_time`, the
+/// addresses the node gains while it runs (its onion service's), changes.
+/// It publishes only while it has an address, and at most once every
+/// [`ANNOUNCE_GAP`].
+pub(crate) fn spawn_announcer(
+    seeds: Arc<NostrSeeds>,
+    mut run_time: watch::Receiver<Vec<Multiaddr>>,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut every = tokio::time::interval(ANNOUNCE_EVERY);
+        let mut watching = true;
         loop {
-            every.tick().await;
+            tokio::select! {
+                _ = every.tick() => {}
+                changed = run_time.changed(), if watching => {
+                    // The node has stopped: its addresses change no more.
+                    if changed.is_err() {
+                        watching = false;
+                        continue;
+                    }
+                }
+            }
+            let addresses = seeds.addresses(&run_time.borrow_and_update());
+            if addresses.is_empty() {
+                continue;
+            }
+            let proxy = match seeds.relay_route() {
+                Ok(proxy) => proxy,
+                Err(why) => {
+                    debug!("Nostr announcement skipped: {why}");
+                    continue;
+                }
+            };
             let event = {
                 let seeds = Arc::clone(&seeds);
                 match tokio::task::spawn_blocking(move || {
                     sign_announcement(
                         &seeds.keys,
                         &seeds.tag,
-                        &seeds.announce,
+                        &addresses,
                         unix_now(),
                         seeds.pow_bits,
                     )
@@ -743,7 +849,7 @@ pub(crate) fn spawn_announcer(seeds: Arc<NostrSeeds>) -> tokio::task::JoinHandle
                 seeds
                     .relays
                     .iter()
-                    .map(|relay| publish(relay, seeds.relay_proxy.as_deref(), &event)),
+                    .map(|relay| publish(relay, proxy.as_deref(), &event)),
             )
             .await;
             let accepted = results.iter().filter(|result| result.is_ok()).count();
@@ -754,6 +860,7 @@ pub(crate) fn spawn_announcer(seeds: Arc<NostrSeeds>) -> tokio::task::JoinHandle
                 "Announced this node on {accepted} of {} Nostr relays",
                 seeds.relays.len()
             );
+            tokio::time::sleep(ANNOUNCE_GAP).await;
         }
     })
 }

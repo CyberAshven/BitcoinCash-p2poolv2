@@ -176,8 +176,10 @@ pub(crate) struct OutgoingPeerTarget {
     lookup_settle: Duration,
     /// Dials started toward the target since start, for P2P health metrics.
     dials_attempted_total: u64,
-    /// The networks the node dials (`onlynet`, `tor_proxy`): addresses on
-    /// others are not worth keeping or dialing.
+    /// The networks the node dials (`onlynet`, and onion through
+    /// `tor_proxy`, or the default Tor SOCKS port once the Tor control port
+    /// made its onion service): addresses on others are not worth keeping
+    /// or dialing.
     reachable: Reachable,
 }
 
@@ -239,6 +241,14 @@ impl OutgoingPeerTarget {
     /// The networks the node dials, so the addresses it can reach.
     pub(crate) fn reachable(&self) -> Reachable {
         self.reachable
+    }
+
+    /// The node dials through Tor from now on: without a `tor_proxy`, Tor's
+    /// control port has made its onion service and Tor's default SOCKS port
+    /// is used. Onion addresses count from now on, unless `onlynet` leaves
+    /// onion out; those learned before were not kept.
+    pub(crate) fn set_onion_reachable(&mut self) {
+        self.reachable = self.reachable.with_onion_proxy();
     }
 
     /// Peers with at least one established outgoing connection, lookups
@@ -717,7 +727,7 @@ fn dialable_addresses<'a>(
 /// A globally routable IPv4 or IPv6 address followed by a TCP port and
 /// nothing else, what the node's TCP transport dials, or a v3 onion address
 /// alone, which it dials through Tor; either on a network the node dials
-/// (`reachable`: `onlynet`, and onion only with a `tor_proxy`).
+/// (`reachable`: `onlynet`, and onion only with a Tor proxy).
 fn is_dialable(address: &Multiaddr, reachable: Reachable) -> bool {
     let mut protocols = address.iter();
     let dialable_form = match (protocols.next(), protocols.next(), protocols.next()) {
@@ -731,6 +741,7 @@ fn is_dialable(address: &Multiaddr, reachable: Reachable) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::PeerNetwork;
     use libp2p::core::Endpoint;
     use libp2p::core::transport::PortUse;
     use tokio::time::advance;
@@ -1126,6 +1137,51 @@ mod tests {
             network_group(&onion),
             Some(NetworkGroup::Onion(_))
         ));
+    }
+
+    /// Without a `tor_proxy`, onion addresses count once the Tor control
+    /// port has made the onion service and its SOCKS port is used, unless
+    /// `onlynet` leaves onion out; an onion-only `onlynet` never counts an
+    /// IP address.
+    #[tokio::test(start_paused = true)]
+    async fn test_learns_onion_addresses_once_the_control_port_proxy_is_set() {
+        let onion: Multiaddr =
+            "/onion3/2gzyxa5ihm7nsggfxnu52rck2vv4rvmdlkiu3zzui5du4xyclen53wid:6884"
+                .parse()
+                .unwrap();
+        let ip: Multiaddr = "/ip4/1.2.3.4/tcp/6884".parse().unwrap();
+
+        let onion_only = NetworkConfig {
+            onlynet: Some(vec![PeerNetwork::Onion]),
+            ..NetworkConfig::default()
+        };
+        let mut target = OutgoingPeerTarget::new(&onion_only, BlockedIps::default());
+        let before = PeerId::random();
+        target.learn_addresses(before, [&onion, &ip]);
+        assert!(!target.knows(&before), "no proxy for onion peers yet");
+        target.set_onion_reachable();
+        assert!(target.reachable().allows(&onion));
+        let after = PeerId::random();
+        target.learn_addresses(after, [&ip, &onion]);
+        let dial = target.next_dial(OutgoingCounts::default(), |_| false);
+        assert_eq!(dial.map(|dial| dial.address), Some(onion.clone()));
+        let ip_only = PeerId::random();
+        target.learn_addresses(ip_only, [&ip]);
+        assert!(!target.knows(&ip_only));
+
+        let ipv4_only = NetworkConfig {
+            onlynet: Some(vec![PeerNetwork::Ipv4]),
+            ..NetworkConfig::default()
+        };
+        let mut target = OutgoingPeerTarget::new(&ipv4_only, BlockedIps::default());
+        target.set_onion_reachable();
+        assert!(
+            !target.reachable().allows(&onion),
+            "onlynet leaves onion out"
+        );
+        let peer = PeerId::random();
+        target.learn_addresses(peer, [&onion]);
+        assert!(!target.knows(&peer));
     }
 
     #[tokio::test(start_paused = true)]

@@ -88,7 +88,7 @@ fn an_onion3_address_of_another_version_is_refused() {
 /// `MultiaddrNotSupported`.
 #[test]
 fn the_onion_transport_refuses_other_addresses() {
-    let mut transport = OnionTransport::new("127.0.0.1:9050".to_string());
+    let mut transport = OnionTransport::new(OnionProxy::new(Some("127.0.0.1:9050".to_string())));
     let address: Multiaddr = "/ip4/203.0.113.1/tcp/6884".parse().unwrap();
     let result = transport.dial(
         address.clone(),
@@ -118,7 +118,12 @@ async fn onion_only_refuses_clearnet_addresses_before_connecting() {
         onlynet: Some(vec![PeerNetwork::Onion]),
         ..NetworkConfig::default()
     };
-    let mut transport = base_transport(TcpConfig::default(), &network, BlockedIps::default());
+    let mut transport = base_transport(
+        TcpConfig::default(),
+        &network,
+        BlockedIps::default(),
+        Some(OnionProxy::new(network.tor_proxy.clone())),
+    );
     let dial_opts = DialOpts {
         role: Endpoint::Dialer,
         port_use: PortUse::New,
@@ -165,7 +170,12 @@ async fn proxy_clearnet_sends_ip_and_name_dials_to_the_proxy() {
         proxy_clearnet: true,
         ..NetworkConfig::default()
     };
-    let mut transport = base_transport(TcpConfig::default(), &network, BlockedIps::default());
+    let mut transport = base_transport(
+        TcpConfig::default(),
+        &network,
+        BlockedIps::default(),
+        Some(OnionProxy::new(network.tor_proxy.clone())),
+    );
     let dial_opts = DialOpts {
         role: Endpoint::Dialer,
         port_use: PortUse::New,
@@ -192,4 +202,95 @@ async fn proxy_clearnet_sends_ip_and_name_dials_to_the_proxy() {
     assert_eq!(request.address_type, 3, "a name, not an address");
     assert_eq!(request.host, "peer.invalid".as_bytes());
     assert_eq!(request.port, 6884);
+}
+
+/// Without a proxy an onion address falls through like any other. Once the
+/// node sets Tor's default port, as after Tor's control port made its onion
+/// service, onion addresses are dialed, and a proxy once set stays.
+#[test]
+fn the_onion_transport_dials_once_a_proxy_is_set() {
+    let proxy = OnionProxy::new(None);
+    let mut transport = OnionTransport::new(proxy.clone());
+    let onion: Multiaddr = format!("/onion3/{TOR_PROJECT_ONION}:6884").parse().unwrap();
+    let opts = DialOpts {
+        role: Endpoint::Dialer,
+        port_use: PortUse::New,
+    };
+    assert!(matches!(
+        transport.dial(onion.clone(), opts),
+        Err(TransportError::MultiaddrNotSupported(_))
+    ));
+
+    assert!(proxy.set_if_unset("127.0.0.1:9050"));
+    assert!(transport.dial(onion, opts).is_ok());
+    assert!(!proxy.set_if_unset("127.0.0.1:9150"));
+    assert_eq!(proxy.get().as_deref(), Some("127.0.0.1:9050"));
+}
+
+/// An onion-only node (`onlynet = ["onion"]`) without a `tor_proxy`, whose
+/// proxy comes from the Tor control port: before its onion service is up it
+/// dials nothing, onion addresses included. Once the node sets the default
+/// Tor port it dials onion peers through it, the name unresolved, and still
+/// refuses IP and host-name addresses before anything connects or resolves.
+#[tokio::test]
+async fn onion_only_dials_onions_once_the_control_port_proxy_is_set() {
+    let peer = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = peer.local_addr().unwrap().port();
+    let mut tor = TestSocksProxy::start(None, true).await;
+    let network = NetworkConfig {
+        dial_peers: vec![format!("/dns4/localhost/tcp/{port}")],
+        onlynet: Some(vec![PeerNetwork::Onion]),
+        ..NetworkConfig::default()
+    };
+    let onion_proxy = OnionProxy::new(network.tor_proxy.clone());
+    let mut transport = base_transport(
+        TcpConfig::default(),
+        &network,
+        BlockedIps::default(),
+        Some(onion_proxy.clone()),
+    );
+    let dial_opts = DialOpts {
+        role: Endpoint::Dialer,
+        port_use: PortUse::New,
+    };
+    let onion: Multiaddr = format!("/onion3/{TOR_PROJECT_ONION}:6884").parse().unwrap();
+    let ip: Multiaddr = format!("/ip4/127.0.0.1/tcp/{port}").parse().unwrap();
+    let name: Multiaddr = format!("/dns4/localhost/tcp/{port}").parse().unwrap();
+
+    for address in [&onion, &ip, &name] {
+        assert!(
+            matches!(
+                transport.dial(address.clone(), dial_opts),
+                Err(TransportError::MultiaddrNotSupported(_))
+            ),
+            "{address} before the onion service is up"
+        );
+    }
+
+    assert!(onion_proxy.set_if_unset(&tor.address));
+    let dialed = transport.dial(onion, dial_opts).unwrap().await;
+    assert!(dialed.is_err(), "the test proxy refuses every connection");
+    let request = tor.next_request().await;
+    assert_eq!(request.address_type, 3, "a name, not an address");
+    assert_eq!(
+        request.host,
+        format!("{TOR_PROJECT_ONION}.onion").as_bytes()
+    );
+    assert_eq!(request.port, 6884);
+    for address in [ip, name] {
+        assert!(
+            matches!(
+                transport.dial(address.clone(), dial_opts),
+                Err(TransportError::MultiaddrNotSupported(_))
+            ),
+            "{address} once the onion service is up"
+        );
+    }
+
+    assert!(
+        timeout(Duration::from_millis(200), peer.accept())
+            .await
+            .is_err(),
+        "no TCP connection reaches the peer"
+    );
 }

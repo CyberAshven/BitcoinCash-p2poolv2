@@ -41,10 +41,12 @@ fn seeds(own: &libp2p::identity::Keypair, relays: Vec<String>, accept_local: boo
         tag: TAG.into(),
         keys: nostr_keys(own).unwrap(),
         own_peer: own.public().to_peer_id(),
+        announces: false,
         announce: vec![],
         accept_local,
         pow_bits: TEST_POW_BITS,
         reachable: address_filter::Reachable::from_config(&NetworkConfig::default()),
+        onion_proxy: None,
         relay_proxy: None,
     }
 }
@@ -322,6 +324,48 @@ async fn an_announcement_goes_through_a_relay() {
     );
 }
 
+/// A node with no `external_address` announces nothing until it gains an
+/// address while it runs, its onion service's, and then announces it,
+/// ending in its peer ID.
+#[tokio::test]
+async fn the_announcer_publishes_an_address_gained_at_run_time() {
+    let (url, relay) = spawn_relay().await;
+    let key = node_key();
+    let mut announcing = seeds(&key, vec![url], false);
+    announcing.announces = true;
+    let (run_time, receiver) = watch::channel(Vec::new());
+    let announcer = spawn_announcer(Arc::new(announcing), receiver);
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        relay.events.lock().unwrap().is_empty(),
+        "nothing to announce yet"
+    );
+
+    let onion = "/onion3/2gzyxa5ihm7nsggfxnu52rck2vv4rvmdlkiu3zzui5du4xyclen53wid:6884";
+    run_time.send_modify(|addresses| addresses.push(onion.parse().unwrap()));
+    let published = timeout(Duration::from_secs(10), async {
+        loop {
+            let first = relay.events.lock().unwrap().first().cloned();
+            if let Some(event) = first {
+                return event;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the onion address was never announced");
+    announcer.abort();
+
+    let announced: Vec<&str> = published
+        .tags
+        .iter()
+        .filter(|tag| tag.first().map(String::as_str) == Some("addr"))
+        .filter_map(|tag| tag.get(1).map(String::as_str))
+        .collect();
+    assert_eq!(announced, vec![address_of(&key, onion).to_string()]);
+}
+
 /// A relay that is down or never answers costs a lookup its timeout, not
 /// the lookup.
 #[tokio::test]
@@ -464,7 +508,7 @@ fn the_config_decides_what_a_node_announces() {
     let key = node_key();
     let protocol = "/p2pool/test/sample/1.0.0";
 
-    let seeds = from_config(&config, &key, protocol).unwrap().unwrap();
+    let seeds = from_config(&config, &key, protocol, None).unwrap().unwrap();
     assert_eq!(
         seeds.relays.len(),
         crate::config::DEFAULT_NOSTR_RELAYS.len()
@@ -478,15 +522,30 @@ fn the_config_decides_what_a_node_announces() {
     assert_eq!(seeds.pow_bits, MIN_POW_BITS);
 
     config.network.external_address = Some("/ip4/1.2.3.4/tcp/6890".into());
-    let seeds = from_config(&config, &key, protocol).unwrap().unwrap();
+    let seeds = from_config(&config, &key, protocol, None).unwrap().unwrap();
     assert_eq!(
         seeds.announce,
         vec![address_of(&key, "/ip4/1.2.3.4/tcp/6890")]
     );
 
+    // A relay it reaches directly would see the IP of an onion-only node
+    // beside its onion address.
+    let mut onion_only = config.clone();
+    onion_only.network.onion_only = true;
+    onion_only.network.external_address =
+        Some("/onion3/2gzyxa5ihm7nsggfxnu52rck2vv4rvmdlkiu3zzui5du4xyclen53wid:6884".into());
+    assert!(
+        from_config(&onion_only, &key, protocol, None)
+            .unwrap()
+            .unwrap()
+            .announce
+            .is_empty(),
+        "an onion_only node that reaches the relays directly does not announce"
+    );
+
     config.network.nostr_announce = false;
     assert!(
-        from_config(&config, &key, protocol)
+        from_config(&config, &key, protocol, None)
             .unwrap()
             .unwrap()
             .announce
@@ -494,5 +553,89 @@ fn the_config_decides_what_a_node_announces() {
     );
 
     config.network.nostr_relays = vec![];
-    assert!(from_config(&config, &key, protocol).unwrap().is_none());
+    assert!(
+        from_config(&config, &key, protocol, None)
+            .unwrap()
+            .is_none()
+    );
+}
+
+/// An onion-only node announces on Nostr only through Tor. With `onion_only`
+/// alone it reaches its relays directly, so it announces nothing: a relay
+/// would see its IP beside its onion address. With `onlynet = ["onion"]` and
+/// its proxy from the Tor control port, it reaches no relay before its
+/// onion service is up, then announces the service through the Tor SOCKS
+/// port, the name of the relay unresolved.
+#[tokio::test]
+async fn an_onion_only_node_announces_on_nostr_only_through_tor() {
+    let (url, relay) = spawn_relay().await;
+    let relay_address: SocketAddr = url.trim_start_matches("ws://").parse().unwrap();
+    let mut tor = TestSocksProxy::start(Some(relay_address), true).await;
+    let key = node_key();
+    let protocol = "/p2pool/test/sample/1.0.0";
+    let onion: Multiaddr = "/onion3/2gzyxa5ihm7nsggfxnu52rck2vv4rvmdlkiu3zzui5du4xyclen53wid:6884"
+        .parse()
+        .unwrap();
+    let mut config = crate::config::Config::load("../config.sample.toml").unwrap();
+    config.network.nostr_relays = vec!["ws://relay.invalid:7447".to_string()];
+    config.network.onion_only = true;
+    let onion_proxy = OnionProxy::new(None);
+
+    let direct = from_config(&config, &key, protocol, Some(&onion_proxy))
+        .unwrap()
+        .unwrap();
+    assert_eq!(direct.relay_route(), Ok(None));
+    assert!(
+        direct.addresses(std::slice::from_ref(&onion)).is_empty(),
+        "relays reached directly"
+    );
+
+    config.network.onion_only = false;
+    config.network.onlynet = Some(vec![PeerNetwork::Onion]);
+    let mut through_tor = from_config(&config, &key, protocol, Some(&onion_proxy))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        through_tor.addresses(std::slice::from_ref(&onion)),
+        vec![with_peer(onion.clone(), key.public().to_peer_id())]
+    );
+    assert!(
+        through_tor.relay_route().is_err(),
+        "no Tor proxy before the onion service is up"
+    );
+    through_tor.pow_bits = TEST_POW_BITS;
+    let (run_time, receiver) = watch::channel(Vec::new());
+    let announcer = spawn_announcer(Arc::new(through_tor), receiver);
+
+    // As when the Tor control port has made the service: the node sets the
+    // Tor SOCKS port, then hands the announcer the address of the service.
+    assert!(onion_proxy.set_if_unset(&tor.address));
+    run_time.send_modify(|addresses| addresses.push(onion.clone()));
+    let request = tor.next_request().await;
+    assert_eq!(request.address_type, 3, "a name, not an address");
+    assert_eq!(request.host, "relay.invalid".as_bytes());
+    assert_eq!(request.port, 7447);
+    let published = timeout(Duration::from_secs(10), async {
+        loop {
+            let first = relay.events.lock().unwrap().first().cloned();
+            if let Some(event) = first {
+                return event;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the onion address was never announced");
+    announcer.abort();
+
+    let announced: Vec<&str> = published
+        .tags
+        .iter()
+        .filter(|tag| tag.first().map(String::as_str) == Some("addr"))
+        .filter_map(|tag| tag.get(1).map(String::as_str))
+        .collect();
+    assert_eq!(
+        announced,
+        vec![with_peer(onion, key.public().to_peer_id()).to_string()]
+    );
 }

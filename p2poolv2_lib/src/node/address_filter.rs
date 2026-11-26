@@ -111,20 +111,37 @@ pub fn is_routable_multiaddr(address: &Multiaddr) -> bool {
 }
 
 /// The networks the node dials peers on (`NetworkConfig::dials`): those
-/// `onlynet` lists, or IPv4, IPv6 and, through a `tor_proxy`, onion.
+/// `onlynet` lists, or IPv4, IPv6 and, through a Tor proxy, onion.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Reachable {
     ipv4: bool,
     ipv6: bool,
+    /// Whether `onlynet` allows onion, so onion becomes reachable once the
+    /// node has a proxy for it (`with_onion_proxy`).
+    onion_allowed: bool,
     onion: bool,
 }
 
 impl Reachable {
+    /// The networks the node dials from the start: onion only with a
+    /// `tor_proxy`.
     pub(crate) fn from_config(config: &NetworkConfig) -> Self {
         Self {
             ipv4: config.dials(PeerNetwork::Ipv4),
             ipv6: config.dials(PeerNetwork::Ipv6),
+            onion_allowed: config.onlynet_allows(PeerNetwork::Onion),
             onion: config.dials(PeerNetwork::Onion),
+        }
+    }
+
+    /// The same networks once the node has a proxy for onion peers, as when
+    /// the Tor control port has made its onion service and the node dials
+    /// through the default Tor SOCKS port: onion too, unless `onlynet`
+    /// leaves it out.
+    pub(crate) fn with_onion_proxy(self) -> Self {
+        Self {
+            onion: self.onion_allowed,
+            ..self
         }
     }
 

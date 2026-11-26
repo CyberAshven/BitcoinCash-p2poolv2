@@ -5,7 +5,9 @@
 //! Dialing Tor onion services: `/onion3/<address>:<port>` peers are reached
 //! through a local Tor daemon's SOCKS5 port (`[network] tor_proxy`), as
 //! Bitcoin Cash Node's `-onion` does. The onion name goes to the proxy
-//! unresolved, so nothing about it is looked up locally.
+//! unresolved, so nothing about it is looked up locally. Without a
+//! `tor_proxy`, Tor's default SOCKS port is used once Tor's control port has
+//! made the node's onion service (`tor_control`), as Bitcoin Cash Node does.
 //!
 //! A v3 onion address is 35 bytes: the service's ed25519 key (32), a
 //! checksum (2) and the version byte 3 (rend-spec-v3, "Encoding onion
@@ -16,7 +18,9 @@
 //! With `[network] proxy_clearnet`, as Bitcoin Cash Node's `-proxy`, IPv4,
 //! IPv6 and host-name TCP addresses go through the proxy too, a host name
 //! unresolved for Tor's exit to resolve, so the node neither connects to a
-//! clearnet peer nor asks a resolver itself.
+//! clearnet peer nor asks a resolver itself. While no proxy is set, those
+//! addresses go to the transport beside this one, which refuses them when
+//! the node opens no clearnet connection of its own.
 
 use crate::stratum::sv2::socks5;
 use futures::future::{BoxFuture, Pending};
@@ -25,6 +29,7 @@ use libp2p::core::transport::{DialOpts, ListenerId, Transport, TransportError, T
 use libp2p::multiaddr::Protocol;
 use std::io;
 use std::pin::Pin;
+use std::sync::{Arc, PoisonError, RwLock};
 use std::task::{Context, Poll};
 use tracing::debug;
 
@@ -103,18 +108,51 @@ fn base32_lower(bytes: &[u8]) -> String {
     encoded
 }
 
+/// The Tor SOCKS5 proxy onion dials go through, `host:port`, shared by the
+/// transport, the node and its Nostr relay connections: `tor_proxy`, or
+/// none until the Tor control port has made the onion service of the node
+/// and the node sets the Tor default. A poisoned lock is recovered: a panic
+/// cannot leave a proxy address half written.
+#[derive(Clone, Debug)]
+pub(crate) struct OnionProxy(Arc<RwLock<Option<String>>>);
+
+impl OnionProxy {
+    pub(crate) fn new(proxy: Option<String>) -> Self {
+        Self(Arc::new(RwLock::new(proxy)))
+    }
+
+    /// The proxy, or None while none is set.
+    pub(crate) fn get(&self) -> Option<String> {
+        self.0
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Sets `proxy` unless a proxy is set already; whether it did.
+    pub(crate) fn set_if_unset(&self, proxy: &str) -> bool {
+        let mut current = self.0.write().unwrap_or_else(PoisonError::into_inner);
+        if current.is_some() {
+            return false;
+        }
+        *current = Some(proxy.to_string());
+        true
+    }
+}
+
 /// Dials `/onion3` addresses, and with `clearnet` IP and host-name TCP
-/// addresses too, through the SOCKS5 proxy at `proxy`, and refuses every
+/// addresses too, through the SOCKS5 proxy in `proxy`, and refuses every
 /// other address with `MultiaddrNotSupported`, so `or_transport` hands it to
-/// the transport beside it. It listens on nothing: inbound onion connections
-/// reach the node's TCP listener from the Tor daemon.
+/// the transport beside it; those addresses too while no proxy is set. It
+/// listens on nothing: inbound onion connections reach the TCP listener of
+/// the node from the Tor daemon.
 pub(crate) struct OnionTransport {
-    proxy: String,
+    proxy: OnionProxy,
     clearnet: bool,
 }
 
 impl OnionTransport {
-    pub(crate) fn new(proxy: String) -> Self {
+    pub(crate) fn new(proxy: OnionProxy) -> Self {
         Self {
             proxy,
             clearnet: false,
@@ -122,7 +160,8 @@ impl OnionTransport {
     }
 
     /// Dial IPv4, IPv6 and host-name TCP addresses through the proxy too
-    /// (`proxy_clearnet`), names unresolved.
+    /// (`proxy_clearnet`), names unresolved. They need a proxy set, as
+    /// onion addresses do.
     pub(crate) fn with_clearnet(mut self, clearnet: bool) -> Self {
         self.clearnet = clearnet;
         self
@@ -159,7 +198,9 @@ impl Transport for OnionTransport {
         let Some((host, port)) = target else {
             return Err(TransportError::MultiaddrNotSupported(address));
         };
-        let proxy = self.proxy.clone();
+        let Some(proxy) = self.proxy.get() else {
+            return Err(TransportError::MultiaddrNotSupported(address));
+        };
         debug!("Dialing {host}:{port} through the Tor proxy at {proxy}");
         Ok(Box::pin(async move {
             let stream = socks5::connect(&proxy, &format!("{host}:{port}"))
