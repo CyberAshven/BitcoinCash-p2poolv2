@@ -209,6 +209,12 @@ pub(crate) struct Site {
     /// The port the stratum V2 endpoint listens on, or `None` when the node
     /// runs without SV2; the help page then prints a placeholder.
     pub(crate) sv2_port: Option<u16>,
+    /// The network spelled as `p2poolv2_cli bch-share-address --network`
+    /// accepts it, or `None` when this node mines the Bitcoin chain and
+    /// has no share address prefix. The help page shows the generator only
+    /// when it is `Some`, so the example command it prints is one the CLI
+    /// can actually run.
+    pub(crate) share_cli_network: Option<&'static str>,
 }
 
 /// The menu bar's pages.
@@ -2073,34 +2079,52 @@ pub(crate) fn help(site: &Site, host: &str, payout: &str, result: &str, error: &
                 h3 { "Connect a miner" }
                 // The generator asks the node, which runs the same rule
                 // as the CLI command at the end of this section, so the
-                // two can never disagree.
-                form.share-form.search-row action="/dashboard/help" method="get" {
-                    div.grow {
-                        label for="share-payout" { "Enter your payout address to get miner connection info." }
-                        input #share-payout type="text" name="payout" value=(payout)
-                            placeholder="bchtest:… or bitcoincash:…" required;
+                // two can never disagree. On a node with no share address
+                // prefix neither exists: the CLI's `--network` would have
+                // no spelling to take, so the form and its example stay
+                // out of the page rather than suggest a command that
+                // cannot run.
+                @if let Some(share_cli_network) = site.share_cli_network {
+                    form.share-form.search-row action="/dashboard/help" method="get" {
+                        div.grow {
+                            label for="share-payout" { "Enter your payout address to get miner connection info." }
+                            input #share-payout type="text" name="payout" value=(payout)
+                                placeholder="bchtest:… or bitcoincash:…" required;
+                        }
+                        button.btn-primary type="submit" { "Generate" }
                     }
-                    button.btn-primary type="submit" { "Generate" }
+                    @if !error.is_empty() {
+                        div.toast role="alert" { (error) }
+                    }
+                    p { "Stratum V1: point the miner at this node's stratum port." }
+                    ul {
+                        li { "URL: " code { (stratum_url) } }
+                        li { "User: " code { (user_payout) } }
+                        li { "Worker Name (optional): " code { "<payout address>.<worker>" } }
+                        li { "Password: " code { "p2p=" (share) } ", which names who owns your shares." }
+                    }
+                    p { "Stratum V2: point the miner at this node's SV2 port and pin its authority key." }
+                    ul {
+                        li { "Host: " code { (sv2_host) } }
+                        li { "User: " code { (user_payout) ",p2p=" (share) } }
+                        li { "Worker Name (optional): " code { "<payout address>.<worker>" } }
+                        li { "Key: the node's authority public key (configure when the node runs Noise keys)" }
+                    }
+                    p { "SV1 devices can connect to the SV1 port directly, or mine through an SV2 translator." }
+                    p { "Validate a share chain address with " code { "p2poolv2_cli bch-share-address --network " (share_cli_network) " <payout address>" } "." }
+                } @else {
+                    p { "Stratum V1: point the miner at this node's stratum port." }
+                    ul {
+                        li { "URL: " code { (stratum_url) } }
+                    }
+                    p { "Stratum V2: point the miner at this node's SV2 port and pin its authority key." }
+                    ul {
+                        li { "Host: " code { (sv2_host) } }
+                        li { "Key: the node's authority public key (configure when the node runs Noise keys)" }
+                    }
+                    p { "SV1 devices can connect to the SV1 port directly, or mine through an SV2 translator." }
+                    p { "This node mines the Bitcoin chain, which has no share chain address; a payout address here names bitcoin coinbase outputs only." }
                 }
-                @if !error.is_empty() {
-                    div.toast role="alert" { (error) }
-                }
-                p { "Stratum V1: point the miner at this node's stratum port." }
-                ul {
-                    li { "URL: " code { (stratum_url) } }
-                    li { "User: " code { (user_payout) } }
-                    li { "Worker Name (optional): " code { "<payout address>.<worker>" } }
-                    li { "Password: " code { "p2p=" (share) } ", which names who owns your shares." }
-                }
-                p { "Stratum V2: point the miner at this node's SV2 port and pin its authority key." }
-                ul {
-                    li { "Host: " code { (sv2_host) } }
-                    li { "User: " code { (user_payout) ",p2p=" (share) } }
-                    li { "Worker Name (optional): " code { "<payout address>.<worker>" } }
-                    li { "Key: the node's authority public key (configure when the node runs Noise keys)" }
-                }
-                p { "SV1 devices can connect to the SV1 port directly, or mine through an SV2 translator." }
-                p { "Validate a share chain address with " code { "p2poolv2_cli bch-share-address --network " (site.badge) " <payout address>" } "." }
             }
             div.help-section {
                 h3 { "Pages" }
@@ -2238,6 +2262,7 @@ mod tests {
             auth: true,
             stratum_port: 3333,
             sv2_port: Some(3336),
+            share_cli_network: Some("chipnet"),
         }
     }
 
@@ -2716,6 +2741,7 @@ mod tests {
                 auth: false,
                 stratum_port: 3333,
                 sv2_port: None,
+                share_cli_network: Some("chipnet"),
             },
             "Dashboard",
             Tab::Dashboard,
@@ -2976,14 +3002,16 @@ mod tests {
             "Invalid Bitcoin Cash payout address: CashAddr prefix is required",
         )
         .into_string();
-        assert!(page.contains(
-            r#"role="alert">Invalid Bitcoin Cash payout address: CashAddr prefix is required"#
-        ));
+        assert!(
+            widget_toast(&page)
+                .unwrap()
+                .contains("Invalid Bitcoin Cash payout address: CashAddr prefix is required")
+        );
         assert!(page.contains("User: <code>&lt;payout address&gt;</code>"));
         assert!(page.contains("p2p=&lt;share chain address&gt;"));
         assert!(page.contains(r#"value="nope""#));
         let form_end = page.find("</form>").unwrap();
-        let toast = page.find("role=\"alert\"").unwrap();
+        let toast = widget_toast_pos(&page).unwrap();
         assert!(
             form_end < toast,
             "the error renders directly after the form"
@@ -2995,9 +3023,65 @@ mod tests {
     #[test]
     fn without_a_submission_the_widget_shows_no_error_and_no_fill() {
         let page = help(&site(), "", "", "", "").into_string();
-        assert!(!page.contains("role=\"alert\""));
+        assert!(widget_toast(&page).is_none());
         assert!(page.contains(r#"value="""#));
         assert!(page.contains("User: <code>&lt;payout address&gt;</code>"));
+    }
+
+    /// The generator's error toast, between the form and the "Pages"
+    /// section that follows. Scoped that way because the error layout
+    /// shares `role="alert"` with the widget, so a whole-page search would
+    /// find the layout's toast rather than the generator's.
+    fn widget_toast(page: &str) -> Option<String> {
+        let section = page
+            .split("<h3>Connect a miner</h3>")
+            .nth(1)?
+            .split("<h3>Pages</h3>")
+            .next()?;
+        let rest = section.split("role=\"alert\">").nth(1)?;
+        Some(rest.split('<').next().unwrap_or(rest).to_string())
+    }
+
+    /// The same toast's byte position, for ordering assertions.
+    fn widget_toast_pos(page: &str) -> Option<usize> {
+        let start = page.find("<h3>Connect a miner</h3>")?;
+        let end = page.find("<h3>Pages</h3>")?;
+        page[start..end].find("role=\"alert\"").map(|at| start + at)
+    }
+
+    /// A node mining the Bitcoin chain has no share address prefix, so the
+    /// help page carries no generator: no form, no `p2p=` password line,
+    /// no `--network` example the CLI could not run. The stratum URL and
+    /// the SV2 host, which belong to the node rather than the share chain,
+    /// stay.
+    #[test]
+    fn a_bitcoin_node_help_page_has_no_share_address_generator() {
+        let mut site = site();
+        site.badge = "bitcoin".to_string();
+        site.share_cli_network = None;
+        let page = help(&site, "pool.example.org", "", "", "").into_string();
+        assert!(!page.contains(r#"class="share-form search-row""#));
+        assert!(!page.contains("--network"));
+        assert!(!page.contains("p2p="));
+        assert!(!page.contains(r#"name="payout""#));
+        assert!(page.contains("stratum+tcp://pool.example.org:3333"));
+        assert!(page.contains("Host: <code>pool.example.org:3336</code>"));
+        assert!(page.contains("no share chain address"));
+    }
+
+    /// The badge alone is not the CLI's argument: the example uses the
+    /// network name the CLI accepts, which on every Cash node coincides
+    /// with the badge.
+    #[test]
+    fn the_example_command_uses_the_cli_network_not_the_badge() {
+        let mut site = site();
+        site.badge = "mainnet".to_string();
+        site.share_cli_network = Some("main");
+        let page = help(&site, "", "", "", "").into_string();
+        assert!(
+            page.contains("p2poolv2_cli bch-share-address --network main "),
+            "the example shows the spelling the CLI parses"
+        );
     }
 
     #[test]

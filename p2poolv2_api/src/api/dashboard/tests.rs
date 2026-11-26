@@ -642,7 +642,7 @@ async fn the_network_is_named_as_the_header_names_it() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
         body,
-        r#"{"network":"Bitcoin Cash chipnet","badge":"chipnet","auth":false,"stratum_port":3333,"sv2_port":3336}"#
+        r#"{"network":"Bitcoin Cash chipnet","badge":"chipnet","cli_network":"chipnet","auth":false,"stratum_port":3333,"sv2_port":3336}"#
     );
 }
 

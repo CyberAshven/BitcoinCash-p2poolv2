@@ -40,6 +40,7 @@ use p2poolv2_lib::accounting::stats::metrics::{PoolMetrics, SUBMISSION_WINDOW_SE
 use p2poolv2_lib::address::bch_share::BchShareNetwork;
 use p2poolv2_lib::address_display::ShareInfoDisplay;
 use p2poolv2_lib::address_display::payout_address_string;
+use p2poolv2_lib::config::BitcoinCashNetwork;
 use pages::{
     BlockView, BlocksView, FoundBlockRow, MinerRow, MinerView, MinersView, Overview, PAGE_SIZE,
     Paging, PeersView, ShareRow, ShareView, SharesView, Site, WorkerRow, range_window_secs,
@@ -112,12 +113,22 @@ pub(crate) fn site(state: &AppState) -> Site {
         Some(BchShareNetwork::Scalenet) => ("Bitcoin Cash scalenet".to_string(), "scalenet"),
         None => (format!("Bitcoin {}", state.app_config.network), "bitcoin"),
     };
+    // The `--network` value for the help page's example command. Every
+    // badge a Cash network produces is already a name `p2poolv2_cli
+    // bch-share-address` accepts; a Bitcoin node's "bitcoin" badge is not,
+    // so it has none and the page shows no generator at all.
+    let share_cli_network = state
+        .app_config
+        .cash_network
+        .map(BitcoinCashNetwork::from_share_network)
+        .map(BitcoinCashNetwork::name);
     Site {
         network,
         badge: badge.to_string(),
         auth: state.auth_user.is_some(),
         stratum_port: state.stratum_port,
         sv2_port: state.sv2_port,
+        share_cli_network,
     }
 }
 

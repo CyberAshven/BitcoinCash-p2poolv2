@@ -48,6 +48,10 @@ fn encode(cash_address: &str, network: BitcoinCashNetwork) -> Result<String, Box
 }
 
 /// Read the CashAddr from the argument, or from stdin when none was given.
+///
+/// Trims before the empty check so a blank line or an empty pipe gets the
+/// friendly message rather than a parse error; [`payout_to_share_address`]
+/// trims as well, so trimming here never changes what converts.
 fn read_cash_address(cash_address: Option<String>) -> Result<String, Box<dyn Error>> {
     let raw = match cash_address {
         Some(value) => value,
@@ -129,6 +133,26 @@ mod tests {
         .unwrap();
         assert_eq!(token_aware, plain);
         assert!(token_aware.starts_with("tp2pool:q"), "{token_aware}");
+    }
+
+    /// Piped input arrives with its trailing newline, so the stdin path's
+    /// trim is what converts it. Pinning it keeps the CLI honest about the
+    /// widget's whitespace behavior, which the endpoint tests pin on that
+    /// side.
+    #[test]
+    fn a_cash_addr_read_from_stdin_is_trimmed_before_conversion() {
+        let raw = "bchtest:qr7fzmep8g7h7ymfxy74lgc0v950j3r295pdnvy3hr\n";
+        let read = read_cash_address(Some(raw.to_string())).unwrap();
+        let address = encode(&read, BitcoinCashNetwork::Chipnet).unwrap();
+        assert!(address.starts_with("tp2pool:q"), "{address}");
+    }
+
+    /// An empty or blank read is refused with the friendly message rather
+    /// than a parse error about an empty address.
+    #[test]
+    fn a_blank_read_is_refused_before_the_parser_sees_it() {
+        let error = read_cash_address(Some("   \n".to_string())).unwrap_err();
+        assert!(error.to_string().contains("no CashAddr given"), "{error}");
     }
 
     #[test]

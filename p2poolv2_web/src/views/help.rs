@@ -67,13 +67,11 @@ pub fn HelpPage() -> impl IntoView {
             .map_or_else(|| "<sv2 port>".to_string(), |port| port.to_string());
         format!("{host}:{port}")
     };
-    // The `--network` value in the share address example: the node's own
-    // badge, which is the name the CLI accepts, or the placeholder until
-    // `/network` answers.
-    let share_net = move || {
-        site.get()
-            .map_or_else(|| "<network>".to_string(), |site| site.badge.clone())
-    };
+    // The `--network` value in the share address example: the CLI's own
+    // spelling for this node's network, absent on a node mining the
+    // Bitcoin chain and until `/network` answers. Without it there is no
+    // generator to show, exactly as the server-rendered page hides it.
+    let cli_net = move || site.get().and_then(|site| site.cli_network);
     // The generator's form: the payout as typed, the share address the
     // node returned (empty until one succeeds), and the error it refuses
     // with. An invalid entry goes to the error alone; the example fields
@@ -81,25 +79,29 @@ pub fn HelpPage() -> impl IntoView {
     let payout = RwSignal::new(String::new());
     let share = RwSignal::new(String::new());
     let error = RwSignal::new(None::<String>);
-    let generate = move |event: leptos::ev::SubmitEvent| {
-        event.prevent_default();
-        let connection = ctx().connection.get_untracked();
-        let entered = payout.get_untracked();
-        spawn_local(async move {
-            let path = share_address_path(&entered);
-            match connection.get::<ShareAddressResponse>(&path).await {
-                Ok(response) => {
-                    error.set(None);
-                    share.set(response.address);
+    // Builds the form's submit handler. The widget is rebuilt whenever
+    // `/network` answers, so the form takes a fresh handler each time
+    // rather than one value moved in on the first build only.
+    let generate = move || {
+        move |event: leptos::ev::SubmitEvent| {
+            event.prevent_default();
+            let connection = ctx().connection.get_untracked();
+            let entered = payout.get_untracked();
+            spawn_local(async move {
+                let path = share_address_path(&entered);
+                match connection.get::<ShareAddressResponse>(&path).await {
+                    Ok(response) => {
+                        error.set(None);
+                        share.set(response.address);
+                    }
+                    Err(message) => {
+                        error.set(Some(message));
+                        share.set(String::new());
+                    }
                 }
-                Err(message) => {
-                    error.set(Some(message));
-                    share.set(String::new());
-                }
-            }
-        });
+            });
+        }
     };
-    let user_payout = move || example_payout(&payout.get(), &share.get());
     view! {
         <div class="panel">
             <div class="banner-warn" role="status">
@@ -107,63 +109,98 @@ pub fn HelpPage() -> impl IntoView {
             </div>
             <div class="help-section">
                 <h3>"Connect a miner"</h3>
-                <form class="share-form search-row" on:submit=generate>
-                    <div class="grow">
-                        <label for="share-payout">
-                            "Enter your payout address to get miner connection info."
-                        </label>
-                        <input
-                            id="share-payout"
-                            type="text"
-                            placeholder="bchtest:q... or bitcoincash:q..."
-                            bind:value=payout
-                            required
-                        />
-                    </div>
-                    <button class="btn-primary" type="submit">"Generate"</button>
-                </form>
                 {move || {
-                    error.get().map(|message| {
-                        view! { <div class="toast" role="alert">{message}</div> }
+                    cli_net().map(|network| {
+                        // Built fresh each run, so the strings move into
+                        // this view while `url` and `sv2` stay in the
+                        // outer closure's environment for the next one.
+                        let url_text = url();
+                        let sv2_text = sv2();
+                        let user_text = example_payout(&payout.get(), &share.get());
+                        view! {
+                            // The generator exists only where the node
+                            // has a share address prefix: `cli_network`
+                            // arrives with `/network` and is absent on a
+                            // Bitcoin node, which mirrors the server
+                            // page's own hiding of this widget.
+                            <form class="share-form search-row" on:submit={generate()}>
+                                <div class="grow">
+                                    <label for="share-payout">
+                                        "Enter your payout address to get miner connection info."
+                                    </label>
+                                    <input
+                                        id="share-payout"
+                                        type="text"
+                                        placeholder="bchtest:q... or bitcoincash:q..."
+                                        bind:value=payout
+                                        required
+                                    />
+                                </div>
+                                <button class="btn-primary" type="submit">"Generate"</button>
+                            </form>
+                            {move || {
+                                error.get().map(|message| {
+                                    view! { <div class="toast" role="alert">{message}</div> }
+                                })
+                            }}
+                            <p>"Stratum V1: point the miner at this node's stratum port."</p>
+                            <ul>
+                                <li>"URL: " <code>{url_text}</code></li>
+                                <li>"User: " <code>{user_text.clone()}</code></li>
+                                <li>
+                                    "Worker Name (optional): " <code>"<payout address>.<worker>"</code>
+                                </li>
+                                <li>
+                                    "Password: " <code>"p2p=" {move || share.get()}</code>
+                                    ", which names who owns your shares."
+                                </li>
+                            </ul>
+                            <p>
+                                "Stratum V2: point the miner at this node's SV2 port and pin its authority key."
+                            </p>
+                            <ul>
+                                <li>"Host: " <code>{sv2_text}</code></li>
+                                <li>
+                                    "User: " <code>
+                                        {user_text} ",p2p=" {move || share.get()}
+                                    </code>
+                                </li>
+                                <li>
+                                    "Worker Name (optional): " <code>"<payout address>.<worker>"</code>
+                                </li>
+                                <li>
+                                    "Key: the node's authority public key (configure when the node runs Noise keys)"
+                                </li>
+                            </ul>
+                            <p>
+                                "SV1 devices can connect to the SV1 port directly, or mine through an SV2 translator."
+                            </p>
+                            <p>
+                                "Validate a share chain address with " <code>
+                                    "p2poolv2_cli bch-share-address --network " {network} " <payout address>"
+                                </code> "."
+                            </p>
+                        }
                     })
                 }}
-                <p>"Stratum V1: point the miner at this node's stratum port."</p>
-                <ul>
-                    <li>"URL: " <code>{url}</code></li>
-                    <li>"User: " <code>{user_payout}</code></li>
-                    <li>
-                        "Worker Name (optional): " <code>"<payout address>.<worker>"</code>
-                    </li>
-                    <li>
-                        "Password: " <code>"p2p=" {move || share.get()}</code>
-                        ", which names who owns your shares."
-                    </li>
-                </ul>
-                <p>
-                    "Stratum V2: point the miner at this node's SV2 port and pin its authority key."
-                </p>
-                <ul>
-                    <li>"Host: " <code>{sv2}</code></li>
-                    <li>
-                        "User: " <code>
-                            {user_payout} ",p2p=" {move || share.get()}
-                        </code>
-                    </li>
-                    <li>
-                        "Worker Name (optional): " <code>"<payout address>.<worker>"</code>
-                    </li>
-                    <li>
-                        "Key: the node's authority public key (configure when the node runs Noise keys)"
-                    </li>
-                </ul>
-                <p>
-                    "SV1 devices can connect to the SV1 port directly, or mine through an SV2 translator."
-                </p>
-                <p>
-                    "Validate a share chain address with " <code>
-                        "p2poolv2_cli bch-share-address --network " {share_net} " <payout address>"
-                    </code> "."
-                </p>
+                {move || {
+                    // `/network` has answered and carries no share network:
+                    // a Bitcoin node explains itself instead of showing a
+                    // generator that could not exist. While it is still
+                    // loading, nothing shows rather than a wrong note.
+                    let bitcoin_node = site
+                        .get()
+                        .map(|site| site.cli_network.is_none())
+                        .unwrap_or(false);
+                    bitcoin_node.then(|| {
+                        view! {
+                            <p>
+                                "This node mines the Bitcoin chain, which has no share chain address; "
+                                "a payout address here names bitcoin coinbase outputs only."
+                            </p>
+                        }
+                    })
+                }}
             </div>
             <div class="help-section">
                 <h3>"Pages"</h3>

@@ -217,12 +217,17 @@ const P2PKH_HASH_END: usize = 23;
 /// spends the share output through the same P2PKH script.
 ///
 /// A P2SH CashAddr is rejected: a share is owned by a P2PKH script.
+///
+/// Surrounding whitespace is ignored, so the rule itself owns input
+/// normalization: the help page's route and the CLI's stdin path both
+/// hand in raw pasted or piped text and must convert it identically,
+/// whether or not their caller remembers to trim first.
 pub fn payout_to_share_address(
     cash_address: &str,
     network: BitcoinCashNetwork,
 ) -> Result<String, ConfigError> {
     let decoded = parse_payout_address(
-        cash_address,
+        cash_address.trim(),
         Chain::BitcoinCash,
         network.legacy_network(),
         Some(network),
@@ -2227,6 +2232,24 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    /// The rule owns input normalization: a pasted payout wrapped in
+    /// whitespace converts exactly as the clean one, so every caller shares
+    /// one behavior instead of relying on its own trim.
+    #[test]
+    fn surrounding_whitespace_does_not_change_the_conversion() {
+        let clean = payout_to_share_address(
+            "bchtest:qr7fzmep8g7h7ymfxy74lgc0v950j3r295pdnvy3hr",
+            BitcoinCashNetwork::Chipnet,
+        )
+        .unwrap();
+        let wrapped = payout_to_share_address(
+            " bchtest:qr7fzmep8g7h7ymfxy74lgc0v950j3r295pdnvy3hr \n",
+            BitcoinCashNetwork::Chipnet,
+        )
+        .unwrap();
+        assert_eq!(clean, wrapped);
     }
 
     /// Garbage in the input field comes back as a readable parse error, not

@@ -373,6 +373,7 @@ fn site() -> Site {
         auth: true,
         stratum_port: 3333,
         sv2_port: Some(3336),
+        share_cli_network: Some("chipnet"),
     }
 }
 
