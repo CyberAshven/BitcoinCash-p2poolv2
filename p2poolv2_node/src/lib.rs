@@ -221,9 +221,9 @@ async fn stop_electrum_server(electrum_task: JoinHandle<()>) {
 /// `NodeHandles::emissions_tx` and `NodeHandles::template_rx` before
 /// calling `NodeRunner::run()`.
 pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), ExitCode> {
-    // A bad [stratum] setting, such as a pool signature over 16 bytes, stops
-    // the start here with its reason, before the store opens or the node is
-    // asked anything.
+    // A bad [stratum] setting, such as a pool signature outside the coinbase
+    // name rules, stops the start here with its reason, before the store
+    // opens or the node is asked anything.
     let stratum_config = match config.stratum.clone().parse() {
         Ok(stratum_config) => stratum_config,
         Err(error) => {
