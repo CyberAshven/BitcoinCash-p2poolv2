@@ -1376,7 +1376,8 @@ pub struct NetworkConfig {
     pub blocked_ips: Vec<String>,
     /// Optional external address override for nodes behind NAT.
     /// If set, this address is advertised to peers via the identify protocol.
-    /// Format: Multiaddr string, e.g. "/ip4/203.0.113.1/tcp/6884"
+    /// Format: Multiaddr string, e.g. "/ip4/203.0.113.1/tcp/6884", or a Tor
+    /// onion service's "/onion3/<address>:6884".
     #[serde(default)]
     pub external_address: Option<String>,
     // Fall back to the built-in DNS seeds for this network when no peer is
@@ -1388,6 +1389,72 @@ pub struct NetworkConfig {
     // never Bitcoin's.
     #[serde(default = "default_dns_seed")]
     pub dns_seed: bool,
+    /// A Tor SOCKS5 proxy, `host:port` (Tor's default is `127.0.0.1:9050`),
+    /// through which the node dials `/onion3` peers, as Bitcoin Cash Node's
+    /// `-onion` does. Unset, the node uses `127.0.0.1:9050` once Tor's
+    /// control port has made its onion service (`listen_onion`), as Bitcoin
+    /// Cash Node does, and until then neither dials nor learns onion
+    /// addresses. Other addresses are dialed directly, unless
+    /// `proxy_clearnet` is on.
+    #[serde(default)]
+    pub tor_proxy: Option<String>,
+    /// Announce this node only as a Tor onion service, as Bitcoin Cash
+    /// Node's `-discover=0` with an onion `-externalip`: peers learn only an
+    /// `/onion3` `external_address`, or the service `listen_onion` makes.
+    /// The node takes no address from what peers observe, never makes a
+    /// listen address its external one, and sends no listen addresses
+    /// through Identify. A non-onion `external_address` stops it at start.
+    /// It announces on Nostr only when it reaches the relays through Tor,
+    /// as a node that opens no clearnet connection of its own does
+    /// (`proxy_clearnet`, or an onion-only `onlynet`): a relay it reached
+    /// directly would see its IP beside its onion address. An `onlynet`
+    /// without `"ipv4"` and `"ipv6"` turns this on too
+    /// ([`NetworkConfig::announces_only_onion`]). It governs what the node
+    /// announces, not what it dials. Default false.
+    #[serde(default)]
+    pub onion_only: bool,
+    /// Make this node a Tor onion service through Tor's control port
+    /// (`tor_control`), as Bitcoin Cash Node's `-listenonion` does, so
+    /// peers with Tor reach it at `/onion3/<address>:6884`. The service
+    /// forwards to the node's `listen_address`, and its key is kept in
+    /// `onion_v3_private_key` beside the store, so the address survives
+    /// restarts. Off when the node does not listen, its `external_address`
+    /// is an onion address already, or `onlynet` leaves onion out. While no
+    /// Tor answers the node tries again now and then, logging at debug
+    /// only. Default true.
+    #[serde(default = "default_listen_onion")]
+    pub listen_onion: bool,
+    /// Tor's control port, `host:port`, as Bitcoin Cash Node's
+    /// `-torcontrol`. Default [`DEFAULT_TOR_CONTROL`].
+    #[serde(default = "default_tor_control")]
+    pub tor_control: String,
+    /// The password for Tor's control port (`HASHEDPASSWORD`), as Bitcoin
+    /// Cash Node's `-torpassword`. Unset, the node authenticates with no
+    /// password or with the cookie file of Tor (`COOKIE`), which sends the
+    /// cookie itself to whatever answers on `tor_control`; a password is the
+    /// stronger choice.
+    #[serde(default)]
+    pub tor_password: Option<String>,
+    /// Dial IPv4, IPv6 and host-name peers through `tor_proxy` too, names
+    /// unresolved, as Bitcoin Cash Node's `-proxy` does. The node's own TCP
+    /// then only listens, and it resolves no host name itself: DNS seeds are
+    /// skipped and Nostr relays are reached through `tor_proxy`. The peers
+    /// it dials see a Tor exit, so it takes no address from what they
+    /// observe, as `-proxy` sets `-discover=0`. Needs `tor_proxy`.
+    #[serde(default)]
+    pub proxy_clearnet: bool,
+    /// The networks the node dials peers on, as Bitcoin Cash Node's
+    /// `-onlynet`: any of `"ipv4"`, `"ipv6"` and `"onion"`. Unset, it dials
+    /// IPv4, IPv6 and, through a Tor proxy, onion peers. A host name is
+    /// clearnet: `/dns4` is IPv4, `/dns6` IPv6, `/dns` either. With
+    /// `["onion"]` the node opens no clearnet connection: its own TCP only
+    /// listens, DNS seeds are skipped and Nostr relays are reached through
+    /// Tor. It then announces only onion addresses, as with `onion_only`,
+    /// since Bitcoin Cash Node advertises no address on a network it does
+    /// not reach. `"onion"` needs `tor_proxy`, or `listen_onion`, whose
+    /// service brings the default Tor SOCKS port, as `-listenonion` does.
+    #[serde(default)]
+    pub onlynet: Option<Vec<PeerNetwork>>,
     /// DNS seed hostnames that replace the built-in ones, so a new seed can
     /// be used before a release names it. Their A/AAAA records list
     /// long-running nodes on the network's seed port (6884 on Bitcoin Cash),
@@ -1413,7 +1480,9 @@ pub struct NetworkConfig {
     pub nostr_relays: Vec<String>,
     /// Publish `external_address` on the relays so nodes short of peers can
     /// dial this one. Only a node with an `external_address`, which its
-    /// operator says is reachable, announces. Default true.
+    /// operator says is reachable, or an onion service made through the Tor
+    /// control port announces, and an `onion_only` one only through Tor.
+    /// Default true.
     #[serde(default = "default_nostr_announce")]
     pub nostr_announce: bool,
     /// Outgoing peers the node keeps. While it has fewer, it dials a peer it
@@ -1426,8 +1495,35 @@ pub struct NetworkConfig {
     pub target_outgoing_peers: u32,
 }
 
+/// A network the node can dial peers on, named as Bitcoin Cash Node names
+/// them for `-onlynet`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PeerNetwork {
+    /// `/ip4` addresses and `/dns4` host names.
+    Ipv4,
+    /// `/ip6` addresses and `/dns6` host names.
+    Ipv6,
+    /// `/onion3` addresses, dialed through `tor_proxy`, or through the
+    /// default Tor SOCKS port once the Tor control port has made the onion
+    /// service of the node.
+    Onion,
+}
+
 fn default_dns_seed() -> bool {
     true
+}
+
+fn default_listen_onion() -> bool {
+    true
+}
+
+/// Tor's control port where Tor runs with its defaults, as Bitcoin Cash
+/// Node's `-torcontrol` default.
+pub const DEFAULT_TOR_CONTROL: &str = "127.0.0.1:9051";
+
+fn default_tor_control() -> String {
+    DEFAULT_TOR_CONTROL.to_string()
 }
 
 /// Public Nostr relays a node uses by default, run by different operators.
@@ -1457,6 +1553,10 @@ pub const DEFAULT_NODE_KEY_FILE: &str = "p2p_node_key";
 
 /// File name of the saved book of known peers, beside the store.
 pub const DEFAULT_PEER_BOOK_FILE: &str = "p2p_peers.json";
+
+/// File name of the onion service's key, beside the store, as Bitcoin Cash
+/// Node names it.
+pub const DEFAULT_ONION_KEY_FILE: &str = "onion_v3_private_key";
 
 impl NetworkConfig {
     /// Where this node keeps its libp2p identity: `node_key_path`, else
@@ -1489,6 +1589,56 @@ impl NetworkConfig {
                 .unwrap_or_else(|| std::path::Path::new("."))
                 .join(DEFAULT_PEER_BOOK_FILE),
         )
+    }
+
+    /// Where this node keeps its onion service's key (`listen_onion`):
+    /// [`DEFAULT_ONION_KEY_FILE`] in the directory holding `store_path`.
+    /// `None` with `ephemeral_node_key`, whose onion address is new on every
+    /// start as its peer ID is.
+    pub fn onion_key_file(&self, store_path: &str) -> Option<std::path::PathBuf> {
+        if self.ephemeral_node_key {
+            return None;
+        }
+        Some(
+            std::path::Path::new(store_path)
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new("."))
+                .join(DEFAULT_ONION_KEY_FILE),
+        )
+    }
+
+    /// Whether `onlynet` lets the node dial peers on `network`: it lists
+    /// `network`, or there is no `onlynet`.
+    pub fn onlynet_allows(&self, network: PeerNetwork) -> bool {
+        self.onlynet
+            .as_ref()
+            .is_none_or(|networks| networks.contains(&network))
+    }
+
+    /// Whether the node dials peers on `network` from the start: one
+    /// `onlynet` allows, and onion only through a `tor_proxy`. Without one,
+    /// onion peers become dialable once the Tor control port has made the
+    /// onion service of the node, through the default Tor SOCKS port, if
+    /// `onlynet` allows onion.
+    pub fn dials(&self, network: PeerNetwork) -> bool {
+        self.onlynet_allows(network) && (network != PeerNetwork::Onion || self.tor_proxy.is_some())
+    }
+
+    /// Whether the node opens clearnet connections of its own: it dials
+    /// IPv4 or IPv6 peers, and not through `tor_proxy` (`proxy_clearnet`).
+    /// Otherwise it resolves no host name either: it skips DNS seeds and
+    /// reaches Nostr relays through Tor.
+    pub fn dials_clearnet_directly(&self) -> bool {
+        !self.proxy_clearnet && (self.dials(PeerNetwork::Ipv4) || self.dials(PeerNetwork::Ipv6))
+    }
+
+    /// Whether the node announces only onion addresses: `onion_only`, or an
+    /// `onlynet` that allows neither IPv4 nor IPv6, as Bitcoin Cash Node
+    /// advertises no address on a network it does not reach.
+    pub fn announces_only_onion(&self) -> bool {
+        let clearnet =
+            self.onlynet_allows(PeerNetwork::Ipv4) || self.onlynet_allows(PeerNetwork::Ipv6);
+        self.onion_only || !clearnet
     }
 }
 
@@ -1524,6 +1674,13 @@ impl Default for NetworkConfig {
             blocked_ips: vec![],
             external_address: None,
             dns_seed: true,
+            tor_proxy: None,
+            onion_only: false,
+            listen_onion: true,
+            tor_control: default_tor_control(),
+            tor_password: None,
+            proxy_clearnet: false,
+            onlynet: None,
             dns_seed_hosts: vec![],
             node_key_path: None,
             ephemeral_node_key: false,
@@ -1838,7 +1995,8 @@ impl Config {
     /// because one left a Bitcoin value such as `signet` in its file.
     ///
     /// `[[submit_nodes]]` with light templates is refused (see
-    /// [`Config::validate_submit_nodes`]).
+    /// [`Config::validate_submit_nodes`]), and so are Tor settings with no
+    /// Tor proxy to dial through (see [`Config::validate_tor_proxy`]).
     ///
     /// A config that still sets `bch_share_chain`, in the file or as
     /// `P2POOL_STRATUM__BCH_SHARE_CHAIN`, is refused: the main and mini
@@ -1881,6 +2039,7 @@ impl Config {
             ));
         }
         loaded.validate_submit_nodes()?;
+        loaded.validate_tor_proxy()?;
         Ok(loaded.with_bitcoin_cash_network_derived())
     }
 
@@ -1894,6 +2053,45 @@ impl Config {
             return Err(config::ConfigError::Message(
                 "[[submit_nodes]] cannot be used with template_source = \"rpc_light\": a block \
                  found on a light template can only be completed by the node in [bitcoinrpc]"
+                    .to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Refuse `[network] proxy_clearnet` without a `tor_proxy` to dial
+    /// through, `"onion"` in `onlynet` with neither a `tor_proxy` nor
+    /// `listen_onion`, whose onion service brings the default Tor SOCKS port
+    /// (as `-listenonion` does for `-onlynet=onion`), and an `onlynet` that
+    /// lists no network: the node could not dial what each of them names.
+    pub fn validate_tor_proxy(&self) -> Result<(), config::ConfigError> {
+        let network = &self.network;
+        if network.proxy_clearnet && network.tor_proxy.is_none() {
+            return Err(config::ConfigError::Message(
+                "[network] proxy_clearnet needs tor_proxy, the Tor SOCKS5 proxy every dial goes \
+                 through, for example tor_proxy = \"127.0.0.1:9050\""
+                    .to_string(),
+            ));
+        }
+        if network.tor_proxy.is_none()
+            && !network.listen_onion
+            && network
+                .onlynet
+                .as_ref()
+                .is_some_and(|networks| networks.contains(&PeerNetwork::Onion))
+        {
+            return Err(config::ConfigError::Message(
+                "[network] onlynet lists \"onion\", which needs tor_proxy, the Tor SOCKS5 proxy \
+                 onion peers are dialed through, for example tor_proxy = \"127.0.0.1:9050\", or \
+                 listen_onion, which dials them through the default Tor SOCKS port once the \
+                 Tor control port has made this node an onion service"
+                    .to_string(),
+            ));
+        }
+        if network.onlynet.as_ref().is_some_and(Vec::is_empty) {
+            return Err(config::ConfigError::Message(
+                "[network] onlynet lists no network: list \"ipv4\", \"ipv6\" or \"onion\", or \
+                 leave it out to dial every network the node can reach"
                     .to_string(),
             ));
         }
@@ -2100,6 +2298,66 @@ mod tests {
         );
         network.ephemeral_node_key = true;
         assert_eq!(network.node_key_file("/var/lib/p2pool/store.db"), None);
+    }
+
+    /// `proxy_clearnet` dials through `tor_proxy`, so loading refuses it
+    /// without one, and an onion `onlynet` without `tor_proxy` or
+    /// `listen_onion`, whose service brings the default Tor SOCKS port. With
+    /// a proxy, an onion-only node dials onion peers alone, opens no
+    /// clearnet connection of its own and announces only onion addresses.
+    #[test]
+    fn tor_settings_without_a_tor_proxy_are_refused() {
+        with_var("P2POOL_NETWORK__PROXY_CLEARNET", Some("true"), || {
+            let Err(error) = Config::load("../config.sample.toml") else {
+                panic!("proxy_clearnet without tor_proxy was accepted");
+            };
+            assert!(
+                error.to_string().contains("proxy_clearnet needs tor_proxy"),
+                "{error}"
+            );
+        });
+        with_vars(
+            [
+                ("P2POOL_NETWORK__PROXY_CLEARNET", Some("true")),
+                ("P2POOL_NETWORK__TOR_PROXY", Some("127.0.0.1:9050")),
+            ],
+            || {
+                let config = Config::load("../config.sample.toml").unwrap();
+                assert!(config.network.dials(PeerNetwork::Ipv4));
+                assert!(!config.network.dials_clearnet_directly());
+            },
+        );
+
+        let onlynet: Vec<PeerNetwork> = config::Config::builder()
+            .add_source(config::File::from_str(
+                "onlynet = [\"onion\"]",
+                config::FileFormat::Toml,
+            ))
+            .build()
+            .unwrap()
+            .get("onlynet")
+            .unwrap();
+        assert_eq!(onlynet, vec![PeerNetwork::Onion]);
+        let mut config = Config::load("../config.sample.toml").unwrap();
+        assert!(!config.network.announces_only_onion());
+        config.network.onlynet = Some(onlynet);
+        config.network.listen_onion = false;
+        assert_err!(config.validate_tor_proxy());
+        config.network.listen_onion = true;
+        config.validate_tor_proxy().unwrap();
+        assert!(
+            !config.network.dials(PeerNetwork::Onion),
+            "not before the onion service brings the Tor SOCKS port"
+        );
+        assert!(config.network.onlynet_allows(PeerNetwork::Onion));
+        config.network.tor_proxy = Some("127.0.0.1:9050".to_string());
+        config.validate_tor_proxy().unwrap();
+        assert!(config.network.dials(PeerNetwork::Onion));
+        assert!(!config.network.dials(PeerNetwork::Ipv4));
+        assert!(!config.network.dials_clearnet_directly());
+        assert!(config.network.announces_only_onion());
+        config.network.onlynet = Some(vec![PeerNetwork::Onion, PeerNetwork::Ipv6]);
+        assert!(!config.network.announces_only_onion());
     }
 
     /// The sample config keeps the node's identity by default.

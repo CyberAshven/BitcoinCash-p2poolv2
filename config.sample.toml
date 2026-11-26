@@ -11,6 +11,53 @@ listen_address = "/ip4/0.0.0.0/tcp/6884"
 # an IP address or a host name, as /dns4/, /dns6/ or /dns/; only host names
 # listed here are ever dialed, never ones learned from peers.
 # dial_peers = ["/ip4/203.0.113.1/tcp/6884", "/dns4/pool.example.com/tcp/6884"]
+# A Tor SOCKS5 proxy for dialing onion peers, "/onion3/<address>:<port>",
+# as Bitcoin Cash Node's -onion. Unset, 127.0.0.1:9050 is used once Tor's
+# control port has made this node an onion service (listen_onion), and
+# until then onion addresses are ignored.
+# tor_proxy = "127.0.0.1:9050"
+# Dial IPv4, IPv6 and host-name peers through tor_proxy too, names
+# unresolved, as Bitcoin Cash Node's -proxy. This node's TCP then only
+# listens, DNS seeds are skipped and Nostr relays are reached through Tor.
+# The peers it dials see a Tor exit, so the node takes no address from what
+# they observe, as -proxy sets -discover=0 in Bitcoin Cash Node. Needs
+# tor_proxy.
+# proxy_clearnet = false
+# The networks to dial peers on, as Bitcoin Cash Node's -onlynet: "ipv4",
+# "ipv6", "onion". Unset, every network the node can reach. ["onion"] makes
+# an onion-only node, which opens no clearnet connection: DNS seeds are
+# skipped and Nostr relays are reached through Tor. It announces only onion
+# addresses, as with onion_only below, and on Nostr through Tor. It needs
+# tor_proxy, or listen_onion: then it dials through 127.0.0.1:9050 once the
+# Tor control port has made this node an onion service, and dials nothing
+# before. Saved onion peers are kept across restarts only with tor_proxy.
+# onlynet = ["onion"]
+# Make this node an onion service through the Tor control port, as
+# -listenonion in Bitcoin Cash Node: on by default, and quiet (debug logs
+# only) while no Tor answers at tor_control. Tor needs "ControlPort 9051" in
+# its torrc and one way to log in. The stronger one is a password: run
+# "tor --hash-password <password>", put "HashedControlPassword <hash>" in
+# the torrc and the password in tor_password. Without one, the node logs in
+# with "CookieAuthentication 1" (COOKIE), which sends the cookie itself to
+# whatever answers at tor_control, so the cookie file must be readable by
+# the user of the node. Peers with Tor reach the node at
+# /onion3/<address>:6884; the key is kept in onion_v3_private_key beside the
+# store, so the address survives restarts.
+# Off when onlynet leaves onion out.
+# listen_onion = true
+# tor_control = "127.0.0.1:9051"
+# tor_password = "the password HashedControlPassword was made from"
+# Announce this node only as an onion service: peers learn only an /onion3
+# external_address, or the one listen_onion makes. The node then takes no
+# address from what peers observe, never makes a listen address its
+# external one and sends no listen addresses through Identify; an IP
+# external_address stops it at start. It announces on Nostr only when it
+# reaches the relays through Tor (onlynet = ["onion"] or proxy_clearnet):
+# a relay reached directly would see its IP beside the onion address. It
+# only announces: without onlynet or proxy_clearnet, its dials to IP
+# addresses, from dial_peers, the outgoing target or Kademlia, still go out
+# directly and show those peers its IP. onlynet = ["onion"] turns it on.
+# onion_only = false
 # DNS seeds whose A/AAAA records list long-running nodes on port 6884, or on
 # the port an entry names as host:port. They replace the built-in seeds of
 # bitcoin_cash_network, so a new seed works before a release names it. Seeds
