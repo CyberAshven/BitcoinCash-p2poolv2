@@ -12,7 +12,10 @@ use crate::store::script_history::script_history_cf_options;
 use bitcoin::consensus::Encodable;
 use bitcoin::consensus::encode;
 use bitcoin::{BlockHash, Work};
-use rocksdb::{BlockBasedOptions, ColumnFamilyDescriptor, DB, Options as RocksDbOptions};
+use rocksdb::{
+    BlockBasedOptions, ColumnFamilyDescriptor, DB, DEFAULT_COLUMN_FAMILY_NAME,
+    Options as RocksDbOptions,
+};
 use std::collections::HashMap;
 use std::sync::atomic::AtomicU32;
 use std::sync::{Arc, Mutex, RwLock};
@@ -145,6 +148,25 @@ fn parse_blockhash_bytes(bytes: &[u8]) -> Option<Vec<BlockHash>> {
     Some(hashes)
 }
 
+/// The column families in `column_families_on_disk` that are not in
+/// `known_column_families` and are not the `default` one from RocksDB,
+/// which every database has and an open adds itself.
+fn unknown_column_families<'a>(
+    column_families_on_disk: &'a [String],
+    known_column_families: &[ColumnFamilyDescriptor],
+) -> Vec<&'a str> {
+    column_families_on_disk
+        .iter()
+        .map(String::as_str)
+        .filter(|name| {
+            *name != DEFAULT_COLUMN_FAMILY_NAME
+                && !known_column_families
+                    .iter()
+                    .any(|descriptor| descriptor.name() == *name)
+        })
+        .collect()
+}
+
 /// A rocksdb based store for share blocks.
 /// We use column families to store different types of data, so that compactions are independent for each type.
 #[allow(dead_code)]
@@ -161,7 +183,93 @@ impl Store {
     }
 
     /// Create a new share store
+    ///
+    /// A read-only open refuses a store whose column families on disk are
+    /// not exactly the ones this binary uses (`check_column_families_on_disk`),
+    /// and opens every one with its own options, merge operators included.
     pub fn new(path: String, read_only: bool) -> Result<Self, StoreError> {
+        let (db, script_history_gc_threshold) = Self::open_db(&path, read_only)?;
+        let store = Self {
+            path,
+            db,
+            // Initialise chain state fields
+            genesis_blockhash: Arc::new(RwLock::new(None)),
+            depths: ChainDepths::BITCOIN,
+            refused_reorgs: Mutex::new(HashMap::new()),
+            script_history_gc_threshold,
+            script_history_from: AtomicU32::new(0),
+            keep_whole_weak_shares: false,
+        };
+        store.load_script_history_from()?;
+        Ok(store)
+    }
+
+    /// Open the RocksDB database at `path` with every column family and its
+    /// options. Also returns the script history GC threshold its compaction
+    /// filter reads.
+    ///
+    /// A writable open creates the store and any missing column family. A
+    /// read-only open first checks the column families on disk are exactly
+    /// the ones this binary uses (`check_column_families_on_disk`): RocksDB
+    /// lets a read-only open leave some out (and some RocksDB 11 releases
+    /// before 11.6 deleted their files when such an open closed), and a
+    /// column family opened without its merge operator fails reads of values
+    /// not yet merged.
+    fn open_db(path: &str, read_only: bool) -> Result<(DB, Arc<AtomicU32>), StoreError> {
+        let (column_families, script_history_gc_threshold) = Self::column_family_descriptors();
+        let db = if read_only {
+            Self::check_column_families_on_disk(path, &column_families)?;
+            DB::open_cf_descriptors_read_only(&Self::db_options(), path, column_families, false)?
+        } else {
+            DB::open_cf_descriptors(&Self::db_options(), path, column_families)?
+        };
+        Ok((db, script_history_gc_threshold))
+    }
+
+    /// Check the column families on disk at `path` are exactly `known`.
+    ///
+    /// Refuses one this binary does not know, which a newer or a different
+    /// build wrote, and a missing one, which a writable open would create.
+    /// Fails if `path` holds no store.
+    fn check_column_families_on_disk(
+        path: &str,
+        known: &[ColumnFamilyDescriptor],
+    ) -> Result<(), StoreError> {
+        let on_disk = DB::list_cf(&RocksDbOptions::default(), path)?;
+        let unknown = unknown_column_families(&on_disk, known);
+        if !unknown.is_empty() {
+            return Err(StoreError::ColumnFamilyMismatch(format!(
+                "store has column families {} that this binary does not know; it was written \
+                 by a newer or a different P2Poolv2 build, use a binary for that store",
+                unknown.join(", ")
+            )));
+        }
+        let missing: Vec<&str> = known
+            .iter()
+            .map(|descriptor| descriptor.name())
+            .filter(|name| !on_disk.iter().any(|on_disk_name| on_disk_name == name))
+            .collect();
+        if !missing.is_empty() {
+            return Err(StoreError::ColumnFamilyMismatch(format!(
+                "store lacks column families {}; start the node once to create them",
+                missing.join(", ")
+            )));
+        }
+        Ok(())
+    }
+
+    /// The database options for every open: create the store and any missing
+    /// column family when opened writable.
+    fn db_options() -> RocksDbOptions {
+        let mut db_options = RocksDbOptions::default();
+        db_options.create_missing_column_families(true);
+        db_options.create_if_missing(true);
+        db_options
+    }
+
+    /// Every column family this binary uses, with its options. Also returns
+    /// the script history GC threshold its compaction filter reads.
+    fn column_family_descriptors() -> (Vec<ColumnFamilyDescriptor>, Arc<AtomicU32>) {
         // Point-lookup CFs get bloom filters to speed up existence checks
         // and reject negative lookups without disk I/O.
         // Merge/iterator CFs (BlockIndex, BlockHeight, TxidsBlocks, Uncles)
@@ -260,7 +368,7 @@ impl Store {
             script_history_cf_options(Arc::clone(&script_history_gc_threshold)),
         );
 
-        let cfs = vec![
+        let column_families = vec![
             block_metadata_cf_descriptor,
             block_txids_cf,
             txids_blocks_cf,
@@ -290,46 +398,7 @@ impl Store {
             weak_summaries_cf,
             script_history_cf,
         ];
-
-        // for the db too, we use default options for now
-        let mut db_options = RocksDbOptions::default();
-        db_options.create_missing_column_families(true);
-        db_options.create_if_missing(true);
-        let db = if read_only {
-            // Rebuild a descriptor list for the filtered set: the sample
-            // family is write-only on this open so `verify_chain`,
-            // `db_query` and other read-only tools never request it, and
-            // RocksDB rejects a listed family the store does not have, so
-            // the effort family -- created by the first read-write open
-            // after an upgrade -- is not requested either. Reads degrade
-            // to no samples and no effort.
-            let read_only_cfs: Vec<ColumnFamilyDescriptor> = cfs
-                .iter()
-                .filter(|descriptor| {
-                    descriptor.name() != ColumnFamily::HashrateSamples.as_str()
-                        && descriptor.name() != ColumnFamily::AcceptedBlockEffort.as_str()
-                })
-                .map(|descriptor| {
-                    ColumnFamilyDescriptor::new(descriptor.name(), RocksDbOptions::default())
-                })
-                .collect();
-            DB::open_cf_descriptors_read_only(&db_options, path.clone(), read_only_cfs, false)?
-        } else {
-            DB::open_cf_descriptors(&db_options, path.clone(), cfs)?
-        };
-        let store = Self {
-            path,
-            db,
-            // Initialise chain state fields
-            genesis_blockhash: Arc::new(RwLock::new(None)),
-            depths: ChainDepths::BITCOIN,
-            refused_reorgs: Mutex::new(HashMap::new()),
-            script_history_gc_threshold,
-            script_history_from: AtomicU32::new(0),
-            keep_whole_weak_shares: false,
-        };
-        store.load_script_history_from()?;
-        Ok(store)
+        (column_families, script_history_gc_threshold)
     }
 
     /// Size the prune depth, prune target and reorg depth limit by `chain`'s
@@ -1232,11 +1301,126 @@ mod tests {
             let store = Store::new(path.clone(), false).unwrap();
             store.add_hashrate_sample(&sample).unwrap();
         }
-        // The read-only descriptor list does not request the column
-        // family, so `load_hashrate_samples` finds no handle and starts
-        // empty instead of failing the open.
+        // A read-only open opens every column family on disk, the samples
+        // too, so read-only tools see the persisted history.
         let read_only = Store::new(path, true).unwrap();
-        assert!(read_only.load_hashrate_samples(0).is_empty());
+        assert_eq!(read_only.load_hashrate_samples(0), vec![sample]);
+    }
+
+    /// A read-only `Store::new` refuses a store with a column family this
+    /// binary does not know, saying a newer or a different build wrote it,
+    /// and leaves that column family intact.
+    #[test]
+    fn test_read_only_open_refuses_an_unknown_column_family() {
+        let temp_dir = tempdir().unwrap();
+        let path = temp_dir.path().to_str().unwrap().to_string();
+        drop(Store::new(path.clone(), false).unwrap());
+
+        //* Add a column family this binary does not know, with a row, flushed to disk
+        let mut all_column_families = DB::list_cf(&RocksDbOptions::default(), &path).unwrap();
+        all_column_families.push("from_a_newer_binary".to_string());
+        let mut options = RocksDbOptions::default();
+        options.create_missing_column_families(true);
+        let db = DB::open_cf(&options, &path, &all_column_families).unwrap();
+        let unknown_cf = db.cf_handle("from_a_newer_binary").unwrap();
+        db.put_cf(&unknown_cf, b"key", b"value").unwrap();
+        db.flush_cf(&unknown_cf).unwrap();
+        drop(unknown_cf);
+        drop(db);
+
+        let error = Store::new(path.clone(), true).err().unwrap();
+        assert!(
+            matches!(error, StoreError::ColumnFamilyMismatch(_)),
+            "{error}"
+        );
+        assert!(error.to_string().contains("from_a_newer_binary"), "{error}");
+        assert!(error.to_string().contains("newer"), "{error}");
+
+        //* The store still opens, and the unknown column family keeps its row
+        let db = DB::open_cf(&RocksDbOptions::default(), &path, &all_column_families).unwrap();
+        let unknown_cf = db.cf_handle("from_a_newer_binary").unwrap();
+        assert_eq!(
+            db.iterator_cf(&unknown_cf, rocksdb::IteratorMode::Start)
+                .count(),
+            1
+        );
+    }
+
+    /// A read-only `Store::new` refuses a store missing one of the column
+    /// families this binary uses, naming it, instead of the bare message
+    /// from RocksDB.
+    #[test]
+    fn test_read_only_open_refuses_a_store_missing_a_column_family() {
+        let temp_dir = tempdir().unwrap();
+        let path = temp_dir.path().to_str().unwrap().to_string();
+        drop(Store::new(path.clone(), false).unwrap());
+
+        //* Drop a column family this binary uses
+        let all_column_families = DB::list_cf(&RocksDbOptions::default(), &path).unwrap();
+        let db = DB::open_cf(&RocksDbOptions::default(), &path, &all_column_families).unwrap();
+        db.drop_cf(ColumnFamily::FoundBlocks.as_str()).unwrap();
+        drop(db);
+
+        let error = Store::new(path, true).err().unwrap();
+        assert!(
+            matches!(error, StoreError::ColumnFamilyMismatch(_)),
+            "{error}"
+        );
+        assert!(error.to_string().contains("found_blocks"), "{error}");
+        assert!(error.to_string().contains("start the node"), "{error}");
+    }
+
+    /// A store last opened by a build without one of the later column
+    /// families, such as the effort snapshots, is refused read-only until a
+    /// writable open, as the node makes at start, has created it.
+    #[test]
+    fn test_read_only_open_accepts_a_store_once_a_writable_open_created_its_column_families() {
+        let temp_dir = tempdir().unwrap();
+        let path = temp_dir.path().to_str().unwrap().to_string();
+        drop(Store::new(path.clone(), false).unwrap());
+        let all_column_families = DB::list_cf(&RocksDbOptions::default(), &path).unwrap();
+        let db = DB::open_cf(&RocksDbOptions::default(), &path, &all_column_families).unwrap();
+        db.drop_cf(ColumnFamily::AcceptedBlockEffort.as_str())
+            .unwrap();
+        drop(db);
+        assert!(matches!(
+            Store::new(path.clone(), true).err(),
+            Some(StoreError::ColumnFamilyMismatch(_))
+        ));
+
+        drop(Store::new(path.clone(), false).unwrap());
+
+        assert!(Store::new(path, true).is_ok());
+    }
+
+    /// A read-only open reads a column family with its merge operator. The
+    /// height index appends by merge; opened without the operator, a read
+    /// of operands not yet merged fails, and `get_blockhashes_for_height`
+    /// would report no blocks at that height.
+    #[test]
+    fn test_read_only_open_reads_merged_values() {
+        let temp_dir = tempdir().unwrap();
+        let path = temp_dir.path().to_str().unwrap().to_string();
+        let height = 200u32;
+        let hash1 = BlockHash::from_byte_array([10u8; 32]);
+        let hash2 = BlockHash::from_byte_array([20u8; 32]);
+        {
+            let store = Store::new(path.clone(), false).unwrap();
+            let mut batch = Store::get_write_batch();
+            store
+                .set_height_to_blockhash(&hash1, height, &mut batch)
+                .unwrap();
+            store
+                .set_height_to_blockhash(&hash2, height, &mut batch)
+                .unwrap();
+            store.commit_batch(batch).unwrap();
+        }
+
+        let read_only = Store::new(path, true).unwrap();
+        let hashes = read_only.get_blockhashes_for_height(height);
+        assert_eq!(hashes.len(), 2);
+        assert!(hashes.contains(&hash1));
+        assert!(hashes.contains(&hash2));
     }
 
     #[test]

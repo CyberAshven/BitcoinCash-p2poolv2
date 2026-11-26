@@ -371,10 +371,10 @@ fn test_effort_snapshot_survives_reopen() {
     assert_eq!(reopened.get_found_blocks().unwrap(), vec![expected]);
 }
 
-/// Read-only tools never request the effort column family: they open a
-/// store that has one, read the accepted finds, and report no effort.
+/// Read-only tools open the effort column family like every other one, so
+/// they read the accepted finds with their effort.
 #[test]
-fn test_read_only_open_reads_found_blocks_without_effort() {
+fn test_read_only_open_reads_found_blocks_with_effort() {
     let temp_dir = tempdir().unwrap();
     let path = temp_dir.path().to_str().unwrap().to_string();
     let share = TestShareBlockBuilder::new().nonce(0xe9695792).build();
@@ -386,19 +386,19 @@ fn test_read_only_open_reads_found_blocks_without_effort() {
         miner_bitcoin_address: share.header.miner_bitcoin_address.to_string(),
         effort: None,
     };
+    let snapshot = EffortSnapshot {
+        work: 460.5,
+        network_difficulty: Some(447_000.0),
+    };
     {
         let store = Store::new(path.clone(), false).unwrap();
         assert!(store.record_accepted_found_block(&accepted).unwrap());
         store
-            .set_accepted_found_block_effort(
-                &accepted.bitcoin_blockhash,
-                EffortSnapshot {
-                    work: 460.5,
-                    network_difficulty: Some(447_000.0),
-                },
-            )
+            .set_accepted_found_block_effort(&accepted.bitcoin_blockhash, snapshot)
             .unwrap();
     }
     let read_only = Store::new(path, true).unwrap();
-    assert_eq!(read_only.get_found_blocks().unwrap(), vec![accepted]);
+    let mut expected = accepted;
+    expected.effort = Some(snapshot);
+    assert_eq!(read_only.get_found_blocks().unwrap(), vec![expected]);
 }

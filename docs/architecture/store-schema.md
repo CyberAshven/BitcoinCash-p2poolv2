@@ -377,10 +377,10 @@ column family feeds the found-block API and metrics, each entry joined to
 its `AcceptedBlockEffort` snapshot (14b). No share validity or payout rule
 depends on it. Never pruned.
 
-A read-write open creates it in an older store. A read-only open cannot
-(RocksDB rejects a listed column family the store lacks, even with
-`create_missing_column_families`), so read-only tools fail on a store until
-a read-write open has created it.
+A read-write open creates it in an older store. A read-only open cannot,
+so read-only tools refuse a store without it, as without any column family
+this build uses, until a read-write open has created it
+(`Store::check_column_families_on_disk`).
 
 ### 14b. `AcceptedBlockEffort` - Per-Block Effort Snapshots
 
@@ -405,11 +405,12 @@ pub struct EffortSnapshot {
 }
 ```
 
-`get_found_blocks` joins the snapshot onto each accepted block, so the API,
-metrics and dashboards read effort with no second query. The store format
-does not change: a read-write open creates the family, and read-only tools
-(`verify_chain`, `db_query`) never request it, so they open older stores
-and report no effort.
+`get_found_blocks` and `get_latest_found_blocks` join the snapshot onto
+each accepted block, so the API, metrics and dashboards read effort with no
+second query. The store format does not change: a read-write open creates
+the family. Read-only tools (`verify_chain`, `db_query`) open it like every
+other column family and report effort; they refuse an older store without
+it until the node has opened that store once.
 
 ---
 
@@ -418,9 +419,9 @@ and report no effort.
 One entry per dashboard hashrate sample, written by the API server's
 sampler so a restart reloads the chart. Retention is 30 days
 (`RETENTION_SECS` in `store/hashrate_samples.rs`), evicted by a range delete
-below the cutoff. Only a read-write open registers it (creating it on first
-open); read-only tools never request it, so older binaries still open the
-store and a rollback starts from an empty chart.
+below the cutoff. A read-write open creates it on first open. Read-only
+tools open it like every other column family, and refuse an older store
+without it until the node has opened that store once.
 
 | Key                          | Value                                             | Notes                                        |
 |------------------------------|---------------------------------------------------|----------------------------------------------|

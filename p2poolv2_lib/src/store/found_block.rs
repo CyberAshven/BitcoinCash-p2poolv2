@@ -264,9 +264,9 @@ impl Store {
     }
 
     /// The effort snapshot kept for an accepted block, `None` when the
-    /// block was accepted before snapshots were kept, its snapshot failed
-    /// to write, or the open has no effort column family: read-only tools
-    /// never request it and so report accepted finds without effort.
+    /// block was accepted before snapshots were kept or its snapshot failed
+    /// to write. Read-write and read-only opens both open the effort column
+    /// family; a store without one reads as having no snapshots.
     pub fn get_accepted_found_block_effort(
         &self,
         bitcoin_blockhash: &BlockHash,
