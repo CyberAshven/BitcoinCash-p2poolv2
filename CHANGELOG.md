@@ -105,6 +105,8 @@ format and genesis re-pin.
   a store records and the one the binary writes. It opens the store
   read-only as it is on disk and reports an older or newer store instead of
   refusing it, from upstream `1bc752a6`.
+- The node logs the full path of its store directory when it opens the
+  store, from upstream `4b3edbc1`.
 - `/metrics` counts the connections the connection limits refused,
   incoming and outgoing (`p2p_connections_refused_total`); the node had
   ignored refused incoming connections.
