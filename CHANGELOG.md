@@ -384,6 +384,12 @@ format and genesis re-pin.
 
 ### Fixed
 
+- A share more than 120 seconds ahead of the local clock is no longer marked
+  invalid for good. The verdict depends on the clock of each node, so the
+  share is refused for now and accepted when offered again once its time has
+  come; the share chain rules are unchanged. The check also runs as a share
+  arrives, before it is buffered, and `validate_header_minimum_difficulty`
+  is now `validate_header_on_arrival` (upstream `e6a297aa`, `9f1ebed8`).
 - A declared Stratum V2 job is no longer refused as `invalid-template` when
   the node behind the pool checks no block proposals. Knuth answers every
   proposal "only template mode is supported", and the pool took that for a

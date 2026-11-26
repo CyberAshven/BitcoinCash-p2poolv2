@@ -77,8 +77,10 @@ ASERT sets difficulty from share times and heights, so miners must not be
 able to move timestamps to make their shares easier. A share's time must be
 later than the median of its 11 ancestors' times (`MTP_WINDOW`) and at most
 120 seconds ahead of the node's clock (`MAX_FUTURE_TIME_SECS`). Header sync
-applies the same limits. Keep the node's clock synced
-([Requirements](../requirements.md#the-p2poolv2-node)).
+applies the same limits. A share too far ahead is refused for now, never
+marked invalid: the verdict depends on the clock of the node, so the share is
+accepted when offered again once its time has come. Keep the node's clock
+synced ([Requirements](../requirements.md#the-p2poolv2-node)).
 
 ## One proof of work, one share
 

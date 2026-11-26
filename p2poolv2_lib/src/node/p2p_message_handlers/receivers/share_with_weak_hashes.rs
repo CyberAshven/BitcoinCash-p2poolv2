@@ -71,7 +71,7 @@ pub async fn handle_share_with_weak_hashes<C: Send + Sync + 'static>(
     let block_hash = share.block_hash();
     let header = &share.share_block().header;
     if chain_store_handle.share_block_exists(&block_hash)
-        || share_validator.validate_share_header(header).is_err()
+        || share_validator.validate_header_on_arrival(header).is_err()
         || share_validator
             .validate_coinbase_proof(header, &share.share_block().template_merkle_branches)
             .is_err()

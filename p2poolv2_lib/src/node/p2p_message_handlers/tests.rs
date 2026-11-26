@@ -684,7 +684,7 @@ async fn test_a_peer_relaying_a_share_whose_header_checks_out_is_kept_one_failin
     chain_store_handle.expect_is_current().returning(|| false);
     let mut share_validator = MockDefaultShareValidator::default();
     share_validator
-        .expect_validate_share_header()
+        .expect_validate_header_on_arrival()
         .returning(|_| Ok(()));
     share_validator
         .expect_validate_coinbase_proof()
@@ -741,7 +741,7 @@ async fn test_a_peer_relaying_a_share_whose_header_checks_out_is_kept_one_failin
         .returning(|_| false);
     let mut share_validator = MockDefaultShareValidator::default();
     share_validator
-        .expect_validate_share_header()
+        .expect_validate_header_on_arrival()
         .returning(|_| {
             Err(ValidationError::consensus(
                 "Insufficient work: block hash does not meet share target",
@@ -793,7 +793,7 @@ async fn test_handle_response_share_headers() {
         .expect_validate_uncles()
         .returning(|_, _| Ok(()));
     mock_validator
-        .expect_validate_header_minimum_difficulty()
+        .expect_validate_header_on_arrival()
         .returning(|_| Ok(()));
     mock_validator
         .expect_validate_coinbase_proof()

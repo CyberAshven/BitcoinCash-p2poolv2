@@ -814,7 +814,27 @@ parent's time, below the full-validation zone too. Ancestor times come from
 the batch, else the store. A batch with a bad timestamp is refused whole,
 without a retry. Block receipt applies the same check before storing
 (`BlockReceiver::validate_timestamp`). Both call `check_median_time_past` and
-`check_future_time_limit`.
+`check_not_too_far_in_future`; a time too far ahead fails there as
+`Recoverable` too, for the reason the next section gives.
+
+### Future-time bound on arrival
+
+A share whose `time` is more than `MAX_FUTURE_TIME_SECS` (120 s) ahead of the
+local clock is refused when it arrives, by `check_not_too_far_in_future`
+inside `validate_header_on_arrival`:
+
+- at header sync, per header, before the batch is organised;
+- at the block admission gate in `handle_share_block`, before buffering.
+
+The refusal is `Recoverable`, never a reason to mark the share Invalid. The
+verdict depends on the local clock, so nodes whose clocks differ must not
+record different permanent verdicts, and the share is accepted when it is
+offered again once its time has come. Checking on arrival rather than only at
+organise matters because ASERT takes a child's target from its parent's time:
+a stored far-future share would let its descendants be mined at the easiest
+pool target. `validate_timestamp` still applies the bound at organise, also as
+`Recoverable` (the block is re-buffered); that is reachable only if the local
+clock moves backwards after arrival.
 
 ### Header sync paging and protocol versions
 
