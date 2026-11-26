@@ -32,7 +32,6 @@ pub mod messages;
 pub mod p2p_message_handlers;
 
 use crate::accounting::payout::simple_pplns::SimplePplnsShare;
-use crate::config::Chain;
 use crate::monitoring_events::{MonitoringEvent, MonitoringEventSender, PeerResponse, PeerStatus};
 use crate::node::messages::Message;
 use crate::node::p2p_health::P2pHealth;
@@ -377,12 +376,19 @@ impl Node {
         let (swarm_tx, swarm_rx) = mpsc::channel(100);
 
         let dns_seeds = if config.network.dns_seed {
-            dns_seeds::dns_seeds_for_chain(config.stratum.chain, config.stratum.network)
+            dns_seeds::dns_seeds_for_chain(
+                config.stratum.chain,
+                config.stratum.network,
+                config.stratum.bitcoin_cash_network,
+                &config.network.dns_seed_hosts,
+            )
         } else {
             None
         };
-        if config.stratum.chain == Chain::BitcoinCash {
-            info!("DNS seeds are off on Bitcoin Cash, which has none yet; dialing dial_peers only");
+        if dns_seeds.is_none() {
+            info!(
+                "No DNS seeds for this network; finding peers through dial_peers, Nostr and saved peers"
+            );
         }
 
         let request_response_handler = RequestResponseHandler::new(
@@ -479,10 +485,10 @@ impl Node {
     /// dns_seeds::dns_seed_delay.
     fn query_dns_seeds_if_isolated(&self) {
         let connected_peer_count = self.connection_tracker.connected_peer_count();
-        match self.dns_seeds {
+        match &self.dns_seeds {
             Some(seeds) if connected_peer_count == 0 => {
                 info!("No peers connected, querying DNS seeds");
-                dns_seeds::spawn_dns_seed_dials(seeds, self.swarm_tx.clone());
+                dns_seeds::spawn_dns_seed_dials(seeds.clone(), self.swarm_tx.clone());
             }
             Some(_) => {
                 info!("Skipping DNS seeds, {connected_peer_count} peers already connected");
@@ -1151,6 +1157,7 @@ mod tests {
             blocked_ips: vec![],
             external_address: None,
             dns_seed: false,
+            dns_seed_hosts: vec![],
             node_key_path: None,
             ephemeral_node_key: true,
             nostr_relays: vec![],
@@ -1281,6 +1288,7 @@ mod tests {
                 blocked_ips: vec![],
                 external_address,
                 dns_seed: false,
+                dns_seed_hosts: vec![],
                 node_key_path: None,
                 ephemeral_node_key: true,
                 nostr_relays: vec![],
@@ -1773,10 +1781,11 @@ mod tests {
         assert!(node.dns_seeds.is_none());
     }
 
-    /// A Bitcoin Cash node gets no DNS seeds even with `dns_seed` on and a
-    /// network that has Bitcoin seeds: those seeds are Bitcoin nodes.
+    /// A Bitcoin Cash node with `dns_seed` on gets its own network's seeds,
+    /// never Bitcoin's, even on a `stratum.network` that has Bitcoin seeds:
+    /// those seeds are Bitcoin nodes.
     #[tokio::test]
-    async fn test_dns_seeds_disabled_on_bitcoin_cash() {
+    async fn test_a_bitcoin_cash_node_gets_its_own_seeds_not_bitcoins() {
         let mut config = build_test_config("", None);
         config.stratum.chain = Chain::BitcoinCash;
         config.stratum.bitcoin_cash_network = Some(BitcoinCashNetwork::Chipnet);
@@ -1784,7 +1793,14 @@ mod tests {
         config.network.dns_seed = true;
         let node = build_test_node(config);
 
-        assert!(node.dns_seeds.is_none());
+        assert_eq!(
+            node.dns_seeds,
+            super::dns_seeds::dns_seeds_for_bitcoin_cash(BitcoinCashNetwork::Chipnet)
+        );
+        assert_ne!(
+            node.dns_seeds,
+            super::dns_seeds::dns_seeds_for_network(bitcoin::Network::Testnet4)
+        );
     }
 
     /// A node that does not listen still dials its configured peers.

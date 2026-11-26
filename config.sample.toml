@@ -7,12 +7,15 @@
 [network]
 # Where peers reach this node's share chain.
 listen_address = "/ip4/0.0.0.0/tcp/6884"
-# Share chain peers to dial at startup and keep reconnecting to. A Bitcoin
-# Cash node finds peers only here: there are no Bitcoin Cash DNS seeds yet,
-# and dns_seed is ignored and always off on chain = "bitcoin-cash". A peer
-# is an IP address or a host name, as /dns4/, /dns6/ or /dns/; only host
-# names listed here are ever dialed, never ones learned from peers.
+# Share chain peers to dial at startup and keep reconnecting to. A peer is
+# an IP address or a host name, as /dns4/, /dns6/ or /dns/; only host names
+# listed here are ever dialed, never ones learned from peers.
 # dial_peers = ["/ip4/203.0.113.1/tcp/6884", "/dns4/pool.example.com/tcp/6884"]
+# DNS seeds whose A/AAAA records list long-running nodes on port 6884, or on
+# the port an entry names as host:port. They replace the built-in seeds of
+# bitcoin_cash_network, so a new seed works before a release names it. Seeds
+# are a fallback: dns_seed = false skips them.
+# dns_seed_hosts = ["seed.example.org", "seed.example.net:6886"]
 max_pending_incoming = 10
 max_pending_outgoing = 10
 # Inbound peers. Each outgoing peer is another node's inbound one, so with
