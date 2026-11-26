@@ -236,6 +236,13 @@ format and genesis re-pin.
 
 ### Changed
 
+- A Bitcoin node stops mining on a block template that marks required (`!`
+  prefix) a rule P2Poolv2 does not implement, and logs an error naming the
+  rule, instead of building blocks that may be invalid (from upstream).
+- Stratum rejects a share whose extranonce2 is not the 8 bytes announced in
+  `mining.subscribe`, and a coinbase with bytes left over after decoding, so
+  a miner can no longer shift which coinbase bytes are read as nSequence and
+  nLockTime (from upstream).
 - Connections Kademlia opens for a lookup close once no query needs them, so
   `target_outgoing_peers` and its /16 rule set a node's outgoing peers; the
   peer stays in the routing table. A lookup only discovers addresses: no

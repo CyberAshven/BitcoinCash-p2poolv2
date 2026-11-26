@@ -53,11 +53,14 @@ const NTIME_OUT_OF_RANGE: &str = "nTime out of range for the job's nBits";
 ///
 /// {"id": 1, "method": "mining.submit", "params": ["username", "jobid", "extranonce2", "nTime", "nonce"]}
 /// Example message:
-/// {"id": 1, "method": "mining.submit", "params": ["username", "4f", "fe36a31b", "504e86ed", "e9695791"]}
+/// {"id": 1, "method": "mining.submit", "params": ["username", "4f", "fe36a31b00000000", "504e86ed", "e9695791"]}
 /// We can also receive messages with version_mask as the last parameter
 /// {"id": 1, "method": "mining.submit", "params": ["username", "jobid", "extranonce2", "nTime", "nonce", "version_mask"]}
 /// Example message:
-/// {"id": 1, "method": "mining.submit", "params": ["username", "4f", "fe36a31b", "504e86ed", "e9695791", "1fffe000"]}
+/// {"id": 1, "method": "mining.submit", "params": ["username", "4f", "fe36a31b00000000", "504e86ed", "e9695791", "1fffe000"]}
+///
+/// The extranonce2 must be exactly EXTRANONCE2_SIZE bytes (16 hex chars), else
+/// the submission is rejected with an invalid params error.
 ///
 /// Handling version mask, we check mask is valid and then apply it to the block header
 ///

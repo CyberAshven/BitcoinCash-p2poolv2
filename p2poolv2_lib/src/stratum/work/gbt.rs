@@ -379,6 +379,9 @@ async fn fetch_template(
 
 /// Get a new blocktemplate from the bitcoind server
 /// Parse the received JSON into a BlockTemplate struct and return it.
+///
+/// Returns an error, and so mines nothing on the template, when the template
+/// requires a rule (`!` prefix) that P2Poolv2 does not implement.
 #[instrument(level = "debug", skip(bitcoind))]
 async fn get_block_template(
     bitcoind: &BitcoindRpcClient,
@@ -387,7 +390,10 @@ async fn get_block_template(
     match bitcoind.getblocktemplate(network).await {
         Ok(blocktemplate_json) => {
             match serde_json::from_str::<BlockTemplate>(blocktemplate_json.as_str()) {
-                Ok(template) => Ok(template),
+                Ok(template) => {
+                    template.check_required_rules()?;
+                    Ok(template)
+                }
                 Err(e) => Err(Box::new(WorkError {
                     message: e.to_string(),
                 })),
