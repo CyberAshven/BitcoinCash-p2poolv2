@@ -959,6 +959,9 @@ impl NodeActor {
         tokio::pin!(dns_seed_timer);
         let mut dns_seed_pending = self.node.dns_seeds.is_some();
 
+        // Tor: ask the control port to make this node an onion service.
+        self.node.start_onion_service();
+
         // Nostr: announce this node, and look peers up while short of them,
         // first when DNS seeds would be asked, then every few minutes.
         self.node.start_nostr_announcer();
@@ -1206,6 +1209,8 @@ impl NodeActor {
             }
             // Event sent from dns seed resolution
             SwarmSend::Dial(address) => self.node.dial_seed(address),
+            SwarmSend::OnionServiceUp(address) => self.node.onion_service_up(address),
+            SwarmSend::OnionServiceDown(address) => self.node.onion_service_down(&address),
         }
     }
 

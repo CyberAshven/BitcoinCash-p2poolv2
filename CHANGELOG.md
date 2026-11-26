@@ -107,6 +107,41 @@ format and genesis re-pin.
   refusing it, from upstream `1bc752a6`.
 - The node logs the full path of its store directory when it opens the
   store, from upstream `4b3edbc1`.
+- Onion peers: with `[network] tor_proxy`, the node dials
+  `/onion3/<address>:<port>` peers through a Tor SOCKS5 proxy, as
+  `-onion` does in Bitcoin Cash Node, and learns onion addresses from peers. Without
+  it, onion addresses are ignored.
+- Onion services set up by hand: `external_address` may be the address of the
+  service, `/onion3/<address>:6884`. With `[network] onion_only`, the node announces
+  only that address: no address from what peers observe or from its listen
+  addresses, no listen addresses in Identify, and no Nostr announcement
+  while it reaches the relays directly.
+- Onion services through the Tor control port, on by default as
+  `-listenonion` in Bitcoin Cash Node: with Tor running, the node makes
+  itself `/onion3/<address>:6884` through `[network] tor_control`
+  (`127.0.0.1:9051`). It logs in with `tor_password` (`HASHEDPASSWORD`, the
+  stronger choice), with no password, or with the cookie file of Tor
+  (`COOKIE`); `SAFECOOKIE` is not used, since its HMAC keys are constant
+  strings. It keeps the key in `onion_v3_private_key` beside the store, and
+  advertises the address through Identify and Nostr while Tor keeps the
+  service. Without a `tor_proxy` it then dials onion peers through
+  `127.0.0.1:9050`. `listen_onion = false` turns it off; with no Tor running
+  the node retries quietly.
+- Onion-only mode and no clearnet leaks: `[network] onlynet` (`-onlynet` in
+  Bitcoin Cash Node, for example `["onion"]`) limits the networks the node
+  dials, and `proxy_clearnet` (`-proxy`) sends IPv4, IPv6 and host-name
+  dials through `tor_proxy` too, names unresolved. A node that opens no
+  clearnet connection of its own skips DNS seeds, resolves no names and
+  reaches its Nostr relays through Tor; Nostr announcements of onion
+  addresses are dialed through Tor. An `onlynet` without `"ipv4"` and
+  `"ipv6"` also announces only onion addresses, as `onion_only` does, since
+  Bitcoin Cash Node advertises no address on a network it does not reach;
+  such a node announces its onion address on Nostr, through Tor. `"onion"`
+  in `onlynet` needs `tor_proxy` or `listen_onion`: without `tor_proxy`,
+  onion peers and the relays are reached through `127.0.0.1:9050` once the
+  control port has made the onion service, and an `onlynet` without onion
+  makes no onion service. With `proxy_clearnet` the node takes no address
+  from what peers observe, as `-proxy` sets `-discover=0`.
 - `/metrics` counts the connections the connection limits refused,
   incoming and outgoing (`p2p_connections_refused_total`); the node had
   ignored refused incoming connections.

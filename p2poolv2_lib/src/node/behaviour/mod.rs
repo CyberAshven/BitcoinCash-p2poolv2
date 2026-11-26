@@ -89,7 +89,11 @@ impl P2PoolBehaviour {
             local_key.public(),
         )
         .with_agent_version(format!("p2poolv2/{}", env!("CARGO_PKG_VERSION")))
-        .with_push_listen_addr_updates(true);
+        .with_push_listen_addr_updates(true)
+        // An onion-only node (`onion_only`, or an `onlynet` without IPv4 and
+        // IPv6) sends only its external, onion, address: a listen address
+        // would name the host it hides.
+        .with_hide_listen_addrs(config.network.announces_only_onion());
         let identify_behaviour = identify::Behaviour::new(identify_config);
 
         let limits_config = connection_limits::ConnectionLimits::default()

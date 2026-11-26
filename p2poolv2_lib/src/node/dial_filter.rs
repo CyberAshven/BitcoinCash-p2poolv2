@@ -108,7 +108,8 @@ pub(crate) fn is_configured_or_not_dns(
 }
 
 /// Dial policy: refuse an address whose IP is on the blocklist. Placed below
-/// DNS, so `/dns` addresses arrive here already resolved. Addresses without
+/// DNS, so `/dns` addresses arrive here already resolved, and above Tor for
+/// the IP addresses dialed through it (`proxy_clearnet`). Addresses without
 /// an IP are allowed; the transport below decides whether it supports them.
 pub(crate) fn is_not_blocked(address: &Multiaddr, blocked_ips: &BlockedIps) -> bool {
     match extract_ip_from_multiaddr(address) {

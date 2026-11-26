@@ -115,6 +115,149 @@ store sits in the same directory stops at start instead of taking the same
 peer ID, which would keep the two from ever connecting. Give each node its
 own directory.
 
+### Onion peers
+
+With `[network] tor_proxy` set to a Tor daemon's SOCKS5 port (Tor's default
+is `127.0.0.1:9050`), the node dials `/onion3/<address>:<port>` peers through
+it, as Bitcoin Cash Node's `-onion` does (`node/onion.rs`). The onion name
+goes to the proxy unresolved. Every other address is dialed directly,
+unless `proxy_clearnet` is on (below). An onion address can be a
+`dial_peers` entry; one a peer reports through Identify enters Kademlia and
+the target's book, and one announced on Nostr is dialed, only on a node with
+a Tor proxy, `tor_proxy` or the one an onion service brings (below), so a
+node without Tor never tries one. The network group of an onion address is
+the first 4 bits of its key, as in Bitcoin Cash Node.
+
+A node on a computer running Tor makes itself an onion service through Tor's
+control port, as Bitcoin Cash Node's `-listenonion` does
+(`node/tor_control.rs`). `[network] listen_onion` is on by default; the node
+connects to `tor_control` (`127.0.0.1:9051` by default) and:
+
+1. asks `PROTOCOLINFO 1` and authenticates with `tor_password`
+   (`HASHEDPASSWORD`), with no password, or with the cookie file of Tor
+   (`COOKIE`). A password is the stronger choice: `COOKIE` sends the cookie
+   itself to whatever answers on `tor_control`. `SAFECOOKIE`, which Bitcoin
+   Cash Node uses, is not used here: it needs two HMAC keys that the control
+   spec fixes as constant strings;
+2. sends `ADD_ONION` with its key, or `NEW:ED25519-V3` the first time, and
+   `Port=6884,<listen address>`: peers dial port 6884, the default, whatever
+   the node listens on, and Tor forwards to the node's `listen_address`
+   (`127.0.0.1` for `0.0.0.0`);
+3. saves the new key as `ED25519-V3:<base64>` in `onion_v3_private_key`
+   beside the store, readable by its owner only, and sends it again on every
+   later start, so the onion address stays. With `ephemeral_node_key` Tor
+   keeps no key (`Flags=DiscardPK`) and the address is new on every start;
+4. keeps the control connection open, since Tor removes the service when it
+   closes. While it is up, Identify sends `/onion3/<address>:6884`, pushed to
+   connected peers at once, and the node announces it on Nostr. When the
+   connection closes the node stops advertising it and connects again after
+   1 second, 1.5 times longer each try, at most 10 minutes.
+
+Once the service is up, a node without a `tor_proxy` dials onion peers
+through `127.0.0.1:9050`, Tor's default SOCKS port, as Bitcoin Cash Node
+does. With no Tor running, or no control port, the node logs each try at
+debug only. Tor's defaults leave the control port off; a torrc with
+`ControlPort 9051` and `CookieAuthentication 1` turns it on, and the node's
+user must be able to read the cookie file (on Debian, be in the
+`debian-tor` group). `listen_onion` is off when the node does not listen,
+its `external_address` is an onion address already, or `onlynet` (below)
+leaves onion out.
+
+An onion service can be set up by hand instead, in the torrc, as Bitcoin
+Cash Node's `doc/tor.md` describes:
+
+```
+HiddenServiceDir /var/lib/tor/p2pool/
+HiddenServicePort 6884 127.0.0.1:6884
+```
+
+Tor writes the service's name to `hostname` in that directory and keeps its
+key there. Set `external_address = "/onion3/<the name without .onion>:6884"`:
+Identify sends it to every peer, and peers with a `tor_proxy` keep and dial
+it. The first port, the one peers dial, stays 6884 whatever the node listens
+on, as Bitcoin Cash Node keeps its default port for every onion service, so
+the port tells nothing about the node. The second address is the node's
+`listen_address`; `127.0.0.1` reaches a node listening on `0.0.0.0`. A node
+that has an IP address as well announces both, and its peer ID links them.
+
+With `onion_only = true` the node announces only its onion address, the one
+set up by hand or the one the control port made:
+
+- An `external_address` that is not `/onion3` stops it at start.
+- It takes no external address from what peers observe, and never makes a
+  routable listen address its external one, as Bitcoin Cash Node with
+  `-discover=0`.
+- Identify sends no listen addresses, only the onion one.
+- It announces on Nostr only when it reaches the relays through Tor, as a
+  node that opens no clearnet connection of its own does (`onlynet` without
+  IPv4 and IPv6, or `proxy_clearnet`, below). A relay it reached directly
+  would see its IP beside its onion address, so then it does not announce.
+
+Listen on `127.0.0.1`, so only Tor reaches the node. `onion_only` governs what
+the node announces, not what it dials: without `onlynet` or
+`proxy_clearnet`, dials to IP addresses, from `dial_peers`, the outgoing
+target or Kademlia, still go out directly and show those peers its IP and
+peer ID. A node that was reachable by IP before needs
+a new node key and an empty peer list, or peers that knew it can link its IP
+to the onion. Inbound onion connections all come from the Tor daemon, so
+blocking `127.0.0.1` cuts every onion peer.
+
+**Onion-only.** `onlynet = ["onion"]`, as Bitcoin Cash Node's
+`-onlynet=onion`, has the node dial onion peers alone. Every other address
+is refused before anything is dialed or resolved (`base_transport` in
+`node/mod.rs`): `OrTransport` would hand a refused address on to TCP, so the
+refusal comes first. The node's own TCP only listens, IP addresses from
+peers and announcements are not kept, DNS seeds are skipped, and the Nostr
+relays are reached through Tor, the name of a relay unresolved. Such a node
+also announces only onion addresses, as with `onion_only` above. Listen on
+`127.0.0.1` (`listen_address = "/ip4/127.0.0.1/tcp/6884"`), so the node
+listens on no IP address peers could reach. `onlynet` takes `"ipv4"`,
+`"ipv6"` and `"onion"` in any mix; a host name is clearnet (`/dns4` IPv4,
+`/dns6` IPv6, `/dns` either). `"onion"` needs `tor_proxy`, or `listen_onion`:
+without `tor_proxy` the node dials no peer and reaches no relay until the
+control port has made its onion service, and from then on uses
+`127.0.0.1:9050`. Onion peers saved in `p2p_peers.json` are loaded at start
+only on a node with `tor_proxy`, so an onion-only node keeps its peer list
+across restarts with `tor_proxy = "127.0.0.1:9050"` set.
+
+**Everything through Tor.** `proxy_clearnet = true`, as Bitcoin Cash Node's
+`-proxy`, dials IPv4, IPv6 and host-name peers through `tor_proxy` too, a
+name unresolved for Tor's exit to resolve. The node's own TCP then only
+listens and nothing reaches the system's resolver: DNS seeds are skipped and
+the Nostr relays are reached through Tor. `blocked_ips` still refuses an IP
+dial; the address behind a host name is Tor's to find, so it is not checked.
+Loading refuses `proxy_clearnet` without `tor_proxy`. The peers the node
+dials see a Tor exit, so it takes no external address from what they
+observe, as `-proxy` sets `-discover=0` in Bitcoin Cash Node. Listen on
+`127.0.0.1` here too, unless peers should reach the node at its own address.
+
+**How the settings combine.** Each follows a setting of Bitcoin Cash Node:
+
+| Setting | Bitcoin Cash Node | What it decides |
+|---|---|---|
+| `tor_proxy` | `-onion` | the proxy for onion peers |
+| `listen_onion` | `-listenonion` | the onion service, and `127.0.0.1:9050` for onion peers without `tor_proxy` |
+| `onion_only` | `-discover=0` with an onion `-externalip` | announcing only the onion address |
+| `onlynet` | `-onlynet` | the networks the node dials, and so the ones it announces |
+| `proxy_clearnet` | `-proxy` | IPv4, IPv6 and host names dialed through Tor, and no address from what peers observe |
+
+- `onlynet` without `"ipv4"` and `"ipv6"` turns `onion_only` on: Bitcoin
+  Cash Node advertises no address on a network it does not reach (`AddLocal`
+  in `src/net.cpp`). `onion_only` alone limits no dial.
+- A node that opens no clearnet connection of its own reaches its Nostr
+  relays through Tor, so an onion-only one announces its onion address
+  there: the relay sees a Tor exit. An `onion_only` node that dials
+  clearnet directly also reaches the relays directly, and announces nothing
+  on Nostr.
+- Onion peers become reachable once the control port has made the service,
+  through `127.0.0.1:9050`, only if `onlynet` allows onion, and a node whose
+  `onlynet` leaves onion out makes no onion service. Here the node differs
+  from Bitcoin Cash Node, whose control port code makes onion reachable
+  whatever `-onlynet` says.
+- With `-proxy`, Bitcoin Cash Node also stops listening, and so makes no
+  onion service, unless `-listen=1` is given. `proxy_clearnet` keeps the
+  node listening on `listen_address` and making its onion service.
+
 ### DNS seeds
 
 A seed is a host name whose A and AAAA records list long-running nodes. The
@@ -149,9 +292,13 @@ of peers asks those relays. No single party holds the list: the relays have
 different operators, a node asks all of its relays, and a relay can drop an
 announcement but not forge one.
 
-- **Who announces:** a node with an `external_address` and `nostr_announce`
-  on (the default). It publishes that address, ending in its peer ID, every
-  hour.
+- **Who announces:** a node with an `external_address`, or an onion service
+  made through the Tor control port, and `nostr_announce` on (the default).
+  An onion-only node announces only when it reaches the relays through Tor,
+  as a node that opens no clearnet connection of its own does. It publishes
+  those addresses, each ending in its peer ID, every hour, and again, at
+  most once a minute, when its onion service comes up, or goes away while
+  it has another address to announce.
 - **What:** one NIP-78 app-data event (kind 30078) per node and network,
   signed with a key derived from the node key. Its `d` tag is
   `p2poolv2/<chain>-<network>/<hash>`, the hash of the node's protocol
@@ -167,7 +314,9 @@ announcement but not forge one.
   ones too). The noise handshake with the protocol prologue still decides
   whether a peer is on our network.
 - **Relays:** `[network] nostr_relays`, by default six public relays with
-  different operators. An empty list keeps the node off Nostr.
+  different operators. An empty list keeps the node off Nostr. A node that
+  opens no clearnet connection of its own reaches them through Tor
+  ([Onion peers](#onion-peers)), and not at all while it has no Tor proxy.
 
 Announcing publishes the node's address and its being a P2Pool node, which
 `external_address` already offers to anyone who dials it. A node that only
@@ -218,9 +367,10 @@ target, or a DNS or Nostr seed. While short, it dials one more peer a second
   each failure (a failed dial, or a connection closed within 60 seconds). A
   lasting connection resets it; five failures in a row drop the peer.
 
-The share chain's P2P network runs on TCP over IPv4 and IPv6 only, with no
-onion or I2P addresses. The target sets how many connections a node keeps,
-not how shares are relayed. `/metrics` reports `p2p_outgoing_peers`,
+The share chain's P2P network runs on TCP over IPv4 and IPv6, and through
+Tor to onion addresses ([Onion peers](#onion-peers)); there are no I2P
+addresses. The target sets how many connections a node keeps, not how
+shares are relayed. `/metrics` reports `p2p_outgoing_peers`,
 `p2p_incoming_peers` and `p2p_outgoing_target_dials_total`
 ([Metrics](architecture/metrics.md)).
 
