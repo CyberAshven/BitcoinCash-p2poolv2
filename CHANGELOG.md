@@ -239,10 +239,6 @@ format and genesis re-pin.
 - A Bitcoin node stops mining on a block template that marks required (`!`
   prefix) a rule P2Poolv2 does not implement, and logs an error naming the
   rule, instead of building blocks that may be invalid (from upstream).
-- Stratum rejects a share whose ntime is below the `mintime` of the template
-  ("Time too old") or more than two hours past its `curtime` ("Time too
-  new"), so a found block always meets the timewarp rule of BIP54 and the
-  time limits of the node (from upstream).
 - Stratum rejects a share whose extranonce2 is not the 8 bytes announced in
   `mining.subscribe`, and a coinbase with bytes left over after decoding, so
   a miner can no longer shift which coinbase bytes are read as nSequence and
