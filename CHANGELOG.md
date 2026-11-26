@@ -384,6 +384,10 @@ format and genesis re-pin.
 
 ### Fixed
 
+- A bad `[stratum]` setting, such as a `pool_signature` over 16 bytes, no
+  longer makes the node panic after it has opened its store and waited for
+  its Bitcoin node. The node now refuses to start at once and logs the
+  reason as an error.
 - A Bitcoin Cash window no longer pays from a paying chain cut short by a
   header the node lacks. The walk from the paying block's prev stopped at
   the first unknown header and paid only the shares above it, so a node
