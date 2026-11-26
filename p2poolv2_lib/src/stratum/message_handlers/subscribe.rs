@@ -25,18 +25,6 @@ pub async fn handle_subscribe<'a, D: DifficultyAdjusterTrait>(
         return Err(Error::SubscriptionFailure("Already subscribed".to_string()));
     }
     session.subscribed = true;
-    // The first param is the miner's user agent (`cgminer/4.9.0`). Keep it:
-    // a bare-address login names its worker after the device at authorize
-    // time (see `authorize_response::allocate_worker_name`). Broken miners
-    // can authorize before subscribing; those sessions simply have none.
-    if session.user_agent.is_none() {
-        session.user_agent = message
-            .params
-            .first()
-            .and_then(|param| param.as_ref())
-            .filter(|agent| !agent.is_empty())
-            .cloned();
-    }
     session
         .difficulty_adjuster
         .set_current_difficulty(start_difficulty);
@@ -64,7 +52,6 @@ mod tests {
     use crate::stratum::difficulty_adjuster::DifficultyAdjuster;
     use crate::stratum::messages::Id;
     use crate::stratum::session::Session;
-    use std::borrow::Cow;
 
     #[tokio::test]
     async fn test_handle_subscribe_success() {
@@ -122,10 +109,6 @@ mod tests {
         assert_eq!(arr[2], serde_json::json!(EXTRANONCE2_SIZE));
         assert!(session.subscribed);
 
-        // The miner's own agent is kept for the worker auto-namer at
-        // authorize time.
-        assert_eq!(session.user_agent.as_deref(), Some("UA/v1.0"));
-
         // Check difficulty notification
         assert_eq!(
             difficulty_notification.method, "mining.set_difficulty",
@@ -150,22 +133,5 @@ mod tests {
         // Verify
         assert!(response.is_err());
         assert!(session.subscribed);
-    }
-
-    /// A subscribe carrying no user agent leaves the session without one:
-    /// the worker auto-namer then falls back to numbering.
-    #[tokio::test]
-    async fn a_subscribe_without_a_user_agent_leaves_it_unset() {
-        let message = SimpleRequest {
-            id: Some(Id::Number(1)),
-            method: Cow::Borrowed("mining.subscribe"),
-            params: Cow::Owned(Vec::new()),
-        };
-        let mut session = Session::<DifficultyAdjuster>::new(1, 1, None, DEFAULT_VERSION_MASK);
-
-        handle_subscribe(message, &mut session, 1000).await.unwrap();
-
-        assert!(session.subscribed);
-        assert_eq!(session.user_agent, None);
     }
 }

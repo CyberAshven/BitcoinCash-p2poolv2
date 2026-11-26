@@ -207,6 +207,18 @@ impl NodeHandle {
         }
     }
 
+    /// Get the connected peers share-chain traffic goes to: each sent a
+    /// handshake and is not reached only through this node's lookup.
+    pub async fn get_share_chain_peers(
+        &self,
+    ) -> Result<Vec<libp2p::PeerId>, Box<dyn Error + Send + Sync>> {
+        let (tx, rx) = oneshot::channel();
+        self.command_tx
+            .send(Command::GetShareChainPeers(tx))
+            .await?;
+        Ok(rx.await?)
+    }
+
     /// Shutdown the node
     pub async fn shutdown(&self) -> Result<(), Box<dyn Error + Send + Sync>> {
         let (tx, rx) = oneshot::channel();
@@ -282,7 +294,7 @@ impl NodeHandle {
         tokio::spawn(async move {
             while let Some(command) = command_rx.recv().await {
                 match command {
-                    Command::GetPeers(reply) => {
+                    Command::GetPeers(reply) | Command::GetShareChainPeers(reply) => {
                         let _ = reply.send(Vec::new());
                     }
                     Command::Shutdown(reply) => {
@@ -370,7 +382,7 @@ impl NodeHandle {
         tokio::spawn(async move {
             while let Some(command) = command_rx.recv().await {
                 match command {
-                    Command::GetPeers(reply) => {
+                    Command::GetPeers(reply) | Command::GetShareChainPeers(reply) => {
                         let _ = reply.send(peer_ids.clone());
                     }
                     Command::Shutdown(reply) => {
@@ -420,6 +432,7 @@ mock! {
     pub NodeHandle {
         pub async fn new(config: Config, chain_store_handle: ChainStoreHandle) -> Result<(Self, oneshot::Receiver<()>), Box<dyn Error>>;
         pub async fn get_peers(&self) -> Result<Vec<libp2p::PeerId>, Box<dyn Error>>;
+        pub async fn get_share_chain_peers(&self) -> Result<Vec<libp2p::PeerId>, Box<dyn Error>>;
         pub async fn shutdown(&self) -> Result<(), Box<dyn Error>>;
         pub async fn send_to_peer(&self, peer_id: libp2p::PeerId, message: Message) -> Result<(), Box<dyn Error>>;
     }
@@ -1009,6 +1022,7 @@ impl NodeActor {
                     self.node.attempt_reconnections();
                 }
                 _ = outgoing_target_interval.tick(), if self.node.outgoing_peer_target.has_target() => {
+                    self.node.close_finished_lookups();
                     self.node.dial_toward_outgoing_target();
                 }
                 _ = sync_retry_interval.tick(), if !self.chain_store_handle.is_current() => {
@@ -1081,7 +1095,7 @@ impl NodeActor {
     /// `Ack`. A synchronous enqueue per peer, like a block broadcast.
     fn on_relay_transaction(&mut self, relay: RelayTransaction) {
         let txid = relay.transaction.compute_txid();
-        let peers = self.node.connected_peers();
+        let peers = self.node.share_chain_peers();
         let mut relayed = 0;
         for peer in peers.iter().filter(|peer| Some(**peer) != relay.source) {
             self.node
@@ -1108,7 +1122,7 @@ impl NodeActor {
     /// connected peer is told. Same send as a share transaction.
     fn send_local_weak_share(&mut self, weak_share: WeakShare) {
         let pow_hash = weak_share.pow_hash();
-        let peers = self.node.connected_peers();
+        let peers = self.node.share_chain_peers();
         let mut relayed = 0;
         for peer in &peers {
             self.node
@@ -1125,7 +1139,7 @@ impl NodeActor {
     /// omitting the hash that peer sent. `send_request` is the same call
     /// `on_relay_transaction` makes.
     fn flush_weak_announcements(&mut self) {
-        let peers = self.node.connected_peers();
+        let peers = self.node.share_chain_peers();
         let inventories = self.pending_weak_announcements.flush(&peers);
         for (peer, hashes) in inventories {
             self.node
@@ -1163,7 +1177,7 @@ impl NodeActor {
                 debug!("Sent message to response channel: {request_id:?}");
             }
             SwarmSend::BroadcastBlock(share_block, bch_headers) => {
-                let connected_peers = self.node.connected_peers();
+                let connected_peers = self.node.share_chain_peers();
                 let prefill = weak_shares_to_prefill(
                     &share_block,
                     self.node.request_response_handler.weak_pool().as_ref(),
@@ -1191,10 +1205,7 @@ impl NodeActor {
                 }
             }
             // Event sent from dns seed resolution
-            SwarmSend::Dial(address) => match self.node.swarm.dial(address.clone()) {
-                Ok(_) => info!("Dialed {address}"),
-                Err(error) => debug!("Failed to dial {address}: {error}"),
-            },
+            SwarmSend::Dial(address) => self.node.dial_seed(address),
         }
     }
 
@@ -1211,6 +1222,11 @@ impl NodeActor {
                     .collect::<Vec<_>>();
                 if tx.send(peers).is_err() {
                     error!("Failed to send GetPeers response - receiver dropped");
+                }
+            }
+            Command::GetShareChainPeers(tx) => {
+                if tx.send(self.node.share_chain_peers()).is_err() {
+                    error!("Failed to send GetShareChainPeers response - receiver dropped");
                 }
             }
             Command::SendToPeer(peer_id, message, tx) => {
@@ -1323,7 +1339,7 @@ impl NodeActor {
             return;
         }
 
-        let peers = self.node.connected_peers();
+        let peers = self.node.share_chain_peers();
         if !peers.is_empty() {
             let now_secs = SystemTime::now()
                 .duration_since(UNIX_EPOCH)

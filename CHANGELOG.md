@@ -97,6 +97,15 @@ format and genesis re-pin.
 
 ### Added
 
+- `/metrics` counts the connections the connection limits refused,
+  incoming and outgoing (`p2p_connections_refused_total`); the node had
+  ignored refused incoming connections.
+- Bitcoin Cash DNS seeds: a node takes the seeds of its
+  `bitcoin_cash_network` (chipnet has one seed node,
+  `p2poolv2-chipnet.realbitcoin.cash:6886`; mainnet none yet), and
+  `[network] dns_seed_hosts` replaces the built-in list; an entry may name
+  its own port as `host:port`. `dns_seed` is no longer forced off on Bitcoin
+  Cash.
 - The dashboard, server-rendered and WASM, gains a Sharechain chart tab
   (served as JSON at `/sharechain`), income tiles and weak share detail on
   the miner pages. The miner report shows each share's weak count; payouts
@@ -227,6 +236,12 @@ format and genesis re-pin.
 
 ### Changed
 
+- Connections Kademlia opens for a lookup close once no query needs them, so
+  `target_outgoing_peers` and its /16 rule set a node's outgoing peers; the
+  peer stays in the routing table. A lookup only discovers addresses: no
+  handshake, no sync, and share-chain traffic goes only to peers that sent a
+  handshake. A peer the node fails to dial and has no connection to leaves
+  the routing table (#154).
 - At a chipnet minimum-difficulty mark P2Pool switches its jobs to the
   limit's nBits itself, also with a Template Provider, without waiting for a
   new template; mainnet and regtest are unchanged (#156).
@@ -369,6 +384,31 @@ format and genesis re-pin.
 
 ### Fixed
 
+- A declared Stratum V2 job is no longer refused as `invalid-template` when
+  the node behind the pool checks no block proposals. Knuth answers every
+  proposal "only template mode is supported", and the pool took that for a
+  verdict on the block, so a pool on Knuth refused every declared job. Such
+  a node now gets `template-unavailable` and a warning that Job Declaration
+  needs a node that checks proposals, such as BCHN. Every refused
+  declaration is now logged at warn with the reason from the node; it was
+  debug only.
+- A bad `[stratum]` setting, such as a `pool_signature` over 16 bytes, no
+  longer makes the node panic after it has opened its store and waited for
+  its Bitcoin node. The node now refuses to start at once and logs the
+  reason as an error.
+- A Bitcoin Cash window no longer pays from a paying chain cut short by a
+  header the node lacks. The walk from the paying block's prev stopped at
+  the first unknown header and paid only the shares above it, so a node
+  missing a header in the middle built or checked a different coinbase than
+  a node with every header, and called the other's share invalid. On
+  chipnet a node restarted while its BCH node caught up refused its peer's
+  next share and fell 1,000 shares behind. The window now waits for the
+  header, as it does for an unknown share prev.
+- Requests to a peer no longer vanish after the connection limits refuse a
+  connection to it. Request-response recorded the refused connection and
+  routed some requests there, which got no answer, timeout or failure; the
+  limits are now asked first. In the sim swarm, restarted nodes lost 13% to
+  87% of their requests and fell behind.
 - Chipnet blocks are no longer lost as `bad-diffbits` at the
   minimum-difficulty mark: a share's time must suit its job's nBits, and a
   new template is fetched a second after the mark (#155).

@@ -19,9 +19,16 @@
 //! Deliberately takes an address and never a private key: no P2Poolv2 crate
 //! generates private keys, and only `bch-trade` reads one, to sign a trade.
 
-use p2poolv2_lib::config::{BitcoinCashNetwork, payout_to_share_address};
+use bitcoin::ScriptBuf;
+use p2poolv2_lib::address::bch_share::BchShareAddress;
+use p2poolv2_lib::config::{BitcoinCashNetwork, Chain, parse_payout_address};
 use std::error::Error;
 use std::io::Read;
+
+/// Bytes of the public key hash inside a P2PKH script:
+/// `OP_DUP OP_HASH160 <20> <hash> OP_EQUALVERIFY OP_CHECKSIG`.
+const PUBKEY_HASH_START: usize = 3;
+const PUBKEY_HASH_END: usize = 23;
 
 /// Parse a Bitcoin Cash network name as the config spells it.
 ///
@@ -40,18 +47,31 @@ pub fn parse_network(value: &str) -> Result<BitcoinCashNetwork, String> {
 
 /// Build the share chain address for a P2PKH CashAddr on `network`.
 ///
-/// The rule itself lives in [`payout_to_share_address`], shared with the
-/// dashboard's help page; this wrapper keeps the CLI's error type. A P2SH
-/// CashAddr is rejected: a share is owned by a P2PKH script.
+/// A P2SH CashAddr is rejected: a share is owned by a P2PKH script.
 fn encode(cash_address: &str, network: BitcoinCashNetwork) -> Result<String, Box<dyn Error>> {
-    Ok(payout_to_share_address(cash_address, network)?)
+    let decoded = parse_payout_address(
+        cash_address,
+        Chain::BitcoinCash,
+        network.legacy_network(),
+        Some(network),
+    )?;
+    let script = decoded.script_pubkey();
+    let hash = pubkey_hash(&script).ok_or(
+        "only a P2PKH CashAddr (q... or its token-aware z...) can own shares. Ask the wallet for a regular receiving address.",
+    )?;
+    Ok(BchShareAddress::new(network.share_network(), hash).encode())
+}
+
+fn pubkey_hash(script: &ScriptBuf) -> Option<[u8; 20]> {
+    if !script.is_p2pkh() {
+        return None;
+    }
+    let mut hash = [0u8; 20];
+    hash.copy_from_slice(&script.as_bytes()[PUBKEY_HASH_START..PUBKEY_HASH_END]);
+    Some(hash)
 }
 
 /// Read the CashAddr from the argument, or from stdin when none was given.
-///
-/// Trims before the empty check so a blank line or an empty pipe gets the
-/// friendly message rather than a parse error; [`payout_to_share_address`]
-/// trims as well, so trimming here never changes what converts.
 fn read_cash_address(cash_address: Option<String>) -> Result<String, Box<dyn Error>> {
     let raw = match cash_address {
         Some(value) => value,
@@ -133,26 +153,6 @@ mod tests {
         .unwrap();
         assert_eq!(token_aware, plain);
         assert!(token_aware.starts_with("tp2pool:q"), "{token_aware}");
-    }
-
-    /// Piped input arrives with its trailing newline, so the stdin path's
-    /// trim is what converts it. Pinning it keeps the CLI honest about the
-    /// widget's whitespace behavior, which the endpoint tests pin on that
-    /// side.
-    #[test]
-    fn a_cash_addr_read_from_stdin_is_trimmed_before_conversion() {
-        let raw = "bchtest:qr7fzmep8g7h7ymfxy74lgc0v950j3r295pdnvy3hr\n";
-        let read = read_cash_address(Some(raw.to_string())).unwrap();
-        let address = encode(&read, BitcoinCashNetwork::Chipnet).unwrap();
-        assert!(address.starts_with("tp2pool:q"), "{address}");
-    }
-
-    /// An empty or blank read is refused with the friendly message rather
-    /// than a parse error about an empty address.
-    #[test]
-    fn a_blank_read_is_refused_before_the_parser_sees_it() {
-        let error = read_cash_address(Some("   \n".to_string())).unwrap_err();
-        assert!(error.to_string().contains("no CashAddr given"), "{error}");
     }
 
     #[test]

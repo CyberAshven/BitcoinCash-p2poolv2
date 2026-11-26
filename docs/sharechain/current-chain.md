@@ -6,14 +6,12 @@
 > Copyright 2024-2026 P2Poolv2 Developers, MIT or Apache-2.0. Adapted to
 > Bitcoin Cash by this fork; see the [port map](../upstream-port-map.md).
 
-**Status on Bitcoin Cash: built on 2026-10-30, not yet run on chipnet.**
-Upstream designed this defense for Bitcoin; this fork built it before mainnet
-([Requirements](../requirements.md#functional)). It is a share-chain rule
-change shipped as a flag day: the protocol strings carry `bch-prev-1off`,
-so nodes from before cannot peer, and every Bitcoin Cash node must upgrade
-together. Since 2026-11-15 the segment is `bch-prev-1off-ticks`, another
-flag day: known headers carry their one-minute-block ticks (see
-[One-minute blocks](#one-minute-blocks)). The parts:
+Upstream designed this defense for Bitcoin; this fork builds it for Bitcoin
+Cash ([Requirements](../requirements.md#functional)). It is a share-chain
+rule, carried in the protocol strings as `bch-prev-1off-ticks` (known headers
+carry their one-minute-block ticks, see
+[One-minute blocks](#one-minute-blocks)); earlier segments are in
+[Rule history](rule-history.md). The parts:
 
 - the header check (`p2poolv2_lib/src/shares/bch_headers.rs`), which
   requires each header's exact aserti3-2d nBits from its known parent;
@@ -116,13 +114,10 @@ the share chain's first share, built from the network's first block, builds
 on the all-zero hash; any other share that does is invalid.
 
 That first share, genesis, mines nothing and pays a NUMS key no one can
-spend. Since 2026-11-05 (`genesis-last-resort`, a flag day of its own) a
-window pays it only when it pays no other share or uncle: the payout of the
-share built right on it, and of a window with no other work on the paying
-chain.
-Before, genesis took its weight beside mined work, and the whole payout when
-that work was off the paying chain, which on chipnet sent 46.7 tBCH to its
-key.
+spend. A window pays it only when it pays no other share or uncle
+(`genesis-last-resort`): the payout of the share built right on it, and of a
+window with no other work on the paying chain. So no mined work's payout is
+ever burned to that key.
 
 ## Why not reject stale work instead
 
@@ -159,9 +154,8 @@ Each node checks carried headers itself, without asking BCHN:
   fake branch could pick times that ease its bits.
 
 A header that passes cost a full block of real proof of work. Upstream's
-design keeps about 8,400 headers. This fork's node first learns about 58
-days back from its BCHN's tip, counted in ticks, then follows BCHN's best
-block and adds the carried headers that pass.
+design keeps about 8,400 headers; this fork's node keeps about 58 days,
+counted in ticks (above), and adds the carried headers that pass.
 
 BCHN's finalization helps but does not replace the rule. By default BCHN
 refuses a reorg deeper than 6,000 ticks (`-maxreorgticks`, 10 ten-minute or
@@ -201,19 +195,13 @@ rule switches there); mainnet's has no pin yet.
 The node's own BCHN reports `ticks`, `target_time` and `next_target_time`
 for its blocks. A new store's first walk counts ticks down from the tip's
 reported ticks; everywhere else the reports only cross-check P2Pool's own
-values, and a disagreement is logged as an error, never followed.
-
-Until 2026-11-15 a node learned the switch while running, from its own
-BCHN. Nodes learned it at different moments, or not at all, forgot it on
-restart, and kept it across a reorg onto a branch that switched elsewhere,
-so they could require different nBits of one header and split the share
-chain. The values now live in the store (format 12), and nodes on the old
-rule cannot peer.
+values, and a disagreement is logged as an error, never followed. The values
+live in the store (format 12) rather than being learned from BCHN while
+running, so nodes that started at different times, restarted or reorged
+cannot require different nBits of one header and split the share chain.
 
 ## What it costs
 
-- A share-chain rule change, shipped on Bitcoin Cash as a flag day with a new
-  protocol tag, like the other rule changes.
 - A hostile fork earns for about two block intervals of its hashrate each time
   it starts.
 - Header-only work one block off the paying chain earns, at the cost of a

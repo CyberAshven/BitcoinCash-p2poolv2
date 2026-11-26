@@ -81,13 +81,12 @@ The coinbase merkle branch a header's `CoinbaseProof` is checked against.
 ### 1d. `BitcoinCoinbase` - Bitcoin Coinbase
 
 The coinbase a share block carries: the transaction the miner hashed,
-holding the aux flags, extranonce, nanosecond timestamp and payouts. On
-Bitcoin Cash it has no witness data and no witness commitment; the retained
-Bitcoin mode adds the BIP141 witness commitment. Not part of the block hash;
-its txid is the one the header's `CoinbaseProof` gives. On Bitcoin Cash it
-is at most 1,000,000 bytes (the BCH transaction size rule), or 3,072 bytes
-for a token share; see the storage budget in
-[async-flow.md](async-flow.md#bch-storage-and-memory-budget-2026-10-30).
+holding the aux flags, extranonce, nanosecond timestamp and payouts (and,
+in the retained Bitcoin mode, the BIP141 witness commitment; Bitcoin Cash
+has no witness data). Not part of the block hash; its txid is the one the
+header's `CoinbaseProof` gives. On Bitcoin Cash it is at most 1,000,000
+bytes, or 3,072 bytes for a token share
+([storage budget](async-flow.md#bch-storage-and-memory-budget-2026-10-30)).
 
 | Key                    | Value                                  | Notes |
 |------------------------|----------------------------------------|-------|
@@ -102,10 +101,12 @@ summary the PPLNS window and the carried-once rule read instead of them.
 
 | Key                    | Value                                  | Notes |
 |------------------------|----------------------------------------|-------|
-| `blockhash` (32 bytes) | `WeakShares`: count + each `WeakShare` (header, scriptSig, value, branch) | Written with a full block that carries weak shares; nothing for none |
-| `blockhash` (32 bytes) | `WeakSummaries`: the weak shares' proof-of-work hashes, then their credit groups (parent, payout address, share owner, donation, fee, BCH prev, count) | Written with the weak shares; a function of the carried list alone |
+| `blockhash` (32 bytes) | `WeakShares`: count + each `WeakShare` (header, scriptSig, value, branch) | Written with a full block that carries weak shares |
+| `blockhash` (32 bytes) | `WeakSummaries`: the weak shares' proof-of-work hashes, then their credit groups (parent, payout address, share owner, donation, fee, BCH prev, count) | Written with the weak shares |
 
-Body data: both are deleted by the pruner below the prune target.
+Body data. `WeakSummaries` goes with the body at the prune target;
+`WeakShares` goes one payout depth below the confirmed tip
+([Weak Shares](pruning.md#weak-shares)).
 
 ---
 
@@ -200,9 +201,8 @@ Stores individual transaction outputs.
 
 The coinbase root is the oldest coinbase in the output's spending chain,
 stamped at write time. `Unknown` marks an output with an input this node did
-not hold when it was written; spending it is rejected (`pruning.md`, "Missing
-Input at Write Time"). The tag byte was added with that marker, so stores
-written before it do not decode: start from a new store path.
+not hold when it was written; spending it is rejected
+([Missing Input at Write Time](pruning.md#missing-input-at-write-time)).
 
 ---
 
@@ -249,12 +249,11 @@ excluded) or an input spends an output that paid it, with one row per
 distinct script per transaction. A prefix scan returns a script's history in
 height then position order. See `store/script_history.rs`.
 
-Bitcoin Cash fork: a node writes these rows only while it serves Electrum
-(`[electrum] enabled`), since it keeps no address index it does not serve.
-`Metadata` key `script_history_from` holds the first confirmed height the
-store has history for (`u32::MAX` while it writes none; absent for a store
-that always kept it), and reads start no lower, so a node that turns Electrum
-on later serves history from then on, never a partial one.
+Bitcoin Cash fork: rows are written only while the node serves Electrum
+(`[electrum] enabled`). `Metadata` key `script_history_from` holds the first
+confirmed height with history (`u32::MAX` while none is written; absent for
+a store that always kept it), and reads start no lower, so turning Electrum
+on later never serves a partial history.
 
 | Key (40 bytes)                                                                  | Value             |
 |---------------------------------------------------------------------------------|-------------------|
@@ -334,9 +333,9 @@ pub struct StoredUser {
 
 ### 12. `UserIndex` - Payout Address→User ID
 
-Secondary index for looking up users by payout address. On Bitcoin Cash this
-is the CashAddr the miner put in its username. The key and field keep the
-upstream name `btcaddress`.
+Secondary index for looking up users by payout address: on Bitcoin Cash the
+CashAddr in the miner's username. The key and field keep the upstream name
+`btcaddress`.
 
 | Key                   | Value                  |
 |-----------------------|------------------------|
@@ -352,8 +351,8 @@ Store-wide values.
 |----------------|------------------------|-------|
 | `store_format` | `u32` (4 bytes LE)     | `STORE_FORMAT_VERSION`, written with genesis. Startup refuses a store with another version or none, and tells the operator to delete it and resync |
 
-Version 1 (2026-10-30) is the first: chain work counts named uncles' work.
-Stores written before it have no version.
+`STORE_FORMAT_VERSION` (`store/mod.rs`) is 12. Stores written before
+version 1 have no version.
 
 ---
 
@@ -362,9 +361,8 @@ Stores written before it have no version.
 One entry per block carried by a confirmed share or an uncle whose BCH
 header meets the target its own bits claim. Written in `confirm_blocks`,
 in the same batch as confirmation, from header data only, including
-prune-zone header-only confirmation. This is not proof of BCHN acceptance.
-Older entries use the same encoding and remain unverified candidates
-after an upgrade. Re-confirmation rewrites identical bytes; never pruned.
+prune-zone header-only confirmation. Not proof of node acceptance.
+Re-confirmation rewrites identical bytes; never pruned.
 
 | Key                                                     | Value                                                                                      |
 |---------------------------------------------------------|--------------------------------------------------------------------------------------------|
@@ -372,42 +370,34 @@ after an upgrade. Re-confirmation rewrites identical bytes; never pruned.
 
 ### 14a. `AcceptedFoundBlocks` - BCHN-Accepted Pool Blocks
 
-Uses the same key and value encoding as `FoundBlocks`. Written through
-StoreWriter only after a positive BCHN `submitblock` verdict or BCHN's
-chain hash matching the candidate at its declared height. Local accepted
-submissions can be recorded before their share is persisted. The
-serialized existence check makes duplicate acceptance idempotent. Only
-this column family feeds the found-block API and metrics; where effort is
-shown, each entry joins its `AcceptedBlockEffort` snapshot (14b). Never
-pruned.
+Same encoding as `FoundBlocks`. Written through StoreWriter only after a
+positive `submitblock` verdict or the node's chain hash matching the
+candidate at its height (`FoundBlockVerifier`); idempotent. Only this
+column family feeds the found-block API and metrics, each entry joined to
+its `AcceptedBlockEffort` snapshot (14b). No share validity or payout rule
+depends on it. Never pruned.
 
-Normal writable opening creates this column family in an existing store
-without modifying legacy candidates or share data. Read-only opening
-cannot create it: RocksDB rejects any listed column family the store
-does not have, even with `create_missing_column_families`, so a
-read-only tool fails to open a store written before this family existed
-until a read-write open has created it; after that, read-only opens
-report the accepted finds normally. Once BCHN verifies an old candidate,
-its accepted record persists across restarts. No share validity or
-payout rule depends on either record.
+A read-write open creates it in an older store. A read-only open cannot
+(RocksDB rejects a listed column family the store lacks, even with
+`create_missing_column_families`), so read-only tools fail on a store until
+a read-write open has created it.
 
 ### 14b. `AcceptedBlockEffort` - Per-Block Effort Snapshots
 
-One annotation per accepted block, keyed by the accepted blockhash: the
-pool work accumulated since the previous find, and the network difficulty
-of the header that claimed this block, both captured at the effort reset
-so a restart never recomputes them against a moved difficulty. Written
-through StoreWriter right after `AcceptedFoundBlocks` records the find;
-when the write fails the accepted block still stands and reads back with
-no effort. Blocks accepted before this column family existed have no
-entry, and `/found_blocks` reports `"effort": null` for them -- there is
-no backfill. Never pruned.
+One snapshot per accepted block, captured at the effort reset so a restart
+never recomputes it against a moved difficulty: the pool work since the
+previous find (`work_since_last_block` before the reset) and the network
+difficulty from the found block header's own nBits (the units of the
+`network_difficulty` gauge), `None` when that header cannot be read.
+Written through StoreWriter right after `AcceptedFoundBlocks`; if the write
+fails the block still stands, with no effort. Blocks accepted before this
+column family existed have none, and `/found_blocks` reports
+`"effort": null` (no backfill). Never pruned.
 
 | Key                            | Value                                                                                                       |
 |--------------------------------|-------------------------------------------------------------------------------------------------------------|
 | `bitcoin_blockhash` (32 bytes) | consensus-encoded `EffortSnapshot`: `work` as f64 bits (u64, 8 bytes), presence tag (`1` = difficulty follows, `0` = `None`), then `difficulty` as f64 bits (u64, 8 bytes) when present |
 
-**EffortSnapshot Structure:**
 ```rust
 pub struct EffortSnapshot {
     pub work: f64,
@@ -415,40 +405,22 @@ pub struct EffortSnapshot {
 }
 ```
 
-`work` is what the metrics actor returns as it resets
-`work_since_last_block` to zero (the pre-reset value). `network_difficulty`
-is `Target::from_compact(header.bits)` `difficulty_float` from the found
-block header's own nBits -- the same mainnet-relative units as the live
-`network_difficulty` gauge -- read from the share header BCHN confirmed
-the blockhash with; it is `None` when that header cannot be read.
-
-`get_found_blocks` joins the snapshot onto each accepted block, so the
-found-block API, metrics exposition and both dashboards' blocks tables
-read effort beside the block with no second query. The store format
-version does not change: a read-write open of an older store creates the
-column family and leaves older blocks without effort, and an older binary
-reading a newer store never asks for the family. Read-only tools
-(`verify_chain`, `db_query`) do not request it either -- RocksDB rejects
-a listed column family the store does not have -- so they open an older
-store, read the accepted finds, and report no effort. Only a read-write
-open creates the family.
+`get_found_blocks` joins the snapshot onto each accepted block, so the API,
+metrics and dashboards read effort with no second query. The store format
+does not change: a read-write open creates the family, and read-only tools
+(`verify_chain`, `db_query`) never request it, so they open older stores
+and report no effort.
 
 ---
 
 ### 15. `HashrateSamples` - Dashboard Hashrate History
 
 One entry per dashboard hashrate sample, written by the API server's
-sampler so a restart reloads the chart instead of starting empty.
-Retention is hardcoded 30 days (`RETENTION_SECS` in
-`store/hashrate_samples.rs`): the writer never keeps samples older than
-that, and eviction is a range delete of the prefix below the cutoff.
-
-Only a read-write open registers this column family. `verify_chain`,
-`db_query` and other read-only tools never request it, so old binaries
-reading a store a new binary has written still open it (RocksDB ignores
-column families a client does not ask for) and a rollback starts from an
-empty chart rather than failing. `create_missing_column_families` creates
-it on the first read-write open.
+sampler so a restart reloads the chart. Retention is 30 days
+(`RETENTION_SECS` in `store/hashrate_samples.rs`), evicted by a range delete
+below the cutoff. Only a read-write open registers it (creating it on first
+open); read-only tools never request it, so older binaries still open the
+store and a rollback starts from an empty chart.
 
 | Key                          | Value                                             | Notes                                        |
 |------------------------------|---------------------------------------------------|----------------------------------------------|
@@ -466,17 +438,24 @@ pub struct HashrateSample {
 }
 ```
 
-Each `Option` is a tag byte (`1` = value, `0` = `None`, anything
-else is a decode error) followed by the value (`f64` little endian, `u64`
-little endian) when present. A row written before the count fields
-existed ends after `network`: decode treats a clean end of input where a
-tag would sit as `None`, so old rows load with unknown counts, and a row
-from a format with more fields still decodes (the unread tail is
-ignored, as the trailing bytes of the fixed layout always were).
-Loading skips a corrupt, key-mismatched or future-dated row with a
-warning instead of failing startup.
+Each `Option` is a tag byte (`1` = value, `0` = `None`, else a decode
+error) then the value (`f64` or `u64`, little endian) when present. A row
+written before the count fields existed ends after `network`; a clean end
+of input where a tag would sit decodes as `None`, so old rows load with
+unknown counts. A row is read to its end, so a binary older than the count
+fields skips the newer rows as corrupt. Loading skips a corrupt,
+key-mismatched or future-dated row with a warning.
 
 ---
+
+### 16. Other Bitcoin Cash column families
+
+- `PayoutTrees`: the payout tree of each found block whose coinbase pays
+  through one, keyed by coinbase txid, kept so the tree can be spent after
+  maturity (`store/payout_tree.rs`; [BCH hybrid payouts](bch-hybrid-payouts.md)).
+- `BchHeaders`, `BchBestChain`: the Bitcoin Cash headers the node knows
+  (`KnownBchHeader`, kept forever) and its node's best chain, height to
+  hash (`store/bch_headers.rs`; [Current chain](../sharechain/current-chain.md)).
 
 ## Key Constants
 

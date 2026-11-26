@@ -7,7 +7,7 @@ mod cashaddr;
 use bitcoin::base58;
 use bitcoin::hashes::Hash;
 use bitcoin::secp256k1::{Keypair, Secp256k1, SecretKey};
-use bitcoin::{Address, Network, PubkeyHash, ScriptBuf};
+use bitcoin::{Address, Network, PubkeyHash};
 use bitcoindrpc::BitcoinRpcConfig;
 use ipnet::IpNet;
 use p2poolv2_wallet::Address as ShareAddress;
@@ -198,56 +198,6 @@ pub fn parse_share_address(address: &str, network: Network) -> Result<ShareAddre
         .map_err(|error| ConfigError {
             message: format!("Invalid share chain address: {error}"),
         })
-}
-
-/// Bytes of the public key hash inside a P2PKH script:
-/// `OP_DUP OP_HASH160 <20> <hash> OP_EQUALVERIFY OP_CHECKSIG`.
-const P2PKH_HASH_START: usize = 3;
-const P2PKH_HASH_END: usize = 23;
-
-/// The share chain address for a payout CashAddr on `network`.
-///
-/// The single source behind every way a miner obtains one: the
-/// `bch-share-address` CLI command and the dashboard's help page. The
-/// payout address is a P2PKH CashAddr from the miner's own wallet, naming
-/// the key that will own shares; only the prefix changes (`bitcoincash:`
-/// to `p2pool:`, `bchtest:` to `tp2pool:`, `bchreg:` to `rp2pool:`) and
-/// with it the checksum, which keeps the two strings from being mistaken
-/// for each other. No private key is read: the wallet that holds the key
-/// spends the share output through the same P2PKH script.
-///
-/// A P2SH CashAddr is rejected: a share is owned by a P2PKH script.
-///
-/// Surrounding whitespace is ignored, so the rule itself owns input
-/// normalization: the help page's route and the CLI's stdin path both
-/// hand in raw pasted or piped text and must convert it identically,
-/// whether or not their caller remembers to trim first.
-pub fn payout_to_share_address(
-    cash_address: &str,
-    network: BitcoinCashNetwork,
-) -> Result<String, ConfigError> {
-    let decoded = parse_payout_address(
-        cash_address.trim(),
-        Chain::BitcoinCash,
-        network.legacy_network(),
-        Some(network),
-    )?;
-    let script = decoded.script_pubkey();
-    let hash = p2pkh_hash(&script).ok_or(ConfigError {
-        message: "only a P2PKH CashAddr (q... or its token-aware z...) can own shares. Ask the wallet for a regular receiving address.".to_string(),
-    })?;
-    Ok(BchShareAddress::new(network.share_network(), hash).encode())
-}
-
-/// The 20-byte key hash inside a P2PKH script, or none when the script is
-/// not P2PKH.
-fn p2pkh_hash(script: &ScriptBuf) -> Option<[u8; 20]> {
-    if !script.is_p2pkh() {
-        return None;
-    }
-    let mut hash = [0u8; 20];
-    hash.copy_from_slice(&script.as_bytes()[P2PKH_HASH_START..P2PKH_HASH_END]);
-    Some(hash)
 }
 
 /// Max length for pool signature P2Poolv2 + 8 more bytes for users to add
@@ -1434,11 +1384,16 @@ pub struct NetworkConfig {
     // after startup when dial_peers are set but none connected. Set false
     // to rely only on dial_peers.
     //
-    // Always off on Bitcoin Cash, whatever the file says: the built-in seeds
-    // are Bitcoin P2Poolv2 nodes and there are no Bitcoin Cash seeds yet
-    // (`Config::with_bitcoin_cash_dns_seed_off`).
+    // A Bitcoin Cash node takes the seeds of its `bitcoin_cash_network`,
+    // never Bitcoin's.
     #[serde(default = "default_dns_seed")]
     pub dns_seed: bool,
+    /// DNS seed hostnames that replace the built-in ones, so a new seed can
+    /// be used before a release names it. Their A/AAAA records list
+    /// long-running nodes on the network's seed port (6884 on Bitcoin Cash),
+    /// or on the port an entry names as `host:port`.
+    #[serde(default)]
+    pub dns_seed_hosts: Vec<String>,
     /// File holding this node's libp2p identity, whose public key is its
     /// peer ID. Created on the first start and read on every start after,
     /// so peers, saved peer lists and announcements keep finding the node
@@ -1465,7 +1420,8 @@ pub struct NetworkConfig {
     /// learned of through Kademlia or Identify at a public IP address, one a
     /// second, never past `max_established_outgoing` and never in an IPv4
     /// /16 or IPv6 /32 where it already has an outgoing peer (`dial_peers`
-    /// do not count). 0 turns this off.
+    /// do not count). Connections Kademlia opens for a lookup close once no
+    /// lookup needs them. 0 turns both off.
     #[serde(default = "default_target_outgoing_peers")]
     pub target_outgoing_peers: u32,
 }
@@ -1568,6 +1524,7 @@ impl Default for NetworkConfig {
             blocked_ips: vec![],
             external_address: None,
             dns_seed: true,
+            dns_seed_hosts: vec![],
             node_key_path: None,
             ephemeral_node_key: false,
             nostr_relays: default_nostr_relays(),
@@ -1880,9 +1837,6 @@ impl Config {
     /// so two Bitcoin Cash nodes on the same network must not disagree on it
     /// because one left a Bitcoin value such as `signet` in its file.
     ///
-    /// On Bitcoin Cash, `network.dns_seed` is also turned off (see
-    /// [`Config::with_bitcoin_cash_dns_seed_off`]).
-    ///
     /// `[[submit_nodes]]` with light templates is refused (see
     /// [`Config::validate_submit_nodes`]).
     ///
@@ -1927,9 +1881,7 @@ impl Config {
             ));
         }
         loaded.validate_submit_nodes()?;
-        Ok(loaded
-            .with_bitcoin_cash_network_derived()
-            .with_bitcoin_cash_dns_seed_off())
+        Ok(loaded.with_bitcoin_cash_network_derived())
     }
 
     /// Refuse `[[submit_nodes]]` with `template_source = "rpc_light"`. A
@@ -1952,22 +1904,6 @@ impl Config {
     /// node. Bitcoin configurations are returned unchanged.
     pub fn with_bitcoin_cash_network_derived(mut self) -> Self {
         self.stratum.network = self.stratum.effective_network();
-        self
-    }
-
-    /// Turn `network.dns_seed` off on a Bitcoin Cash node, even when the file
-    /// or the environment sets it. Bitcoin configurations are returned
-    /// unchanged.
-    ///
-    /// The built-in DNS seeds are Bitcoin P2Poolv2 nodes, compiled in per
-    /// Bitcoin network, and a Bitcoin Cash node's `stratum.network` is a
-    /// Bitcoin network. There are no Bitcoin Cash seeds yet, so a Bitcoin Cash
-    /// node finds its peers through `dial_peers` only. The node applies the
-    /// same rule again when it picks its seeds.
-    pub fn with_bitcoin_cash_dns_seed_off(mut self) -> Self {
-        if self.stratum.chain == Chain::BitcoinCash {
-            self.network.dns_seed = false;
-        }
         self
     }
 
@@ -2143,127 +2079,6 @@ mod tests {
     use p2poolv2_wallet::bch_share::{BchShareAddress, BchShareNetwork};
     use temp_env::{with_var, with_vars};
     use tokio_test::assert_err;
-
-    /// A mainnet P2PKH payout re-encodes under the `p2pool:` prefix with the
-    /// same 20-byte key hash, which the share address parser reads back.
-    #[test]
-    fn a_mainnet_payout_re_encodes_under_the_share_prefix_keeping_its_hash() {
-        let encoded = payout_to_share_address(
-            "bitcoincash:qr6m7j9njldwwzlg9v7v53unlr4jkmx6eylep8ekg2",
-            BitcoinCashNetwork::Mainnet,
-        )
-        .unwrap();
-        assert!(encoded.starts_with("p2pool:q"), "{encoded}");
-        let decoded =
-            bch_share::parse(&encoded, BitcoinCashNetwork::Mainnet.share_network()).unwrap();
-        assert_eq!(
-            decoded.hash,
-            [
-                0xf5, 0xbf, 0x48, 0xb3, 0x97, 0xda, 0xe7, 0x0b, 0xe8, 0x2b, 0x3c, 0xca, 0x47, 0x93,
-                0xf8, 0xeb, 0x2b, 0x6c, 0xda, 0xc9,
-            ]
-        );
-    }
-
-    /// A regtest payout lands under `rp2pool:`, encoding the full expected
-    /// string so the prefix and the checksum are both pinned.
-    #[test]
-    fn a_regtest_payout_re_encodes_under_rp2pool() {
-        let encoded = payout_to_share_address(
-            "bchreg:qrr4pe4ret3zwmj0428rtksq83ql80w6myqjlk828q",
-            BitcoinCashNetwork::Regtest,
-        )
-        .unwrap();
-        assert_eq!(
-            encoded,
-            "rp2pool:qrr4pe4ret3zwmj0428rtksq83ql80w6my7w2wp75h"
-        );
-    }
-
-    /// A chipnet payout is the help page's common case: the same key lands
-    /// under `tp2pool:`, ready for a miner's `p2p=` value.
-    #[test]
-    fn a_chipnet_payout_re_encodes_under_tp2pool() {
-        let encoded = payout_to_share_address(
-            "bchtest:qr7fzmep8g7h7ymfxy74lgc0v950j3r295pdnvy3hr",
-            BitcoinCashNetwork::Chipnet,
-        )
-        .unwrap();
-        assert!(encoded.starts_with("tp2pool:q"), "{encoded}");
-    }
-
-    /// A token-aware CashAddr names the same key as its plain form, so both
-    /// give the same share address (CashTokens test vectors).
-    #[test]
-    fn a_token_aware_payout_re_encodes_to_the_same_share_address_as_its_plain_form() {
-        let token_aware = payout_to_share_address(
-            "bchtest:zr7fzmep8g7h7ymfxy74lgc0v950j3r295x8qj2hgs",
-            BitcoinCashNetwork::Chipnet,
-        )
-        .unwrap();
-        let plain = payout_to_share_address(
-            "bchtest:qr7fzmep8g7h7ymfxy74lgc0v950j3r295pdnvy3hr",
-            BitcoinCashNetwork::Chipnet,
-        )
-        .unwrap();
-        assert_eq!(token_aware, plain);
-    }
-
-    /// A share is owned by a P2PKH script, so a P2SH payout cannot stand in
-    /// for one and the refusal names P2PKH.
-    #[test]
-    fn a_p2sh_payout_is_rejected() {
-        let error = payout_to_share_address(
-            "bchtest:pr6m7j9njldwwzlg9v7v53unlr4jkmx6eyvwc0uz5t",
-            BitcoinCashNetwork::Chipnet,
-        )
-        .unwrap_err();
-        assert!(error.message.contains("P2PKH"), "{}", error.message);
-    }
-
-    /// The payout prefix must match the network the share prefix is picked
-    /// from, so a mainnet payout cannot be re-encoded for chipnet.
-    #[test]
-    fn a_payout_of_another_network_is_rejected() {
-        assert!(
-            payout_to_share_address(
-                "bitcoincash:qr6m7j9njldwwzlg9v7v53unlr4jkmx6eylep8ekg2",
-                BitcoinCashNetwork::Chipnet,
-            )
-            .is_err()
-        );
-    }
-
-    /// The rule owns input normalization: a pasted payout wrapped in
-    /// whitespace converts exactly as the clean one, so every caller shares
-    /// one behavior instead of relying on its own trim.
-    #[test]
-    fn surrounding_whitespace_does_not_change_the_conversion() {
-        let clean = payout_to_share_address(
-            "bchtest:qr7fzmep8g7h7ymfxy74lgc0v950j3r295pdnvy3hr",
-            BitcoinCashNetwork::Chipnet,
-        )
-        .unwrap();
-        let wrapped = payout_to_share_address(
-            " bchtest:qr7fzmep8g7h7ymfxy74lgc0v950j3r295pdnvy3hr \n",
-            BitcoinCashNetwork::Chipnet,
-        )
-        .unwrap();
-        assert_eq!(clean, wrapped);
-    }
-
-    /// Garbage in the input field comes back as a readable parse error, not
-    /// a panic: the help page's endpoint shows it verbatim to the user.
-    #[test]
-    fn an_unparseable_payout_is_reported_as_a_config_error() {
-        let error =
-            payout_to_share_address("not-an-address", BitcoinCashNetwork::Chipnet).unwrap_err();
-        assert!(
-            error.message.contains("Invalid Bitcoin Cash"),
-            "{}",
-            error.message
-        );
-    }
 
     /// The node key sits beside the store unless `node_key_path` names a
     /// file, and an ephemeral node keeps none.
@@ -2552,48 +2367,47 @@ mod tests {
         });
     }
 
-    /// A Bitcoin Cash node never uses the built-in DNS seeds, which are
-    /// Bitcoin nodes: loading turns `dns_seed` off even when it is set.
+    /// A Bitcoin Cash node keeps `dns_seed` as set; its seeds are picked by
+    /// `bitcoin_cash_network`, so it never gets Bitcoin's.
     #[test]
-    fn bitcoin_cash_chipnet_load_turns_dns_seed_off_even_when_set() {
-        with_vars(
-            [
-                ("P2POOL_STRATUM__CHAIN", Some("bitcoin-cash")),
-                ("P2POOL_STRATUM__BITCOIN_CASH_NETWORK", Some("chipnet")),
-                ("P2POOL_NETWORK__DNS_SEED", Some("true")),
-            ],
-            || {
-                let config = Config::load("../config.sample.toml").unwrap();
-                assert_eq!(config.stratum.chain, Chain::BitcoinCash);
-                assert!(!config.network.dns_seed);
-            },
-        );
+    fn bitcoin_cash_load_keeps_dns_seed_as_set() {
+        for (value, expected) in [("true", true), ("false", false)] {
+            with_vars(
+                [
+                    ("P2POOL_STRATUM__CHAIN", Some("bitcoin-cash")),
+                    ("P2POOL_STRATUM__BITCOIN_CASH_NETWORK", Some("mainnet")),
+                    ("P2POOL_NETWORK__DNS_SEED", Some(value)),
+                ],
+                || {
+                    let config = Config::load("../config.sample.toml").unwrap();
+                    assert_eq!(config.stratum.network, Network::Bitcoin);
+                    assert_eq!(config.network.dns_seed, expected);
+                },
+            );
+        }
     }
 
-    /// Bitcoin Cash mainnet's `stratum.network` is Bitcoin mainnet, so it
-    /// must not inherit Bitcoin's seeds either.
+    /// `dns_seed_hosts` is empty unless the file lists hostnames.
     #[test]
-    fn bitcoin_cash_mainnet_load_turns_dns_seed_off_by_default() {
-        with_vars(
-            [
-                ("P2POOL_STRATUM__CHAIN", Some("bitcoin-cash")),
-                ("P2POOL_STRATUM__BITCOIN_CASH_NETWORK", Some("mainnet")),
-            ],
-            || {
-                let config = Config::load("../config.sample.toml").unwrap();
-                assert_eq!(config.stratum.network, Network::Bitcoin);
-                assert!(!config.network.dns_seed);
-            },
-        );
-    }
+    fn dns_seed_hosts_load_from_the_file() {
+        let config = Config::load("../config.sample.toml").unwrap();
+        assert!(config.network.dns_seed_hosts.is_empty());
 
-    #[test]
-    fn with_bitcoin_cash_dns_seed_off_leaves_bitcoin_seeds_on() {
-        let config = Config::load("../config-bitcoin.sample.toml")
+        let sample = std::fs::read_to_string("../config.sample.toml")
             .unwrap()
-            .with_bitcoin_cash_dns_seed_off();
-        assert_eq!(config.stratum.chain, Chain::Bitcoin);
-        assert!(config.network.dns_seed);
+            .replace("\r\n", "\n");
+        let with_seeds = sample.replacen(
+            "\n[network]\n",
+            "\n[network]\ndns_seed_hosts = [\"seed.example.org\"]\n",
+            1,
+        );
+        assert_ne!(with_seeds, sample, "the sample has a [network] table");
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        std::fs::write(&path, with_seeds).unwrap();
+
+        let config = Config::load(path.to_str().unwrap()).unwrap();
+        assert_eq!(config.network.dns_seed_hosts, vec!["seed.example.org"]);
     }
 
     /// A single-underscore key no longer resolves, so an operator carrying the
@@ -2778,7 +2592,7 @@ mod tests {
             config.stratum.bitcoin_cash_network,
             Some(BitcoinCashNetwork::Regtest)
         );
-        assert!(!config.network.dns_seed);
+        assert!(config.network.dns_seed);
     }
 
     /// Its CashAddr bootstrap address and the default donation parse on
@@ -2902,7 +2716,7 @@ mod tests {
             Some(BitcoinCashNetwork::Chipnet)
         );
         assert_eq!(config.stratum.network, Network::Testnet);
-        assert!(!config.network.dns_seed);
+        assert!(config.network.dns_seed);
         assert_eq!(config.bitcoinrpc.url, "http://127.0.0.1:48332");
 
         let parsed = config.stratum.parse().unwrap();

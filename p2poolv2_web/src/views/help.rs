@@ -4,30 +4,10 @@
 
 //! Help, as `/dashboard/help` shows it, with this app's settings added.
 
-use crate::api::ShareAddressResponse;
 use crate::app::ctx;
-use crate::format::url_component;
 use crate::layout::{Crumb, dashboard_crumb};
 use crate::route::Tab;
 use leptos::prelude::*;
-use leptos::task::spawn_local;
-
-/// The `GET /share_address` path for `payout`, percent-encoded. The node
-/// decodes it back and runs the conversion rule shared with the CLI.
-fn share_address_path(payout: &str) -> String {
-    format!("/share_address?payout={}", url_component(payout))
-}
-
-/// The example fields' payout half: the submitted payout once the node
-/// accepted it, the placeholder before that (a refused payout fills
-/// nothing).
-fn example_payout(payout: &str, share: &str) -> String {
-    if share.is_empty() {
-        "<payout address>".to_string()
-    } else {
-        payout.to_string()
-    }
-}
 
 #[component]
 pub fn HelpPage() -> impl IntoView {
@@ -67,41 +47,6 @@ pub fn HelpPage() -> impl IntoView {
             .map_or_else(|| "<sv2 port>".to_string(), |port| port.to_string());
         format!("{host}:{port}")
     };
-    // The `--network` value in the share address example: the CLI's own
-    // spelling for this node's network, absent on a node mining the
-    // Bitcoin chain and until `/network` answers. Without it there is no
-    // generator to show, exactly as the server-rendered page hides it.
-    let cli_net = move || site.get().and_then(|site| site.cli_network);
-    // The generator's form: the payout as typed, the share address the
-    // node returned (empty until one succeeds), and the error it refuses
-    // with. An invalid entry goes to the error alone; the example fields
-    // below fill only once `share` has a value.
-    let payout = RwSignal::new(String::new());
-    let share = RwSignal::new(String::new());
-    let error = RwSignal::new(None::<String>);
-    // Builds the form's submit handler. The widget is rebuilt whenever
-    // `/network` answers, so the form takes a fresh handler each time
-    // rather than one value moved in on the first build only.
-    let generate = move || {
-        move |event: leptos::ev::SubmitEvent| {
-            event.prevent_default();
-            let connection = ctx().connection.get_untracked();
-            let entered = payout.get_untracked();
-            spawn_local(async move {
-                let path = share_address_path(&entered);
-                match connection.get::<ShareAddressResponse>(&path).await {
-                    Ok(response) => {
-                        error.set(None);
-                        share.set(response.address);
-                    }
-                    Err(message) => {
-                        error.set(Some(message));
-                        share.set(String::new());
-                    }
-                }
-            });
-        }
-    };
     view! {
         <div class="panel">
             <div class="banner-warn" role="status">
@@ -109,98 +54,28 @@ pub fn HelpPage() -> impl IntoView {
             </div>
             <div class="help-section">
                 <h3>"Connect a miner"</h3>
-                {move || {
-                    cli_net().map(|network| {
-                        // Built fresh each run, so the strings move into
-                        // this view while `url` and `sv2` stay in the
-                        // outer closure's environment for the next one.
-                        let url_text = url();
-                        let sv2_text = sv2();
-                        let user_text = example_payout(&payout.get(), &share.get());
-                        view! {
-                            // The generator exists only where the node
-                            // has a share address prefix: `cli_network`
-                            // arrives with `/network` and is absent on a
-                            // Bitcoin node, which mirrors the server
-                            // page's own hiding of this widget.
-                            <form class="share-form search-row" on:submit={generate()}>
-                                <div class="grow">
-                                    <label for="share-payout">
-                                        "Enter your payout address to get miner connection info."
-                                    </label>
-                                    <input
-                                        id="share-payout"
-                                        type="text"
-                                        placeholder="bchtest:q... or bitcoincash:q..."
-                                        bind:value=payout
-                                        required
-                                    />
-                                </div>
-                                <button class="btn-primary" type="submit">"Generate"</button>
-                            </form>
-                            {move || {
-                                error.get().map(|message| {
-                                    view! { <div class="toast" role="alert">{message}</div> }
-                                })
-                            }}
-                            <p>"Stratum V1: point the miner at this node's stratum port."</p>
-                            <ul>
-                                <li>"URL: " <code>{url_text}</code></li>
-                                <li>"User: " <code>{user_text.clone()}</code></li>
-                                <li>
-                                    "Worker Name (optional): " <code>"<payout address>.<worker>"</code>
-                                </li>
-                                <li>
-                                    "Password: " <code>"p2p=" {move || share.get()}</code>
-                                    ", which names who owns your shares."
-                                </li>
-                            </ul>
-                            <p>
-                                "Stratum V2: point the miner at this node's SV2 port and pin its authority key."
-                            </p>
-                            <ul>
-                                <li>"Host: " <code>{sv2_text}</code></li>
-                                <li>
-                                    "User: " <code>
-                                        {user_text} ",p2p=" {move || share.get()}
-                                    </code>
-                                </li>
-                                <li>
-                                    "Worker Name (optional): " <code>"<payout address>.<worker>"</code>
-                                </li>
-                                <li>
-                                    "Key: the node's authority public key (configure when the node runs Noise keys)"
-                                </li>
-                            </ul>
-                            <p>
-                                "SV1 devices can connect to the SV1 port directly, or mine through an SV2 translator."
-                            </p>
-                            <p>
-                                "Validate a share chain address with " <code>
-                                    "p2poolv2_cli bch-share-address --network " {network} " <payout address>"
-                                </code> "."
-                            </p>
-                        }
-                    })
-                }}
-                {move || {
-                    // `/network` has answered and carries no share network:
-                    // a Bitcoin node explains itself instead of showing a
-                    // generator that could not exist. While it is still
-                    // loading, nothing shows rather than a wrong note.
-                    let bitcoin_node = site
-                        .get()
-                        .map(|site| site.cli_network.is_none())
-                        .unwrap_or(false);
-                    bitcoin_node.then(|| {
-                        view! {
-                            <p>
-                                "This node mines the Bitcoin chain, which has no share chain address; "
-                                "a payout address here names bitcoin coinbase outputs only."
-                            </p>
-                        }
-                    })
-                }}
+                <p>"Stratum V1: point the miner at this node's stratum port."</p>
+                <ul>
+                    <li>"URL: " <code>{url}</code></li>
+                    <li>"User: " <code>"<payout address>.<worker name>"</code></li>
+                    <li>
+                        "Password: " <code>"p2p=<share chain address>"</code>
+                        ", which names who owns your shares."
+                    </li>
+                </ul>
+                <p>
+                    "Stratum V2: point the miner at this node's SV2 port and pin its authority key."
+                </p>
+                <ul>
+                    <li>"Host: " <code>{sv2}</code></li>
+                    <li>"User: " <code>"<payout address>.<worker>,p2p=<share chain address>"</code></li>
+                    <li>"Key: pin the node's authority public key"</li>
+                </ul>
+                <p>"SV1 devices can mine through an SV2 translator."</p>
+                <p>
+                    "Get a share chain address with " <code>"p2poolv2_cli bch-share-address"</code>
+                    "."
+                </p>
             </div>
             <div class="help-section">
                 <h3>"Pages"</h3>
@@ -268,28 +143,5 @@ pub fn HelpPage() -> impl IntoView {
                 </p>
             </div>
         </div>
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The payout travels percent-encoded: a colon survives (the node's
-    /// own pages keep it, and `url_component` does too), spaces do not.
-    #[test]
-    fn the_share_address_path_encodes_the_payout() {
-        assert_eq!(
-            share_address_path("bchtest:qr7fz ep"),
-            "/share_address?payout=bchtest:qr7fz%20ep"
-        );
-    }
-
-    /// The example fields fill only once a share address came back: a
-    /// refused payout leaves the placeholder in place.
-    #[test]
-    fn the_example_payout_waits_for_an_accepted_share_address() {
-        assert_eq!(example_payout("nope", ""), "<payout address>");
-        assert_eq!(example_payout("bchtest:q1", "tp2pool:q2"), "bchtest:q1");
     }
 }

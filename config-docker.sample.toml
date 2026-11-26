@@ -28,7 +28,8 @@ max_established_outgoing = 50
 # never past max_established_outgoing and never in an IPv4 /16 or IPv6 /32
 # where it already has an outgoing peer (dial_peers do not count). It only
 # dials public IP addresses, so list peers on a LAN or on this machine in
-# dial_peers. 0 turns it off.
+# dial_peers. Connections Kademlia opens for a lookup close once no lookup
+# needs them. 0 turns both off.
 # target_outgoing_peers = 16
 # Two, not one: room for an inbound and an outbound connection when two
 # nodes dial each other at once. More only duplicates traffic -- libp2p

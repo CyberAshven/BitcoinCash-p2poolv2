@@ -14,17 +14,13 @@ use serde::Serialize;
 use std::sync::Arc;
 
 /// The network badge as the dashboard names it: `auth` tells a frontend
-/// whether the node asks for a login at all, the two ports are what a
+/// whether the node asks for a login at all, and the two ports are what a
 /// frontend such as `p2poolv2_web` prints in the help page's miner
-/// connection details, and `cli_network` is the `--network` spelling the
-/// `bch-share-address` CLI accepts (absent on a Bitcoin node, which has
-/// no share address prefix and therefore no generator to show).
+/// connection details.
 #[derive(Serialize)]
 pub struct NetworkBadge {
     network: String,
     badge: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    cli_network: Option<&'static str>,
     auth: bool,
     stratum_port: u16,
     sv2_port: Option<u16>,
@@ -38,7 +34,6 @@ pub(crate) async fn network(State(state): State<Arc<AppState>>) -> Json<NetworkB
     Json(NetworkBadge {
         network: site.network,
         badge: site.badge,
-        cli_network: site.share_cli_network,
         auth: site.auth,
         stratum_port: site.stratum_port,
         sv2_port: site.sv2_port,

@@ -17,76 +17,54 @@ what Bitcoin Cash accepts as a block. The code is
 `p2poolv2_lib/src/shares/validation/mod.rs`; the order in which a node runs
 the checks is in
 [Share processing pipeline](../architecture/share-processing-pipeline.md).
+Each check below is stated briefly; the linked page holds the rule.
 
 ## The proof of work meets the share difficulty
 
 A share's declared target must equal the target ASERT computes from its
 ancestors, and its hash must meet it; on Bitcoin Cash that is its declared
 minimum, and its own target may be harder within the difficulty band below.
-On Bitcoin Cash the share chain's ASERT
-is BCH's own integer formula (aserti3-2d), anchored at each share's parent
-rather than at genesis (plan decision 12; see
-[Share difficulty: ASERT](../difficulty_adjustment/asert.md)). A target may
-never be easier than the chain's ceiling: `MAX_POOL_TARGET` on Bitcoin, and
-on Bitcoin Cash a ceiling 256 times easier, the former mini chain's
-([Small miners](../small-miners.md)). The Bitcoin Cash main and mini chains
-merged into this one chain on 2026-11-09.
+On Bitcoin Cash the share chain's ASERT is BCH's own integer formula
+(aserti3-2d), anchored at each share's parent rather than at genesis (plan
+decision 12; see [Share difficulty: ASERT](../difficulty_adjustment/asert.md)).
+A target may never be easier than the chain's ceiling: `MAX_POOL_TARGET` on
+Bitcoin, and on Bitcoin Cash the former mini chain's ceiling, 256 times
+easier.
 
 ### The difficulty band (Bitcoin Cash)
 
-Since 2026-11-09 a Bitcoin Cash share may be harder than the target ASERT
-computes, up to its band cap `C`, never easier
-([Share chain redesign](small-miners-design.md#2-difficulty-band);
-`shares/band.rs`). Each share header carries three fields, all committed:
+A Bitcoin Cash share may be harder than its minimum, up to its band cap `C`,
+never easier ([Share chain redesign](small-miners-design.md#2-difficulty-band);
+`shares/band.rs`). Its header carries, committed:
 
-- `asert_bits`, the share's minimum `T_asert`: it must equal the target ASERT
-  computes from the parent, and the next share's ASERT is anchored at it
-  rather than at the parent's own bits, so a heavier share does not make
-  the next minimum heavier;
-- `band_cap`, `C` in units of 1/1024: it must equal one step from the
-  parent's (`next_band_cap`: up by `C * u / 512` when the parent's node wanted
-  a harder target than its band allowed, `u` being the work it wanted in
-  units of the minimum's, at least 1 and at most 64; down by `C / 512`
-  otherwise; between 1 and 64);
-- `wanted_bits`, the target the share's node wanted for its miner before the
-  cap. It is a signal: a share is never refused for it. When it is easier
-  than the weak target a weak share met, that weak share asks (below).
+- `asert_bits`, the share's minimum `T_asert`, which must equal the target
+  ASERT computes from the parent; the next share's ASERT is anchored at it;
+- `band_cap`, `C` in units of 1/1024, which must equal one step from the
+  parent's (`next_band_cap`), between 1 and 64;
+- `wanted_bits`, a signal only: a share is never refused for it.
 
-The share's own target `T`, its `bits`, must then satisfy
-`T_asert / C <= T <= T_asert`, compared exactly on the 256-bit targets the
-compact forms decode to (the lower bound as `T * band_cap >= T_asert *
-1024`), and its hash must meet `T`. Full validation, header sync and block
-receipt all run these checks, from the parent's header alone. A share's
-weight in the PPLNS window and its work in fork choice are its own exact
-work, `2^256 / (T + 1)`, so a heavier share counts for more. Bitcoin shares
-carry no band, and their target must equal the computed one.
+The share's own target `T` must satisfy `T_asert / C <= T <= T_asert`,
+compared exactly on the 256-bit targets (the lower bound as
+`T * band_cap >= T_asert * 1024`), and its hash must meet `T`. Its weight in
+the window and its work in fork choice are its exact work,
+`2^256 / (T + 1)`.
 
-Since 2026-11-09 each Bitcoin Cash share header also carries its weak ratio
-`weak_ratio`, `R` in units of 1/1024, which must equal one step from the
-parent's (`next_weak_ratio` in `shares/weak.rs`; 256 at genesis). Since
-2026-11-15 the step follows the parent's asking weak shares:
+The header also carries the weak ratio `weak_ratio`, which must equal one
+step from the parent's (`next_weak_ratio` in `shares/weak.rs`; 32 at
+genesis; [the step](small-miners-design.md#6-weak-shares-that-follow-the-asks)).
+Full validation, header sync and block receipt check the band and the weak
+ratio from the parent's header alone. Bitcoin shares carry neither, and
+their target must equal the computed one.
 
-- when the parent carried at most 320 weak shares (`WEAK_FILL_MAX`) and more
-  than one in 64 of them ask (`weak_asking` × `WEAK_ASK_DIVISOR` > count), up
-  by `R / 256`, to at most 4096 (`R_ASK_MAX`);
-- otherwise as before: down by `R / 256` when the parent carried more than
-  32 weak shares (`WEAK_FILL`) or `R` is above 256 (`R_MAX`), up by `R / 256`
-  to at most 256 when it carried fewer, the same at exactly 32;
-- never below 1.
-
-Full validation, header sync and block receipt check it with the band.
 ### The payout level (Bitcoin Cash)
 
-Since 2026-11-09 a Bitcoin Cash share header also carries `payout_level`,
-the payout level `k` of its miner, one byte after the band and committed
-after it under tag `0x25`
-([Coinbase payouts](../payouts/coinbase.md#payout-levels)). It must be at
-most 7. A header with a higher level does not decode, so header sync, block
-receipt and the store all refuse it the same way, before any other check.
-Any level from 1 to 7 is valid: which level a miner mines at is its own and
-its node's choice. The level matters only when a coinbase pays the share's
-payee: a payee below its level is paid by the draw, which the coinbase
-rebuild below checks. Bitcoin shares carry no level.
+A Bitcoin Cash share header carries `payout_level`, its miner's level `k`,
+one byte committed under tag `0x25`. A header outside 1 to 7 does not
+decode, so header sync, block receipt and the store all refuse it before any
+other check. Which level a miner uses is its own and its node's choice; the
+coinbase rebuild below checks the draw it leads to
+([Share chain redesign](small-miners-design.md#4-payout-levels)). Bitcoin
+shares carry no level.
 
 Share headers carry everything needed to check the target, but only once all
 of a header's ancestors are known. During the first sync a node therefore
@@ -112,15 +90,15 @@ commits to. See [Share commitments](share-commitments.md).
 ## Token shares pass the ASERT header check
 
 A Bitcoin Cash share whose merge-mining commitment is not the exact empty
-one is a token share. Its Bitcoin Cash header's nBits must be what BCH's
-aserti3-2d gives at the coinbase's height, within the band agreed with
-Pickaxe: from half to 1.05 times the computed target on mainnet, from an
-eighth to 8 times, or the proof-of-work limit, on chipnet. A token claim
-checks the same band, so a share outside it could not claim a token. Header
+one is a token share. Its Bitcoin Cash header's nBits must be within the
+band agreed with Pickaxe around what BCH's aserti3-2d gives at the
+coinbase's height: from half to 1.05 times the computed target on mainnet,
+from an eighth to 8 times, or the proof-of-work limit, on chipnet. Header
 sync, block receipt and the validation of a node's own shares run this
-check, and a node builds no token job on a template outside the band. Regtest has no ASERT anchor and skips
-it, and no-token shares are never checked: BCHN alone judges their blocks.
-See [Auxiliary work proofs](../bch-auxpow.md#the-asert-header-check).
+check, and a node builds no token job on a template outside the band.
+Regtest skips it, and no-token shares are never checked: BCHN alone judges
+their blocks. See
+[Auxiliary work proofs](../bch-auxpow.md#the-asert-header-check).
 
 ## The body matches the header
 
@@ -139,25 +117,16 @@ the body against the header using the share alone:
 4. On Bitcoin Cash, the carried weak shares are the ones the header commits:
    as many as its weak count, no proof-of-work hash twice, and the merkle
    root of their whole encodings, hashed with their summary, equal to its
-   weak root (below). A body served after the weak shares were pruned, one
-   payout depth below the serving node's tip, carries that merkle root and
-   the summary instead, and passes when the two hash to the weak root
-   (`docs/architecture/pruning.md`, "Weak Shares").
+   weak root. A body served after the weak shares were pruned carries that
+   merkle root and the summary instead, and passes when the two hash to the
+   weak root ([Pruning](../architecture/pruning.md), "Weak Shares").
 
 A body that fails is a bad copy, not a bad share: the node discards it and can
 fetch the share again from another peer. Once a body passes, the proof of
-work fixes it, and any later failure rejects the share.
-
-That last rule holds only if the header fixes every part of the body a later
-check reads. Before 2026-11-12 it did not for weak shares: the weak root
-covered their proof-of-work hashes alone, so a peer could alter a carried
-weak share's coinbase value, branch, scriptSig or coinbase proof, the body
-still passed, and the weak share's later coinbase or header check marked an
-honest share invalid. The weak root now covers each weak share's whole
-encoding, so every such change fails item 4 as a bad copy. Since 2026-11-16 it
-also covers their summary, the proof-of-work hashes and credit groups the
-payouts read: `SHA-256d(merkle root || SHA-256d(summary))`, so a summary
-changed by the serving peer fails item 4 too.
+work fixes it, and any later failure rejects the share. That holds only
+because the header fixes every part of the body a later check reads, each
+carried weak share's every byte and their summary included
+([Share commitments](share-commitments.md)).
 
 ## Uncles follow the rules
 
@@ -173,74 +142,43 @@ Uncles are paid, so they pass the same checks as every share, plus:
 
 How uncles are paid is on [PPLNS accounting](pplns-accounting.md#uncles).
 
-Uncles also count when a node picks the best chain. Since 2026-10-30 a
-chain's work is the work of its shares plus the work of every uncle they
-name, each uncle counted once. A branch whose shares name uncles is
-heavier than its own shares alone, so nodes can pick a different best
-branch than they did before. This is a share-chain rule change, taken
-from upstream P2Poolv2 (commit 604fe3ce); it is not a Bitcoin Cash
-consensus rule, and it makes no share valid or invalid.
-
-Because a header adds its uncles' work as soon as it is organised, a node
-checks a share's uncles against the rules above before it organises the
-header: during header sync, and when a block arrives, not only when the
-body is validated. During header sync an uncle must arrive before the
-share that names it. Nodes send headers height by height, and an uncle is
-always lower than its nephew, so it does.
+Uncles also count when a node picks the best chain: a chain's work is the
+work of its shares plus the work of every uncle they name, each uncle
+counted once (from upstream P2Poolv2, commit 604fe3ce). It makes no share
+valid or invalid. Because a header adds its uncles' work as soon as it is
+organised, a node checks a share's uncles against the rules above before it
+organises the header, in header sync and block receipt too. During header
+sync an uncle arrives before the share that names it, since nodes send
+headers height by height and an uncle is lower than its nephew.
 
 ## Weak shares follow the rules (Bitcoin Cash)
 
-Since 2026-11-09 a Bitcoin Cash share may carry weak shares: easier proofs
-of work on jobs at the minimum
+A Bitcoin Cash share may carry weak shares: easier proofs of work on jobs at
+the minimum, each known by its proof-of-work hash
 ([Share chain redesign](small-miners-design.md#3-weak-shares);
-`shares/weak.rs`, `shares/validation/weak_shares.rs`). A weak share is the
-share header as mined, its Bitcoin Cash coinbase scriptSig (at most 100
-bytes), the coinbase's total value and its merkle branch, and is known by
-its proof-of-work hash. It is valid when:
+`shares/weak.rs`, `shares/validation/weak_shares.rs`). A carried weak share
+must:
 
-1. its `bits` is its minimum, the target ASERT gives from its parent: a job
-   at the minimum;
-2. its hash meets its parent's weak target, `min(T_asert(parent) *
-   R(parent), ceiling)` with `T_asert(parent)` the parent's minimum and
-   `R(parent)` its weak ratio, never harder than that minimum, and misses
-   its own `bits`;
-3. its coinbase, rebuilt as the node would build a share's on that parent
-   (the scriptSig it carries, output 0 from its merge-mining fields, the
-   PPLNS window's payouts for its total value, the payout tree, padding, the
-   commitment from its header and the locktime from its height), hashes and
-   folds up its branch to its header's merkle root;
-4. it passes every header rule a full share passes but the share target:
-   owner and payout scripts, donation and fee caps, uncle count, a target no
-   easier than the ceiling, the share version, the token share ASERT check,
-   its coinbase proof, the band and weak ratio, its Bitcoin Cash prev and its
-   timestamp;
-5. no share, uncle or weak share credited on the carrying chain has its hash.
-   A full share with that hash would have the same header, whose bits the
-   hash misses, so the carried-once rule below covers it.
+1. be on a job at the minimum: its `bits` is its parent's `T_asert`;
+2. meet its parent's weak target, `min(T_asert(parent) * R(parent),
+   ceiling)`, and miss its own `bits`;
+3. have a coinbase that, rebuilt as the node would build a share's on that
+   parent, folds up its branch to its header's merkle root;
+4. pass every header rule a full share passes but the share target, its
+   time at most 120 seconds after its carrier's;
+5. have a parent 1 to 48 shares below the carrier (`WEAK_DEPTH`), and a
+   proof-of-work hash that no share, uncle or weak share credited on the
+   carrier's chain has.
 
-A share carries at most 640 weak shares (`WEAK_CAP`) in 960 KiB (`WEAK_BYTES`),
-and more than 64 (`WEAK_IDLE_CAP`) only while more than one in 64 of them ask:
-`weak_count <= 64` or `weak_asking * 64 > weak_count`, so 640 needs 11 asking.
-A header breaking either does not decode, wherever a header is read.
-Its header commits to them under tag `0x26`: its weak ratio, their count, how
-many of them ask (`weak_asking`, never more than the count) and
-the merkle root of their whole encodings, each leaf the SHA-256d of one weak
-share as sent (share header with its coinbase proof, scriptSig, total value,
-branch), so the proof of work fixes every byte of them. The body check
-refuses a list that does not match, or that repeats a proof-of-work hash, as
-a bad copy ([The body matches the header](#the-body-matches-the-header)).
-Since every field a weak share check reads is then fixed by the carrier's
-proof of work, a check that fails after the body is stored is a verdict on
-the share. The repeat and carried-once checks compare the weak shares'
-proof-of-work hashes, read from the carried weak shares. Each carried weak
-share's parent must be 1 to 48 shares below the carrier (`WEAK_DEPTH`), and no
-ancestor of the carrier may carry it already, as an uncle has one nephew.
-Full validation checks rules 1, 2 and 4 and the depth and carried-once rules
-with the share's other parallel checks, and rule 3 with its own coinbase
-check. Weak work does not count in fork choice, so header sync does not read
-weak shares. A node checks a weak share a peer relays against rules 1 to 4
-before it keeps or relays it. These are share-chain rules; BCHN never sees
-weak shares.
+A share carries at most 640 weak shares (`WEAK_CAP`) in 960 KiB
+(`WEAK_BYTES`), and more than 64 (`WEAK_IDLE_CAP`) only while more than one
+in 64 of them ask; its header commits their ratio, count, asking count and
+root under tag `0x26`. A header breaking the cap does not decode, wherever a
+header is read. Full validation checks rules 1, 2, 4 and 5 with the share's
+other parallel checks, and rule 3 with its own coinbase check. Weak work
+does not count in fork choice, so header sync does not read weak shares. A
+node checks a weak share a peer relays against rules 1 to 4 before it keeps
+or relays it. BCHN never sees weak shares.
 
 ## Bitcoin Cash payouts follow the PPLNS window
 
@@ -252,31 +190,26 @@ carries. The rebuild covers:
 - the donation and the operator fee, each at most 10,000 basis points, and
   on Bitcoin Cash each at most 10% (1,000 basis points) with no combined
   cap;
-- the window itself: on Bitcoin Cash the shares holding three Bitcoin Cash
-  blocks' worth of work, sized by the difficulty in the share's own header,
-  behind a 100-share maturity skip and at most 120,960 shares;
+- the window itself ([PPLNS accounting](pplns-accounting.md));
 - who is paid: on Bitcoin Cash the holder of each share's payout right
   ([Trading shares for BCH](../atomic-swap/bch-share-trading.md#payout-rights));
-- the payout level draw: on Bitcoin Cash each payee below the level of its
-  newest credited entry is pooled with the others at that level, and the
-  pot is drawn with the seed of the share's parent and the level
+- the payout level draw
   ([Coinbase payouts](../payouts/coinbase.md#payout-levels));
-- output 0, the merge-mining v2 commitment: the root, `h` and salt from
-  `pool_merge_mining` on a pool-built token share or `bch_coinbase` on a
-  Job Declaration share, and the exact empty commitment otherwise,
-  rebuilt byte for byte; only its format is checked, never the tokens
-  behind it ([Auxiliary work proofs](../bch-auxpow.md));
+- output 0, the merge-mining v2 commitment, rebuilt byte for byte from
+  `pool_merge_mining` on a pool-built token share, `bch_coinbase` on a Job
+  Declaration share, or the exact empty commitment; only its format is
+  checked, never the tokens behind it
+  ([Auxiliary work proofs](../bch-auxpow.md));
 - no SegWit: a Bitcoin Cash coinbase that carries a BIP141 witness
-  commitment output is invalid. BCHN's templates never have one;
+  commitment output is invalid;
 - how the payouts become outputs: the hybrid payout of plan decision 14,
   every payee paid directly within the share's coinbase limit (1,000,000
-  bytes, or 3,072 for a share that merge-mines tokens) and the rest through
-  one payout tree output, whose tree the node rebuilds too; payee, donation
-  and fee scripts must be P2PKH, P2SH20 or P2SH32; see
-  [Coinbase payouts](../payouts/coinbase.md).
+  bytes, or 3,072 for a token share) and the rest through one payout tree
+  output, whose tree the node rebuilds too; payee, donation and fee scripts
+  must be P2PKH, P2SH20 or P2SH32
+  ([Hybrid payouts](../architecture/bch-hybrid-payouts.md)).
 
-A share whose coinbase pays anyone a different amount is invalid. The window
-rules are on [PPLNS accounting](pplns-accounting.md).
+A share whose coinbase pays anyone a different amount is invalid.
 
 Payouts from the share chain are Bitcoin Cash coinbase outputs. Bitcoin Cash
 itself makes them spendable after 100 blocks (`COINBASE_MATURITY` in BCHN's
@@ -287,16 +220,12 @@ itself makes them spendable after 100 blocks (`COINBASE_MATURITY` in BCHN's
 Every share transaction, the share coinbase included, must be valid in the
 value it spends, its scripts and the outputs it spends. As on Bitcoin Cash,
 nodes check for double spends and for inputs worth at least the outputs, so
-no one creates share units from nothing. On Bitcoin Cash:
+no one creates share units from nothing. On Bitcoin Cash, scripts, outputs
+and finality follow [Share transactions](transactions.md#rules), and:
 
-- scripts run in this fork's Bitcoin Cash interpreter
-  (`shares/bch_script.rs`), which accepts P2PKH spends and the share-trading
-  contract behind P2SH32, and nothing else;
-- new outputs must be P2PKH or P2SH32 and at or above BCHN's dust threshold;
-- a transaction must be final at its share's height;
 - a share coinbase output can be spent once it is 100 shares deep, and no
-  output can be spent once the coinbase it descends from is more than
-  121,063 shares deep (`BCH_PAYOUT_DEPTH`);
+  output once the coinbase it descends from is more than 121,063 shares
+  deep (`BCH_PAYOUT_DEPTH`; [Spending share outputs](spending-outputs.md));
 - a share holds at most 100 transactions (`TXS_COUNT_LIMIT`) and 200 KiB of
   share transactions (`BLOCK_TXS_SIZE_LIMIT`), and the Bitcoin Cash coinbase
   it carries is at most 1,000,000 bytes, BCH's `MAX_TX_SIZE`
@@ -306,9 +235,6 @@ no one creates share units from nothing. On Bitcoin Cash:
   (`BCH_MAX_SHARE_SIGCHECKS`: 200 KiB at BCH's one SigCheck per 141 bytes).
   Each accepted input runs exactly one signature check; outputs and the
   coinbase count none. This replaced Bitcoin's BIP141 sigop cost.
-
-See [Share transactions](transactions.md) and
-[Spending share outputs](spending-outputs.md).
 
 ## Share versions follow a vote
 
@@ -333,9 +259,8 @@ v1 did, instead of a flag day on a fresh chain (lessons V17;
 
 The version is part of the share header and of the share commitment, so the
 proof of work binds it, and of the Job Declaration token. Version 1 is the
-rule set of the 2026-10-24 batch, and no node implements another yet, so no
-switch can happen until a later rule change ships one. Bitcoin shares carry no
-version.
+rule set in force, and no node implements another yet. Bitcoin shares carry
+no version.
 
 ## Mining on the current chain
 
@@ -344,8 +269,7 @@ sits on the paying share's chain, or one block off it, and the paying share's
 BCH prev sizes the window. A share whose window pays no one, or that builds on
 the all-zero hash without being the chain's first share, is invalid; a share
 whose window places work on a BCH block the node does not know yet waits,
-`Recoverable`. Built on 2026-10-30 from upstream's design. See
-[Mining on the current chain](current-chain.md).
+`Recoverable`. See [Mining on the current chain](current-chain.md).
 
 ## Bitcoin Cash blocks are not validated
 

@@ -320,11 +320,6 @@ pub enum MetricsMessage {
         workername: String,
         response: oneshot::Sender<()>,
     },
-    ReserveWorkerName {
-        btcaddress: String,
-        workername: String,
-        response: oneshot::Sender<bool>,
-    },
     Commit {
         response: oneshot::Sender<String>,
     },
@@ -533,14 +528,6 @@ impl MetricsActor {
                 self.mark_worker_inactive(btcaddress, workername);
                 let _ = response.send(());
             }
-            MetricsMessage::ReserveWorkerName {
-                btcaddress,
-                workername,
-                response,
-            } => {
-                let reserved = self.reserve_worker_name(btcaddress, workername);
-                let _ = response.send(reserved);
-            }
             MetricsMessage::Commit { response } => {
                 let result = self.commit();
                 let _ = response.send(result);
@@ -713,25 +700,6 @@ impl MetricsActor {
         }
     }
 
-    /// Take `workername` under `btcaddress` when no live connection holds
-    /// it, counting this claim as a connection exactly as an authorization
-    /// does, and report whether it was taken. The auto-namer in
-    /// `stratum::message_handlers::authorize_response` probes its
-    /// candidates through this: check and claim in one actor step, so two
-    /// logins racing on a reconnect cannot both be handed one name. Only
-    /// live connections hold names: a closed connection's claim goes with
-    /// its decrement, so a rebooted miner gets its name back.
-    fn reserve_worker_name(&mut self, btcaddress: String, workername: String) -> bool {
-        if self
-            .worker_connections
-            .contains_key(&(btcaddress.clone(), workername.clone()))
-        {
-            return false;
-        }
-        self.worker_authorized(btcaddress, workername);
-        true
-    }
-
     /// Commit metrics
     /// Export current metrics as json, returning the serialized json
     /// Reset the metrics to start again
@@ -895,28 +863,6 @@ impl MetricsHandle {
             })
             .await
             .expect("Error decrementing worker count");
-        response_rx.await
-    }
-
-    /// Take `workername` for `btcaddress` if no live connection holds it,
-    /// counting this session's connection under it in the same step, and
-    /// report whether it was taken. The stratum auto-namer probes its
-    /// candidates through this, so check-and-claim is one actor step and
-    /// two logins racing on one name cannot both win it.
-    pub async fn reserve_worker_name(
-        &self,
-        btcaddress: String,
-        workername: String,
-    ) -> Result<bool, tokio::sync::oneshot::error::RecvError> {
-        let (response_tx, response_rx) = oneshot::channel();
-        self.sender
-            .send(MetricsMessage::ReserveWorkerName {
-                btcaddress,
-                workername,
-                response: response_tx,
-            })
-            .await
-            .expect("Error reserving worker name");
         response_rx.await
     }
 
@@ -2058,131 +2004,5 @@ mod tests {
         assert_eq!(user.shares_valid_total, 3000);
         assert_eq!(worker.best_share, 4100);
         assert_eq!(worker.best_share_ever, 5500);
-    }
-
-    /// A reserve takes a free name and counts the claim as its connection; a
-    /// second reserve of the same name is refused, so the auto-namer can
-    /// never hand one name out twice while its holder is online.
-    #[tokio::test]
-    async fn a_reserve_takes_a_free_name_and_a_second_reserve_is_refused() {
-        let handle = spawn_test_metrics_handle();
-        assert!(
-            handle
-                .reserve_worker_name("miner1".to_string(), "worker1".to_string())
-                .await
-                .unwrap(),
-            "a name no one holds is free"
-        );
-        assert!(
-            !handle
-                .reserve_worker_name("miner1".to_string(), "worker1".to_string())
-                .await
-                .unwrap(),
-            "the first claim holds it"
-        );
-
-        // The claim counts as this session's connection: the same roster an
-        // authorization would have written.
-        let worker = handle
-            .get_metrics()
-            .await
-            .users
-            .get("miner1")
-            .cloned()
-            .expect("the reservation must register the miner")
-            .workers
-            .get("worker1")
-            .cloned()
-            .expect("the reservation must register the worker");
-        assert!(worker.active);
-    }
-
-    /// A name under one address stays free under another: each address
-    /// numbers its own workers.
-    #[tokio::test]
-    async fn a_name_taken_under_one_address_is_free_under_another() {
-        let handle = spawn_test_metrics_handle();
-        handle
-            .reserve_worker_name("miner1".to_string(), "worker1".to_string())
-            .await
-            .unwrap();
-
-        assert!(
-            handle
-                .reserve_worker_name("miner2".to_string(), "worker1".to_string())
-                .await
-                .unwrap(),
-            "another address's worker1 stays free"
-        );
-        assert!(
-            handle
-                .reserve_worker_name("miner1".to_string(), "worker2".to_string())
-                .await
-                .unwrap(),
-            "another name under the same address stays free"
-        );
-    }
-
-    /// A disconnect frees the name: the roster holds only live connections,
-    /// so a rebooted miner gets the same name back.
-    #[tokio::test]
-    async fn a_disconnect_releases_a_reserved_name() {
-        let handle = spawn_test_metrics_handle();
-        handle
-            .reserve_worker_name("miner1".to_string(), "worker1".to_string())
-            .await
-            .unwrap();
-
-        handle
-            .decrement_worker_count(Some("miner1".to_string()), "worker1".to_string())
-            .await
-            .unwrap();
-
-        assert!(
-            handle
-                .reserve_worker_name("miner1".to_string(), "worker1".to_string())
-                .await
-                .unwrap(),
-            "a closed connection must not hold the name"
-        );
-    }
-
-    /// Two connections under one name keep it: the roster counts them, so
-    /// the name is released only when the last one closes.
-    #[tokio::test]
-    async fn a_name_held_by_two_connections_frees_only_after_both_close() {
-        let handle = spawn_test_metrics_handle();
-        handle
-            .reserve_worker_name("miner1".to_string(), "worker1".to_string())
-            .await
-            .unwrap();
-        handle
-            .increment_worker_count("miner1".to_string(), "worker1".to_string())
-            .await
-            .unwrap();
-
-        handle
-            .decrement_worker_count(Some("miner1".to_string()), "worker1".to_string())
-            .await
-            .unwrap();
-        assert!(
-            !handle
-                .reserve_worker_name("miner1".to_string(), "worker1".to_string())
-                .await
-                .unwrap(),
-            "one connection still holds the name"
-        );
-
-        handle
-            .decrement_worker_count(Some("miner1".to_string()), "worker1".to_string())
-            .await
-            .unwrap();
-        assert!(
-            handle
-                .reserve_worker_name("miner1".to_string(), "worker1".to_string())
-                .await
-                .unwrap(),
-            "the last connection releasing it frees the name"
-        );
     }
 }

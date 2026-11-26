@@ -2,31 +2,28 @@
 
 Every Bitcoin Cash coinbase P2Pool builds carries a merge-mining commitment
 as output 0, in the **merge-mining common format v2** agreed with Pickaxe,
-so both build and check the same bytes. `shares::merge_mining` holds the
-commitment, `shares::auxpow` the token leaves, the tree and `AuxProof` v2,
-and `shares::bch_asert` the ASERT header check. Pickaxe's specification is
+so both build and check the same bytes. It is a share-chain rule: it
+changes the coinbase every BCH share carries, not Bitcoin Cash consensus.
+`shares::merge_mining` holds the commitment, `shares::auxpow` the token
+leaves, the tree and `AuxProof` v2, and `shares::bch_asert` the ASERT
+header check. Earlier formats: [Rule history](sharechain/rule-history.md).
+
+Pickaxe's specification is
 [`docs/merge-mining.md`](https://github.com/CyberAshven/pickaxe-miner/blob/feat/merge-mining-v2/docs/merge-mining.md)
-in pickaxe-miner (PR #70). P2Pool's unit tests pin those vectors to commit
+in pickaxe-miner (PR #70). P2Pool's unit tests pin its vectors at commit
 [`a1c80a1ba6ad6b1542af54f4af28058d3241c3df`](https://github.com/CyberAshven/pickaxe-miner/commit/a1c80a1ba6ad6b1542af54f4af28058d3241c3df):
 the leaf, the two-token root
-`5b61ecfe96c714397bc35ed813890f49f2b0287a78111e19d156f4eecd1c38d0`,
-the 53-byte output 0, the exact empty commitment, the 224-byte proof and
-the split leaf
-all match byte for byte. `shares::auxpow::tests` checks proof encoding and
-verification, including rejection when the expected state hash changes;
-`shares::merge_mining::tests` checks both commitment outputs. The leaf
-disclosure, its Stratum V1 and V2 transports and the Job Declaration leaf
-rules follow PR #70 at
-[`a92fef7`](https://github.com/CyberAshven/pickaxe-miner/commit/a92fef7),
-"Disclosure" and "Job Declaration leaves", whose formats are unchanged from
-`a1c80a1`'s vectors.
+`5b61ecfe96c714397bc35ed813890f49f2b0287a78111e19d156f4eecd1c38d0`, the
+53-byte output 0, the exact empty commitment, the 224-byte proof and the
+split leaf all match byte for byte. The leaf disclosure, its Stratum V1 and
+V2 transports and the Job Declaration leaf rules follow PR #70 at
+[`a92fef7`](https://github.com/CyberAshven/pickaxe-miner/commit/a92fef7)
+("Disclosure" and "Job Declaration leaves"), with the same vectors.
+`shares::auxpow::tests` checks proof encoding and verification, including
+refusal when the expected state hash changes, and
+`shares::merge_mining::tests` both commitment outputs.
 
-This replaces the earlier format, a `fabe6d6d` output after the payouts with
-Namecoin's slot scheme and the whole coinbase in each proof (audit items
-A16 and A15). It is a share-chain rule: it changes the coinbase every BCH
-share carries, not BCH consensus.
-
-All integers are little-endian. `SHA256` is single SHA-256 and `HASH256`
+All integers are little endian. `SHA256` is single SHA-256 and `HASH256`
 double SHA-256. Hashes are written as hashed, never byte-reversed.
 
 ## Output 0
@@ -44,33 +41,31 @@ off len value
 49  4   salt                      u32 LE
 ```
 
-**The exact empty commitment** is the zero root with `h = 0` and salt 0. It
-says the coinbase merge-mines no token. A zero root with any other `h` or
-salt is not a commitment, and `h` above 16 is not either; P2Pool refuses
-both (`MergeMiningCommitment::validate`).
+**The exact empty commitment** is the zero root with `h = 0` and salt 0: the
+coinbase merge-mines no token. A zero root with any other `h` or salt, or
+`h` above 16, is not a commitment; P2Pool refuses both
+(`MergeMiningCommitment::validate`).
 
 Pool-built jobs carry the empty commitment when the node has no tokens to
-merge-mine. When tokens are configured, the node builds a root from each
-miner's own token leaves ([Merge-mining tokens on a public
-node](#merge-mining-tokens-on-a-public-node)). A miner can also declare a
-token commitment in its own coinbase through [Job
-Declaration](bch-job-declaration.md). The share header carries the root,
-`h` and salt in `pool_merge_mining` for a pool-built share (under its own
-header tag, `0x23`, and only when the root is not the empty one) or in
+merge-mine, and otherwise a root of each miner's own token leaves
+([below](#merge-mining-tokens-on-a-public-node)); a miner can also declare
+one through [Job Declaration](bch-job-declaration.md). The share header
+carries the root, `h` and salt in `pool_merge_mining` for a pool-built
+share (tag `0x23`, only when the root is not the empty one) or in
 `bch_coinbase` for a declared share, and the share commitment digests it,
 so one proof of work stands behind one root. Every peer rebuilds output 0
-from that commitment byte for byte when it rebuilds the coinbase, and checks
-only its format: no peer knows the tokens behind a root, and share validity
-never depends on them. The rule tag `mm2-roots-asert8-ticks` names this header
-format with the ASERT band below (`8`: the test networks' eighth to eight
-times; `-ticks`: the band follows the CHIP-2025-03 ticks and next block
-interval of the block the share builds on, see
+byte for byte and checks only its format: no peer knows the tokens behind a
+root, and share validity never depends on them. The rule tag
+`mm2-roots-asert8-ticks` names this header format with the ASERT band
+below (`8`: the test networks' eighth to
+eight times; `-ticks`: the band follows the CHIP-2025-03 ticks and next
+block interval of the block the share builds on, see
 [Mining on the current chain](sharechain/current-chain.md#one-minute-blocks)).
 
 A share is a **token share** when its commitment is anything but the exact
 empty one (`share_has_token_commitment`), and a **no-token share**
-otherwise. The [hybrid payout](architecture/bch-hybrid-payouts.md) treats
-the two differently.
+otherwise. Their coinbase limits and payout rules are in
+[Hybrid payouts](architecture/bch-hybrid-payouts.md#31-token-shares-and-no-token-shares).
 
 A coinbase's head is fixed-shape, so a covenant finds output 0 without a
 search:
@@ -122,9 +117,9 @@ The 69-byte preimage is canonical: each rate is 0 to 10,000 hundredths of a
 percent, a rate of 0 has a zero hash and a rate above 0 a non-zero one, and
 two empty slots are the zero `ext`, never a preimage. A hash is `HASH256` of
 the recipient's locking bytecode, as `payout_hash` is. The claim reveals the
-preimage and the token's covenant pays the shares; how the shares are
-computed is a token rule, not P2Pool's. Pickaxe's split leaf (token A with a
-1% donation to P2PKH(`d0` x 20) and a 1% fee to P2PKH(`fe` x 20): `ext`
+preimage and the token's covenant pays the shares; how they are computed is
+a token rule, not P2Pool's. Pickaxe's split leaf (token A with a 1% donation
+to P2PKH(`d0` x 20) and a 1% fee to P2PKH(`fe` x 20): `ext`
 `79f31f39…8faa85`, leaf hash `c4027136…033e41`) matches byte for byte.
 
 ## `AuxProof` v2
@@ -145,12 +140,10 @@ off  len    field
 
 Output 0 and the leaf are never carried: the verifier rebuilds the leaf from
 the token's own state and output 0 from the root it folds. The encoding is
-canonical: exact lengths, nothing trailing.
-
-The `d ≤ 25` limit (2^25 transactions) belongs to the proof format, as
-agreed with Pickaxe. P2Pool's own coinbase proofs between share-chain nodes
-are not limited by it: a BCH block deeper than 25 levels is still a valid
-share, it just cannot be token-claimed.
+canonical: exact lengths, nothing trailing. The `d ≤ 25` limit (2^25
+transactions) belongs to the proof format. P2Pool's own coinbase proofs
+between share-chain nodes are not limited by it: a BCH block deeper than 25
+levels is still a valid share, it just cannot be token-claimed.
 
 `AuxProof::verify` checks, for a leaf the token's rules supply:
 
@@ -175,7 +168,7 @@ the parent is a complete valid BCH block; BCHN is the authority on that.
 A token would otherwise accept any SHA-256 work whose header passes these
 checks. To tie the header's difficulty to Bitcoin Cash's, the header's
 nBits must be what BCH's aserti3-2d gives at the coinbase's BIP34 height,
-within the agreed network band:
+within the network's band:
 
 - mainnet: `computed / 2 ≤ header_target ≤ computed × 1.05`;
 - test networks: `computed / 8 ≤ header_target ≤ computed × 8`, or nBits
@@ -185,34 +178,24 @@ within the agreed network band:
 `computed` is ASERT's target for a parent at `height - 1` dated with the
 header's own time, which stands in for the parent's (a proof has no parent
 header). A header minted hours after its parent is harder than `computed`,
-hence the wide hard side. A test-network header can also predate its
-parent by hours ([BCHN timestamp checks](https://gitlab.com/bitcoin-cash-node/bitcoin-cash-node/-/blob/master/src/validation.cpp)).
-Chipnet's one-hour half-life makes a 5% easy side too
-narrow, so its band permits up to x8 on both sides. Mainnet retains the
-original asymmetric band. These are proof-format checks agreed with
-Pickaxe, not BCH block validation.
-
-Local share-block validation runs the same token-header gate as peer header
-validation. The notifier drops tokens from a template outside the band.
-Stratum V2 also checks a declared token job's nBits and requested minimum
-time before proposal validation or job installation, returning
-`invalid-token-asert` on failure. An exactly empty commitment does not need
-this token-format check.
+hence the wide hard side. A test-network header can also predate its parent
+by hours ([BCHN timestamp checks](https://gitlab.com/bitcoin-cash-node/bitcoin-cash-node/-/blob/master/src/validation.cpp)),
+and chipnet's one-hour half-life makes a 5% easy side too narrow, so the
+test networks allow x8 on both sides. These are proof-format checks agreed
+with Pickaxe, not BCH block validation.
 
 P2Pool's `BchAsert::check_header_bits` and the SAFA covenant use the same
 bands, number for number: mainnet `target × 100 ≤ computed × 105`, test
 networks `target ≤ computed × 8`, and `computed / d` floored on the hard
-side. With a header dated two hours before its parent, which BCHN accepts
-when the parent is dated ahead, the computed target is 2^(7200 / 172800),
-about 1.029, times too hard on mainnet and 4 times on the test networks;
-both fit their bands. A test runs real chipnet block 329,001 dated 200 s,
-260 s, 10 minutes, one hour and two hours before its parent.
+side. A header dated two hours before its parent (BCHN accepts it when the
+parent is dated ahead) makes the computed target 2^(7200 / 172800), about
+1.029, times too hard on mainnet and 4 times on the test networks; both fit
+their bands. A test runs real chipnet block 329,001 dated 200 s, 260 s,
+10 minutes, one hour and two hours before its parent.
 
 The arithmetic follows `CalculateASERT` and `GetNextASERTWorkRequired` in
-BCHN's `src/pow.cpp` integer for integer: a truncating 64-bit division for
-the exponent, an arithmetic (flooring) shift for its integer part, BCHN's
-cubic for the fraction, then the clamps. The anchors and half-lives are
-BCHN's chain parameters (`src/chainparams.cpp`):
+BCHN's `src/pow.cpp` integer for integer, with the anchors and half-lives
+of BCHN's chain parameters (`src/chainparams.cpp`):
 
 | Network | Anchor height | Anchor nBits | Anchor parent time | Half-life |
 |---|---|---|---|---|
@@ -220,17 +203,12 @@ BCHN's chain parameters (`src/chainparams.cpp`):
 | Chipnet and testnet4 | 16,844 | `0x1d00ffff` | 1,605,451,779 | 3,600 s |
 | Scalenet and regtest | no anchor | | | the check is skipped |
 
-Tested against:
-
-- every line of the aserti3-2d specification's twelve test vector runs
-  (14,000 lines), from BCHN's QA assets
-  ([`test_vectors/aserti3-2d`](https://gitlab.com/bitcoin-cash-node/bchn-sw/qa-assets/-/tree/master/test_vectors/aserti3-2d),
-  MIT, vendored unchanged beside `shares/bch_asert.rs`);
-- nine real mainnet and nine real chipnet header pairs, fetched from public
-  Fulcrum servers on 2026-10-23, from the first ASERT blocks to the tips
-  (mainnet 974,001, chipnet 329,001), including chipnet's minimum-difficulty
-  block 300,001: each child carries exactly the nBits ASERT gives from its
-  parent, and passes the header check with only its own header.
+Its tests run the aserti3-2d specification's twelve vector runs (14,000
+lines, BCHN's QA assets
+[`test_vectors/aserti3-2d`](https://gitlab.com/bitcoin-cash-node/bchn-sw/qa-assets/-/tree/master/test_vectors/aserti3-2d),
+MIT, vendored beside `shares/bch_asert.rs`) and nine real mainnet and nine
+chipnet header pairs up to mainnet 974,001 and chipnet 329,001, with
+chipnet's minimum-difficulty block 300,001.
 
 **Where P2Pool runs it.** On every proof `AuxProof::verify` checks with a
 network, and on every **token share's** bitcoin header, with the node's
@@ -239,14 +217,16 @@ network, and on every **token share's** bitcoin header, with the node's
 `validate_share_block`, which a share the node mined itself reaches
 without that gate. A node builds no token job on a template whose nBits
 fail the band at its height and `curtime`; it mines that template without
-tokens. No-token shares are not checked: BCHN alone judges their blocks.
+tokens. Stratum V2 checks a declared token job's nBits and requested
+minimum time before proposal validation or installation
+(`invalid-token-asert`). No-token shares are not checked: BCHN alone judges
+their blocks.
 
 ## Merge-mining tokens on a public node
 
-Owner's decision (2026-10-24): on a public P2Pool node the operator's fee
-and the P2Pool donation apply to merge-mined tokens as they apply to BCH.
-This is node behaviour, not a share-chain rule: peers check only the format
-of a share's root, and share validity never depends on the tokens.
+On a public P2Pool node the operator's fee and the P2Pool donation apply to
+merge-mined tokens as they apply to BCH. This is node behaviour, not a
+share-chain rule: peers check only the format of a share's root.
 
 **The token file.** `[stratum] merge_mining_tokens` names a JSON file of
 the tokens the node merge-mines (Bitcoin Cash in P2Pool mode only):
@@ -267,29 +247,23 @@ tallest tree its covenant accepts (16 when left out).
 
 A SAFA vault gives its thread instead of `state_hash` and `target_bits`:
 `"safa": {"threads": 63, "state": "<16-byte NFT commitment in hex>"}`.
-The SAFA covenant rebuilds a claim's leaf with the state's target eased by
-the ticks since the state's block (`min(dt, 288 x 600) / (threads x 600)`,
-CHIP-2025-03's ticks by the network's pinned switch; on ten-minute blocks
-`min(dh, 288) / threads`), so a fixed target would only match a claim 288
-ten-minute blocks' worth after the last. The node therefore computes each
-job's leaf from the thread, at the job's coinbase height: `state_hash` is
-`HASH256` of the state and `target_bits` is the SAFA tool's
-`claim_target_bits` (`p2poolv2_safa`), integer for integer
-(`safa_claim_target_bits`, counting ticks with the network's
-`TickSchedule` pins; tests compare the two over every thread count, pin
-vectors printed by the former Node tool's `claimTargetBits`, and match the
-tool's leaf after chipnet's switch). A template at or below the state's
-height is mined without tokens.
+Its covenant eases the state's target by the ticks since the state's block
+(`min(dt, 288 x 600) / (threads x 600)`; on ten-minute blocks
+`min(dh, 288) / threads`), so the node computes each job's leaf at the
+job's coinbase height: `state_hash` is `HASH256` of the state and
+`target_bits` is `safa_claim_target_bits`, integer for integer the SAFA
+tool's `claim_target_bits`, counting ticks with the network's
+`TickSchedule` pins. A template at or below the state's height is mined
+without tokens.
 
-At most 16 tokens,
-one per category; the set must fit one tree no taller than the lowest
-limit among them, or the file is refused. An empty list merge-mines
-nothing. A node does not start on a file it cannot read or that is not
-valid (at most 1 MiB). It reads the file again whenever its modification
-time changes, so the tool that claims a token can write the new state
-hash; a changed file that is broken keeps the last good tokens and logs
-why. No file ships with the node: a vault's state changes with every claim.
-The first token, tSAFA, is deployed on chipnet; its parameters are in
+At most 16 tokens, one per category; the set must fit one tree no taller
+than the lowest limit among them, or the file is refused. An empty list
+merge-mines nothing. A node does not start on a file it cannot read or that
+is not valid (at most 1 MiB). It reads the file again whenever its
+modification time changes, so the tool that claims a token can write the
+new state hash; a changed file that is broken keeps the last good tokens
+and logs why. No file ships with the node, since a vault's state changes
+with every claim. tSAFA is deployed on chipnet; its parameters are in
 [the SAFA tool's README](../p2poolv2_safa/README.md#chipnet-tsafa-deployment).
 
 **Each miner's root.** Every pool-built job (Stratum V1, and Stratum V2
@@ -305,29 +279,27 @@ output 0 (`stratum::work::merge_tokens`):
   scripts the coinbase pays them, each with its own 10% cap. A rate of 0
   leaves its slot empty; with neither, `ext` is zero.
 
-A node mining Pickaxe's token A for a miner with a 1% donation and a 1% fee
-builds Pickaxe's whole split leaf byte for byte (leaf hash
-`c4027136…033e41`). The layout (height, salt and slots) depends only on the
-categories, so it is searched once per file and every miner's tree reuses
-it; miners differ only in their root, which replaces a placeholder in the
-coinbase every miner on a template shares. A job whose miner has no payout
-address carries the empty commitment.
+For Pickaxe's token A with a 1% donation and a 1% fee this is Pickaxe's
+split leaf, byte for byte. The layout (height, salt and slots) depends only
+on the categories, so it is searched once per file; miners differ only in
+their root, which replaces a placeholder in the coinbase every miner on a
+template shares. A job whose miner has no payout address carries the empty
+commitment.
 
-Every such share is a **token share**: its coinbase follows the token
-share's 3,072-byte limit, so with more payees than fit the rest go through
-the payout tree, and its bitcoin header takes the ASERT check above. A
-share wins a token when its hash meets the token's target, whatever its
-miner's own target; P2Pool does not ease a device's difficulty towards the
-easiest token target as Pickaxe does, so a device whose difficulty is above
-a token's target misses some of that token's wins.
+Every such share is a token share: its coinbase follows the token share's
+limit ([Hybrid payouts](architecture/bch-hybrid-payouts.md#33-the-coinbase-limit-c)),
+and its bitcoin header takes the ASERT check. A share wins a token when its
+hash meets the token's target, whatever its miner's own target. P2Pool
+does not ease a device's difficulty towards the easiest token target as
+Pickaxe does, so a device whose difficulty is above a token's target
+misses some of that token's wins.
 
 ## Disclosure to miners
 
-A miner on someone else's pool checks before hashing that their leaves pay
-them, and only the donation and fee they agreed to, and claims their own
-wins. P2Pool discloses both in Pickaxe's formats, so miners and tools work
-at both kinds of pool (`stratum::merge_disclosure`). Disclosure is opt-in:
-firmware that does not ask sees nothing new.
+A miner checks before hashing that their leaves pay them, and only the
+donation and fee they agreed to, and claims their own wins. P2Pool
+discloses both in Pickaxe's formats (`stratum::merge_disclosure`), only to
+firmware that asks.
 
 **The leaves (`CTMD` v2),** the same bytes Job Declaration uses
 (`shares::auxpow::Disclosure`):
@@ -351,11 +323,11 @@ root.
 
 **Stratum V2.** A connection asks for extension `0x4D4D` through the
 extensions negotiation (type `0x0001`, `RequestExtensions` `0x00`: `u16
-request_id | u16 n | n x u16`), after `SetupConnection`; the node answers
-`RequestExtensions.Success` (`0x01`) granting `0x4D4D` on a connection with
-mining channels, beside any other extension it grants there
-([Miner options](miner-options.md#stratum-v2)). The connection then gets, on
-the channel bit:
+request_id | u16 n | n x u16`) after `SetupConnection`; the node grants it
+in `RequestExtensions.Success` (`0x01`) on a connection with mining
+channels, beside any other extension it grants there
+([Miner options](miner-options.md#stratum-v2)). The connection then gets,
+on the channel bit:
 
 ```text
 JobLeaves (0x00):  channel u32 | job u32 | output 0 (53) | u16 n | CTMD (n)
@@ -398,140 +370,81 @@ Unix; the directory's permissions elsewhere):
 
 An SV1 win's line names its job by the notify's hex job id and has no
 channel. No line names an address: leaves carry `HASH256` of the payout
-script, which a miner matches against their own. Writer threads take the
-lines through bounded queues, so a connection never waits on the disk, and
-past 8 MiB a log moves to `.jsonl.1` and starts again. The operator may
-publish the leaf log, and hands a miner the lines of their wins.
+script, which a miner matches against their own. Bounded queues keep a
+connection from waiting on the disk, and past 8 MiB a log moves to
+`.jsonl.1` and starts again. The operator may publish the leaf log, and
+hands a miner the lines of their wins.
 
 **The proofs.** Each win's `AuxProof` v2 is built from the job's coinbase
 and branch and checked as a covenant would check it, with the ASERT check
 on mainnet and chipnet, before it is sent or logged; one that fails is
 logged and dropped. A proof needs the block's coinbase branch to be at most
-25 deep, the proof format's limit. P2Pool builds no claim transactions:
-claiming is the miner's, or their tool's, with the token's covenant. An
-operator can run [`safa claimer`](../p2poolv2_safa/README.md#claimer) separately
-to follow one SAFA vault, verify pool wins and broadcast the claims.
+25 deep. P2Pool builds no claim transactions: claiming is the miner's, or
+their tool's, with the token's covenant. An operator can run
+[`safa claimer`](../p2poolv2_safa/README.md#claimer) separately to follow
+one SAFA vault, verify pool wins and broadcast the claims.
 
 ## Job Declaration leaves
 
-A Full-Template client whose declared coinbase's output 0 is a token root
-puts the `CTMD` disclosure of its leaves in `DeclareMiningJob.excess_data`,
-as Pickaxe's client does. The node refuses the declaration with
-`invalid-coinbase-tx`, the reason in its error details, when output 0 is a
-root and `excess_data` is empty, when `excess_data` is not empty without a
-root, or when the disclosure does not decode or its leaves do not make the
-root. When the job is installed, each leaf must pay the channel's miner and
-carry the job's terms as its split (the donation the token chose, then the
-node's fee, each to the script the coinbase pays it to), so the node's fee
-and the miner's P2Pool donation apply to declared tokens too. A
-Coinbase-only custom job sends no declaration, so its output 0 must be the
-empty commitment. See [Job Declaration](bch-job-declaration.md).
+A Full-Template client whose declared output 0 is a token root discloses
+its leaves as `CTMD` in `DeclareMiningJob.excess_data`, as Pickaxe's client
+does, and each leaf must pay the channel's miner and carry the job's
+donation and fee as its split. A Coinbase-Only job merge-mines no token.
+The rules and error codes are in
+[Declared token leaves](bch-job-declaration.md#declared-token-leaves).
 
 ## Offline CLI
 
-No node configuration or wallet is required. Given `tokens.json`:
-
-```json
-{"tokens": [{
-  "category": "1111111111111111111111111111111111111111111111111111111111111111",
-  "lock_hash": "953ccfa596a6c6d39e5980194539124fdcff116a571455a212baed811f585ee0",
-  "state_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-  "payout_hash": "22650758a42ebfd7306e771ad24c442cad795ed9e549392233729f647a2b1be5",
-  "target_bits": "207fffff",
-  "ext": "0000000000000000000000000000000000000000000000000000000000000000"
-}]}
-```
+No node configuration or wallet is required:
 
 ```sh
 p2poolv2_cli bch-auxpow build tokens.json
 p2poolv2_cli bch-auxpow verify proof.hex token.json --network chipnet
 ```
 
-`build` prints the commitment, output 0 in hex and each token's slot and
-branch. `verify` takes the proof's bytes in hex and one token's leaf fields
-as JSON (the same object as above), with `--max-height` for the token's
-tree limit (16 by default) and `--network` for the ASERT check (regtest
-skips it). Instead of `ext`, a token may give its split, from which `ext`
-is computed: `"split": {"donation_bps": 100, "donation_script": "<hex>",
-"fee_bps": 100, "fee_script": "<hex>"}`, scripts being locking bytecode
-(left out at a rate of 0); without either, `ext` is 32 zero bytes. Each
-input file is limited to 1 MiB. The token above is Pickaxe's synthetic
-token A, not a real token.
+`tokens.json` lists leaves: each token is the token file's object above
+with `max_height` left out and `payout_hash` and `ext` added
+(`"payout_hash": "22650758a42ebfd7306e771ad24c442cad795ed9e549392233729f647a2b1be5"`
+and a zero `ext` make Pickaxe's synthetic token A, not a real token).
+Instead of `ext`, a token may give its split, from which `ext` is computed:
+`"split": {"donation_bps": 100, "donation_script": "<hex>", "fee_bps": 100,
+"fee_script": "<hex>"}`, scripts being locking bytecode (left out at a rate
+of 0); without either, `ext` is 32 zero bytes. `build` prints the
+commitment, output 0 in hex and each token's slot and branch. `verify`
+takes the proof's bytes in hex and one token's leaf as JSON, with
+`--max-height` for the token's tree limit (16 by default) and `--network`
+for the ASERT check (regtest skips it). Each input file is limited to
+1 MiB.
 
 ## The SAFA covenant
 
 The experimental [SAFA AuxPoW covenant](../p2poolv2_safa/README.md)
-verifies v2 proofs inside the BCH 2026 VM (`p2poolv2_safa`, on
-libauth-rs; it replaced the Node tool `tools/safa-auxpow` with
-byte-for-byte parity on 2026-10-29). It rebuilds the leaf from
-introspection (the vault's category, locking bytecode and state, the
-claim's payout and target, and the split's `ext`), folds both branches,
-checks the header's work against the token's target and its nBits against
-ASERT at the coinbase's BIP34 height (the corrected band above, counted in
-CHIP-2025-03's ticks from the same pinned switch as the header gate, with
-a fallback after 4,032 ten-minute blocks' worth of ticks without a claim),
-eases the token's target by the ticks since the last claim, binds that height with
-`OP_CHECKLOCKTIMEVERIFY` on the block's lock height (its ticks in 600-tick
-units, rounded up), and pays the split to scripts of at most 35
-bytes. The vault is the claim's only input: it pays the fee from its own
-cash, `S` to `3S` satoshis for `S` bytes of claim bound, and keeps at least
-800 satoshis. Its tests run Pickaxe's
-vectors, BCHN's 14,000 aserti3-2d vectors and the real headers from this
-repository's Rust tests in the VM. A chipnet test token (tSAFA) is
-prepared but not deployed. The v1 variant passed a real regtest withdrawal
-on 2026-10-16; the v2 covenant has not yet run against BCHN.
+(`p2poolv2_safa`, on libauth-rs) verifies v2 proofs inside the BCH 2026 VM.
+It is a merge-mined variant of the
+[author's SAFA draft](https://bitcoincashresearch.org/t/safas-a-sha256-asic-minable-automated-token-market/2123),
+whose own mining check (`SHA256d(next NFT baton)` against a target) a BCH
+commitment cannot satisfy; it is not the author's token. A claim rebuilds
+the leaf from introspection (the vault's category, locking bytecode and
+state, the claim's payout and target, and the split's `ext`), folds both
+branches, checks the header's work against the token's target and its
+nBits against ASERT at the coinbase's BIP34 height (the band above, in
+CHIP-2025-03's ticks from the same pinned switch as the header gate, with a
+fallback after 4,032 ten-minute blocks' worth of ticks without a claim),
+eases the target by the ticks since the last claim, binds that height with
+`OP_CHECKLOCKTIMEVERIFY` (the lock height's ticks in 600-tick units,
+rounded up), and pays the split to scripts of at most 35 bytes. The vault
+is the claim's only input: it pays the fee from its own cash, `S` to `3S`
+satoshis for `S` bytes of claim bound, and keeps at least 800 satoshis.
+Threads, parameters, tests and the chipnet tSAFA deployment are in its
+README; a run against BCHN with a real P2Pool coinbase and an independent
+review are open
+([regtest evidence](../p2poolv2_safa/README.md#regtest-evidence-and-reproduction)).
 
-Deployment compilation and the genesis CLI accept only 2 to 63 threads.
-With one thread on ten-minute blocks a claim's age is at least one block,
-600 ticks, so the easing factor is never below 1 and the target can never
-harden; two threads are the fewest that harden it (×0.75 for back-to-back
-claims, ×0.525 for claims a one-minute block apart; on one-minute blocks one
-thread would harden it too, ×0.55, but two stays the minimum).
-At 288 or more, the age cap prevents the target from ever easing above its
-previous value. The stricter bound preserves room to recover before that
-cap. Both fixes must precede genesis because the deployed covenant is
-immutable. The regenerated chipnet fixture uses outpoint `11` x 32, output
-0, four threads and 84,000,000,000 virtual satoshis. Its new `lock_hash`
-requires new leaves and newly mined proofs; old proofs cannot claim it.
-The regression checks chipnet block 329,001's nBits with a header timestamp
-two hours before its real parent's time and rejects a target one unit
-above the x8 edge. The mainnet edges are unchanged. The
-[rebuilt Pickaxe claim](../p2poolv2_safa/README.md#chipnet-tsafa-deployment)
-passes the standard BCH 2026 VM offline; this is not a BCHN deployment or
-broadcast.
-
-SAFA is the first requested token target. Its
-[author's draft and linked Bitauth template](https://bitcoincashresearch.org/t/safas-a-sha256-asic-minable-automated-token-market/2123)
-check `SHA256d(next NFT baton)` against a difficulty target, with no parent
-header, coinbase or inclusion branch. Committing its baton hash in BCH does
-not satisfy that mining rule. The variant keeps the draft's threads, market
-and difficulty adjustment and replaces the mining hash check with a
-merge-mining check. It is not a deployed version of the author's token or a
-final SAFA specification. A complete independent review, the economic parameters (the
-virtual reserve among them) and a final SAFA policy remain open.
-
-The linked draft's release and swap scenarios both pass in Libauth
-`3.1.0-next.8`'s standard BCH 2026 VM. This is not a security endorsement:
-the release scenario's hash exceeds its unsigned target but passes the
-script's direct `OP_BIN2NUM` comparison. A covenant must append a zero sign
-byte before converting a 32-byte hash to an integer, and test the high-bit
-case.
-
-A token covenant must also enforce its own standard transaction and VM
-budgets: the [2026 P2S rules](https://github.com/bitjson/bch-p2s#unlocking-bytecode-length)
+Any token covenant must append a zero sign byte before converting a 32-byte
+hash to an integer, and test the high-bit case (the draft's release
+scenario passes Libauth `3.1.0-next.8`'s VM with a hash above its unsigned
+target, through a direct `OP_BIN2NUM` comparison). It must also keep to the
+standard budgets: the
+[2026 P2S rules](https://github.com/bitjson/bch-p2s#unlocking-bytecode-length)
 allow 10,000 bytes of standard unlocking bytecode, including the redeem
 script, and a v2 proof carries the whole coinbase but output 0.
-
-## Regtest evidence, v1 format (2026-10-16)
-
-Before v2, the opt-in Job Declaration test passed against two connected
-BCHN 29.2.0 nodes with the v1 output. Both nodes accepted Full-Template
-block 207 (`076b69a0…7bb9e`, two work items) and Coinbase-Only block 208
-(`3f97953b…d5bef`, one item); each coinbase paid 2,500,000,219 satoshis,
-including 219 satoshis in fees, and every exported proof verified. A SAFA
-withdrawal using such a proof was accepted by both nodes in block 282; BCHN
-rejected a copy with an altered merkle sibling. See
-[the JD test setup](bch-job-declaration.md#two-node-bchn-regtest-check) and
-the [variant's evidence record](../p2poolv2_safa/README.md#regtest-evidence-and-reproduction).
-The same opt-in test now builds and verifies v2 proofs; it has not been
-rerun against BCHN since the change.

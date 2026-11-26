@@ -447,22 +447,14 @@ p2poolv2_cli bch-share-address --network mainnet bitcoincash:q...
 
 The command only changes the prefix and checksum. It takes no private key
 and rejects a P2SH address, because a share is owned by a P2PKH script.
-Both the command and the dashboard help page's generator go through
-`p2poolv2_config::payout_to_share_address`, and the page calls it over
-the API as `GET /share_address?payout=...`, answered with the node's own
-`bitcoin_cash_network` prefix.
 
-Bitcoin Cash share transactions are checked by a Bitcoin Cash interpreter
-(`shares/bch_script.rs`), not by `bitcoinconsensus`, which applies Bitcoin
-script rules: a spend signed by a Bitcoin Cash wallet (`SIGHASH_FORKID`,
-Schnorr) would fail there and a Bitcoin legacy signature would pass. The
-interpreter accepts a P2PKH spend signed with `SIGHASH_FORKID` by ECDSA or
-Bitcoin Cash Schnorr, the form a Bitcoin Cash wallet uses for the share
-owner's P2PKH key, and a claim or refund of the share-trading contract
-behind P2SH32 ([bch-share-trading.md](../atomic-swap/bch-share-trading.md)),
-and rejects every other script. The outputs it creates must be P2PKH or
-P2SH32 and at or above BCHN's dust threshold. `p2poolv2_cli bch-trade`
-builds and signs those transactions with a key the owner's wallet exports.
+The share owner's key signs share transactions the way a Bitcoin Cash
+wallet does (`SIGHASH_FORKID`, ECDSA or Bitcoin Cash Schnorr), checked by
+this fork's own interpreter (`shares/bch_script.rs`), not `bitcoinconsensus`;
+the script and output rules are on
+[Share transactions](../sharechain/transactions.md).
+`p2poolv2_cli bch-trade` builds and signs those transactions with a key the
+owner's wallet exports.
 
 ## Registration
 

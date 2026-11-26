@@ -8,8 +8,14 @@
 A share chain is a blockchain of share blocks, and each share block embeds a
 Bitcoin Cash block header. The share chain's difficulty is far below Bitcoin
 Cash's, so the share chain is a chain of "weak" Bitcoin Cash blocks: one
-every 10 seconds on each share chain, against one Bitcoin Cash block every
-10 minutes.
+every 10 seconds, against one Bitcoin Cash block every minute (every 10
+minutes before CHIP-2025-03,
+[one-minute blocks](current-chain.md#one-minute-blocks)).
+
+Bitcoin Cash has one share chain. A share may be heavier than the minimum
+within a difficulty band, may carry weak shares, easier proofs of work from
+small miners, and names its miner's payout level; the rules and constants
+are on [Share chain redesign](small-miners-design.md).
 
 ## Share header and Bitcoin Cash header
 
@@ -58,6 +64,7 @@ of work, so one proof of work can stand behind only one share block hash.
 | Bitcoin Cash height | Height of the block being mined | The coinbase locktime |
 | Coinbase proof | SHA-256 midstate of the coinbase prefix, the prefix length, and the share transaction root | The Bitcoin Cash header's merkle root |
 | Declared coinbase (Job Declaration only) | The miner's scriptSig prefix and merge-mining commitment | Share commitment |
+| Version, band, level and weak shares (Bitcoin Cash) | Share version and desired version; `wanted_bits`, `band_cap`, `asert_bits`; `payout_level`; `weak_ratio`, the weak count, `weak_asking` and the weak root | Share commitment |
 
 The share commitment and the coinbase proof are described on
 [Share commitments](share-commitments.md). The two addresses are separate
@@ -79,6 +86,9 @@ itself:
   Its outputs carry the merge-mining commitment (output 0), the donation,
   the fee, the payouts, a padding output and the share commitment. Bitcoin
   Cash has no SegWit, so there is no witness commitment output.
+- **Weak shares** (Bitcoin Cash). The weak shares the share carries, or,
+  once pruned, their merkle root and summary
+  ([Share chain redesign](small-miners-design.md#how-a-share-carries-them)).
 
 A node checks the body against the header before storing it; see
 [Share validation](validation.md#the-body-matches-the-header).

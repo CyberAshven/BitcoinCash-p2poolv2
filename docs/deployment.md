@@ -1,11 +1,10 @@
 # Docker, Ansible and Umbrel
 
-The repository carries three ways to deploy a node besides the release
-binaries and systemd. The full guides for the first two are AsciiDoc files in
-the repository:
-[docker/README.adoc](https://github.com/CyberAshven/BitcoinCash-p2poolv2/blob/alpha/docker/README.adoc)
-and [ansible/README.adoc](https://github.com/CyberAshven/BitcoinCash-p2poolv2/blob/alpha/ansible/README.adoc).
-The Umbrel apps have theirs beside them, in `packaging/umbrel/README.md`.
+Three ways to deploy a node besides the release binaries and systemd. The
+full guides are in the repository:
+[docker/README.adoc](https://github.com/CyberAshven/BitcoinCash-p2poolv2/blob/alpha/docker/README.adoc),
+[ansible/README.adoc](https://github.com/CyberAshven/BitcoinCash-p2poolv2/blob/alpha/ansible/README.adoc)
+and `packaging/umbrel/README.md`.
 
 ## Docker
 
@@ -22,36 +21,37 @@ docker compose up -d --build
 docker compose exec -T bchn bcli getblockcount    # grows past 101
 ```
 
-A one-shot mines 101 blocks to BCHN's dev wallet, another takes a payout
-address and a share-owner key from that wallet, and a CPU miner written in
-Rust (mujina) mines through the node. On regtest every hash the miner
-submits also meets the block target, so the node submits blocks to BCHN
-within seconds; shares on the share chain still need their full
+One-shot services mine 101 blocks to BCHN's dev wallet and take a payout
+address and share-owner key from it; a Rust CPU miner (mujina) then mines
+through the node. On regtest every submitted hash also meets the block
+target, so blocks reach BCHN within seconds; shares still need their full
 difficulty, which takes a CPU hours.
 
-For chipnet or mainnet, copy `config-docker.sample.toml` to `config.toml`,
-set your addresses, `dial_peers` and BCHN's RPC port, set `NETWORK`,
-`BCHN_RPC_PORT` and `P2POOL_CONFIG` in `docker/.env`, and let BCHN sync
-before starting the node. Chipnet and mainnet ship no RPC password: BCHN
-makes a random one on first start, unless `BCHN_RPC_PASSWORD` in
-`docker/.env` sets one. It keeps the password in the `bchn_rpc` volume, and
-the node reads it from there as `P2POOL_BITCOINRPC__PASSWORD`. Nothing logs
-it ("BCHN's RPC password" in docker/README.adoc says how to read, set or
-replace it). Only regtest uses the public `p2pool` / `p2pool` login. `docker/docker-compose.node.yml` adds more nodes,
-and `docker/docker-compose.metrics.yml` runs Prometheus and Grafana.
+For chipnet or mainnet:
 
-The published image is `ghcr.io/cyberashven/bitcoincash-p2poolv2`.
+- Copy `config-docker.sample.toml` to `config.toml` and set your addresses,
+  `dial_peers` and BCHN's RPC port.
+- Set `NETWORK`, `BCHN_RPC_PORT` and `P2POOL_CONFIG` in `docker/.env`, and
+  let BCHN sync before starting the node.
+- No RPC password ships: BCHN makes a random one on first start unless
+  `BCHN_RPC_PASSWORD` in `docker/.env` sets one, keeps it in the `bchn_rpc`
+  volume, and the node reads it as `P2POOL_BITCOINRPC__PASSWORD`. Nothing
+  logs it ("BCHN's RPC password" in docker/README.adoc says how to read, set
+  or replace it). Only regtest uses the public `p2pool` / `p2pool` login.
 
-The node and the miner use host networking, which Docker supports on Linux.
+`docker/docker-compose.node.yml` adds more nodes, and
+`docker/docker-compose.metrics.yml` runs Prometheus and Grafana. The
+published image is `ghcr.io/cyberashven/bitcoincash-p2poolv2`. The node and
+the miner use host networking, which Docker supports on Linux.
 
 ## Ansible
 
 `ansible/playbook.yml` deploys one or more nodes to a Debian or Ubuntu host:
 
 - **p2poolv2:** installs the release with its installer script, writes each
-  instance's config with `chain = "bitcoin-cash"`, `bitcoin_cash_network`,
-  CashAddr addresses, donation and fee, `dial_peers`,
-  optional Stratum V2 keys and `[api]` settings, and runs it under systemd.
+  instance's config (`chain = "bitcoin-cash"`, `bitcoin_cash_network`,
+  CashAddr addresses, donation and fee, `dial_peers`, optional Stratum V2
+  keys, `[api]`) and runs it under systemd.
 - **nginx_p2poolv2:** a rate-limited TLS reverse proxy for the API and,
   optionally, Grafana.
 - **monitoring_p2poolv2:** Prometheus and Grafana on loopback, with the
@@ -66,19 +66,18 @@ committed.
 `packaging/umbrel` is an Umbrel community app store, ported from upstream's
 `p2poolv2/umbrel-app`, with two apps on the published image:
 
-- **P2Pool for Bitcoin Cash** depends on the Bitcoin Cash Node app from
-  Umbrel's own app store and mines on it, on mainnet, with no setup.
+- **P2Pool for Bitcoin Cash** mines on mainnet on the Bitcoin Cash Node app
+  from Umbrel's own store, with no setup.
 - **P2Pool for Bitcoin Cash (external node)** mines on a BCHN you run
   elsewhere, on chipnet by default.
 
-Their Stratum, P2P and dashboard ports differ from Umbrel's Bitcoin apps and
-from the Bitcoin P2Poolv2 app. Publishing the store, installing, the BCHN
-options and the ports are in
+Their ports differ from Umbrel's Bitcoin apps and the Bitcoin P2Poolv2 app.
+Publishing, installing, BCHN options and ports are in
 [packaging/umbrel/README.md](https://github.com/CyberAshven/BitcoinCash-p2poolv2/blob/alpha/packaging/umbrel/README.md).
 
 ## Grafana dashboards
 
 Both deployments use the dashboards in `prometheus/grafana/dashboards/`.
-Found blocks link to a Bitcoin Cash explorer chosen by the node's network:
-Blockchair on mainnet, chipnet.imaginary.cash on chipnet. Coinbase amounts
+Found blocks link to a Bitcoin Cash explorer for the node's network
+(Blockchair on mainnet, chipnet.imaginary.cash on chipnet), coinbase amounts
 are in BCH, and miners are listed by payout address (CashAddr).

@@ -13,50 +13,39 @@ P2Poolv2 developers.
 
 ## In short
 
-- **Payouts in the coinbase.** PPLNS over a window of three Bitcoin Cash
-  blocks of work, at most 120,960 shares; shares count once 100 deep. Uncles
-  are paid 9/10 of their difficulty.
-- **One share chain.** Its share target ceiling, difficulty about 4.5, is the
-  former mini chain's, so small miners still find shares. A big miner gets
-  shares up to 64 times harder (the difficulty band), so it makes fewer of
-  them and the minimum stays low for everyone else. See
-  [Small miners](small-miners.md).
-- **Mainnet and chipnet run the same rules;** only the network setting
-  differs. Regtest is for development.
-- **1% donation** to the project by default, an optional operator fee (1%
-  unless set), and at most 10% for each, enforced by the share chain.
-- **Stratum V2 first:** Noise encryption, standard and extended channels,
-  both Job Declaration modes, and templates from a Template Provider. Stratum
-  V1 stays for older firmware. See [Miner options](miner-options.md).
-- **Share trading:** a share's payout right can be sold for BCH through a hash
-  time locked contract on Bitcoin Cash. See
-  [Trading shares for BCH](atomic-swap/bch-share-trading.md).
-- **All Rust,** including the built-in dashboard.
+- **Payouts in the coinbase:** PPLNS over three Bitcoin Cash blocks of work,
+  at most 120,960 shares, counted once 100 deep; uncles get 9/10
+  ([PPLNS accounting](sharechain/pplns-accounting.md)).
+- **One share chain** per network, with a low target ceiling (difficulty
+  about 4.55) for small miners; a big miner's shares are up to 64 times
+  harder ([Small miners](small-miners.md)). Mainnet and chipnet run the same
+  rules; regtest is for development.
+- **1% donation** by default, an optional operator fee (1% unless set), at
+  most 10% each, enforced by the share chain.
+- **Stratum V2 first** (Noise, standard and extended channels, both Job
+  Declaration modes, Template Providers); Stratum V1 for older firmware
+  ([Miner options](miner-options.md)).
+- **Share trading:** a share's payout right can be sold for BCH through a
+  hash time locked contract ([Trading shares for BCH](atomic-swap/bch-share-trading.md)).
+- **All Rust,** the built-in dashboard included.
 
-The decisions behind these are in [Plan and decisions](bch-plan.md).
+The decisions behind these: [Plan and decisions](bch-plan.md).
 
-## Where to start
+## Where to go next
 
-- Run a node: [Running P2Poolv2 on Bitcoin Cash](bch-quickstart.md), then
-  [Requirements](requirements.md) and [Docker, Ansible and Umbrel](deployment.md).
-- Point a miner at a node: [Miner options](miner-options.md).
-- Understand the risks: [Known attacks and threat model](known-attacks.md).
-- Work on the code: the [Architecture](architecture/README.md) pages and
-  `AGENTS.md` in the repository.
-
-## How it works
-
-Ported from upstream's documentation site and adapted to Bitcoin Cash (the
-[port map](upstream-port-map.md) lists every page):
-
-- Why: [Why P2Poolv2](why-p2poolv2.md) and
-  [Comparison with SV2 and DATUM](compare-datum-sv2.md).
-- The network and a node: [P2P network of miners](p2p-network.md),
-  [Node components](node-components.md) and
-  [Stratum server and vardiff](stratum.md).
-- The [Share chain](sharechain/README.md): commitments, validation, PPLNS
-  accounting, share transactions and pool size limits.
-- [Payouts](payouts/README.md): in the coinbase, and by selling shares.
+- Run a node: [Running P2Poolv2 on Bitcoin Cash](bch-quickstart.md),
+  [Requirements](requirements.md), [Docker, Ansible and Umbrel](deployment.md).
+- Mine on a node: [Miner options](miner-options.md).
+- Risks: [Known attacks and threat model](known-attacks.md).
+- How it works, ported from upstream's documentation site (see the
+  [port map](upstream-port-map.md)): [Why P2Poolv2](why-p2poolv2.md),
+  [Comparison with SV2 and DATUM](compare-datum-sv2.md),
+  [P2P network of miners](p2p-network.md),
+  [Node components](node-components.md),
+  [Stratum server and vardiff](stratum.md), the
+  [Share chain](sharechain/README.md) and [Payouts](payouts/README.md).
+- The code: the [Architecture](architecture/README.md) pages and `AGENTS.md`
+  in the repository.
 
 ## Status
 
@@ -66,10 +55,10 @@ and the Docker image is `ghcr.io/cyberashven/bitcoincash-p2poolv2`.
 
 ## Sponsor
 
-P2Poolv2 for Bitcoin Cash is free, open-source software. Donations keep its
-development going. Send BCH, or CashTokens, to the project's donation
-address, the one the pool's own donation pays in each block it finds (1% by
-default; see [Miner options](miner-options.md#donation) to choose your own):
+P2Poolv2 for Bitcoin Cash is free, open-source software. Donations keep it
+going. Send BCH, or CashTokens, to the address the pool's own donation pays
+in each block it finds (1% by default;
+[choose your own](miner-options.md#donation)):
 
 - BCH: `bitcoincash:qze95tc2dqrnltvxfa5yhunwx5952f34fvw4g6365k`
 - CashTokens-aware, the same key:
@@ -81,5 +70,5 @@ shows both with QR codes and Open in wallet links.
 
 ## License
 
-The fork is distributed under AGPL-3.0 (plan decision 13). Files from
-upstream P2Poolv2 keep their MIT or Apache-2.0 notices.
+AGPL-3.0 (plan decision 13). Files from upstream P2Poolv2 keep their MIT or
+Apache-2.0 notices.

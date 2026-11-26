@@ -24,7 +24,6 @@ mod style_guard;
 use crate::api::endpoints::MAX_NUM_SHARES_IN_RESPONSE;
 use crate::api::endpoints::miner::miner_report;
 use crate::api::endpoints::share::build_share_output;
-use crate::api::endpoints::share_address::{ShareAddressQuery, share_address_for};
 use crate::api::error::ApiError;
 use crate::api::server::AppState;
 use axum::Router;
@@ -40,7 +39,6 @@ use p2poolv2_lib::accounting::stats::metrics::{PoolMetrics, SUBMISSION_WINDOW_SE
 use p2poolv2_lib::address::bch_share::BchShareNetwork;
 use p2poolv2_lib::address_display::ShareInfoDisplay;
 use p2poolv2_lib::address_display::payout_address_string;
-use p2poolv2_lib::config::BitcoinCashNetwork;
 use pages::{
     BlockView, BlocksView, FoundBlockRow, MinerRow, MinerView, MinersView, Overview, PAGE_SIZE,
     Paging, PeersView, ShareRow, ShareView, SharesView, Site, WorkerRow, range_window_secs,
@@ -113,22 +111,12 @@ pub(crate) fn site(state: &AppState) -> Site {
         Some(BchShareNetwork::Scalenet) => ("Bitcoin Cash scalenet".to_string(), "scalenet"),
         None => (format!("Bitcoin {}", state.app_config.network), "bitcoin"),
     };
-    // The `--network` value for the help page's example command. Every
-    // badge a Cash network produces is already a name `p2poolv2_cli
-    // bch-share-address` accepts; a Bitcoin node's "bitcoin" badge is not,
-    // so it has none and the page shows no generator at all.
-    let share_cli_network = state
-        .app_config
-        .cash_network
-        .map(BitcoinCashNetwork::from_share_network)
-        .map(BitcoinCashNetwork::name);
     Site {
         network,
         badge: badge.to_string(),
         auth: state.auth_user.is_some(),
         stratum_port: state.stratum_port,
         sv2_port: state.sv2_port,
-        share_cli_network,
     }
 }
 
@@ -818,27 +806,8 @@ async fn share(State(dashboard): State<Arc<DashboardState>>, Path(hash): Path<St
     }
 }
 
-/// The help page, with the share address generator's outcome when a
-/// payout was submitted. No `?payout=` is a plain page; a submitted one
-/// runs the endpoint's own rule, so the form and `GET /share_address`
-/// can never disagree. On a refusal the payout is kept only to echo into
-/// the form's input, and the example fields keep their placeholders.
-async fn help(
-    State(dashboard): State<Arc<DashboardState>>,
-    headers: HeaderMap,
-    Query(query): Query<ShareAddressQuery>,
-) -> Response {
-    let site = site(&dashboard.app);
-    let host = request_host(&headers);
-    let (payout, result, error) = match query.payout {
-        None => (String::new(), String::new(), String::new()),
-        Some(payout) => match share_address_for(&payout, dashboard.app.app_config.cash_network) {
-            Ok(address) => (payout, address, String::new()),
-            Err(ApiError::BadRequest(message)) => (payout, String::new(), message),
-            Err(error) => (payout, String::new(), error.to_string()),
-        },
-    };
-    html(pages::help(&site, &host, &payout, &result, &error))
+async fn help(State(dashboard): State<Arc<DashboardState>>, headers: HeaderMap) -> Response {
+    html(pages::help(&site(&dashboard.app), &request_host(&headers)))
 }
 
 /// The hostname the request's `Host` header names, without its port: the

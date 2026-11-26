@@ -25,10 +25,24 @@
 //! - **Spread.** The peer is chosen at random: a network group at random
 //!   among those with a candidate, then a peer in it. As in Bitcoin Cash Node
 //!   (`setConnected`), the node dials no peer in an IPv4 /16 or IPv6 /32
-//!   that an outgoing connection already holds, Kademlia's connections
-//!   included, so it adds at most one outgoing peer per group. Connections to
-//!   peers the operator lists in dial_peers hold no group, and the target
-//!   never dials those peers: the reconnector does.
+//!   that one of its outgoing peers already holds, so it adds at most one
+//!   outgoing peer per group. Connections to peers the operator lists in
+//!   dial_peers hold no group, and the target never dials those peers: the
+//!   reconnector does.
+//! - **Lookups.** Kademlia dials each peer a lookup asks that is not
+//!   connected, and share relay would keep that connection busy for good. An
+//!   outgoing connection none of this node's own dials opened (the target's,
+//!   the reconnector's to a dial_peer, a DNS or Nostr seed's) is Kademlia's.
+//!   It holds no group and does not count toward the target, and the node
+//!   closes it once it has been open `LOOKUP_SETTLE_SECS` while no Kademlia
+//!   query runs, or `KADEMLIA_QUERY_TIMEOUT_SECS`, the longest a query runs,
+//!   whatever runs. The settle time lets Identify and Kademlia's protocol
+//!   check run, so the peer reaches the book and the routing table, and it
+//!   stays in both: the target may still choose it. Bitcoin Cash Node closes
+//!   its feeler connections the same way once they have answered. A
+//!   connection to an anchor is the exception: the target takes it as its
+//!   own while it is below the target and the anchor's group is free.
+//!   Inbound connections are never closed here.
 //! - **Limits.** A dial never takes the node past `max_established_outgoing`,
 //!   and the target's own dials in flight stay under half of
 //!   `max_pending_outgoing`, leaving the other half to dial_peers and
@@ -45,6 +59,7 @@
 //! which peers a share is relayed to, or how.
 
 use super::address_filter::{NetworkGroup, network_group};
+use super::behaviour::KADEMLIA_QUERY_TIMEOUT_SECS;
 use super::connection_tracker::BlockedIps;
 use super::dial_filter::{is_not_blocked, without_p2p_suffix};
 use super::peer_book::{MAX_ANCHORS, SAVED_BOOK_VERSION, SavedBook, SavedPeer};
@@ -81,6 +96,10 @@ const MAX_KNOWN_PEERS: usize = 1_000;
 /// Most addresses the book holds for one peer.
 const MAX_ADDRESSES_PER_PEER: usize = 4;
 
+/// A connection Kademlia opened for a lookup stays open at least this long,
+/// so Identify and Kademlia's protocol check run on it.
+const LOOKUP_SETTLE_SECS: u64 = 10;
+
 /// A peer the target may dial.
 struct KnownPeer {
     /// The peer's dialable addresses, without `/p2p`.
@@ -99,10 +118,14 @@ struct KnownPeer {
 /// An established outgoing connection.
 struct OutgoingConnection {
     peer_id: PeerId,
-    /// The network group the connection holds; None for a dial_peer.
+    /// The network group the connection holds; None for a dial_peer or a
+    /// lookup.
     group: Option<NetworkGroup>,
     /// When the connection was established, if the target dialed it.
     target_established_at: Option<Instant>,
+    /// When the connection was established, if Kademlia opened it for a
+    /// lookup and the target does not keep it.
+    lookup_established_at: Option<Instant>,
 }
 
 /// A dial the target started, until it connects or fails.
@@ -144,6 +167,13 @@ pub(crate) struct OutgoingPeerTarget {
     known_peer_limit: usize,
     outgoing: HashMap<ConnectionId, OutgoingConnection>,
     pending: HashMap<ConnectionId, PendingDial>,
+    /// Dials in flight to addresses a DNS or Nostr seed returned. Their
+    /// connections are the node's own, not Kademlia's.
+    seed_dials: HashSet<ConnectionId>,
+    /// Lookup connections the node has asked the swarm to close.
+    closing_lookups: HashSet<ConnectionId>,
+    /// LOOKUP_SETTLE_SECS, shorter in tests.
+    lookup_settle: Duration,
     /// Dials started toward the target since start, for P2P health metrics.
     dials_attempted_total: u64,
 }
@@ -185,6 +215,9 @@ impl OutgoingPeerTarget {
             known_peer_limit: MAX_KNOWN_PEERS,
             outgoing: HashMap::with_capacity(config.max_established_outgoing as usize),
             pending: HashMap::with_capacity(config.max_pending_outgoing as usize),
+            seed_dials: HashSet::new(),
+            closing_lookups: HashSet::new(),
+            lookup_settle: Duration::from_secs(LOOKUP_SETTLE_SECS),
             dials_attempted_total: 0,
         }
     }
@@ -199,7 +232,8 @@ impl OutgoingPeerTarget {
         self.target > 0
     }
 
-    /// Peers with at least one established outgoing connection.
+    /// Peers with at least one established outgoing connection, lookups
+    /// included.
     pub(crate) fn outgoing_peer_count(&self) -> u64 {
         let peers: HashSet<&PeerId> = self
             .outgoing
@@ -207,6 +241,18 @@ impl OutgoingPeerTarget {
             .map(|connection| &connection.peer_id)
             .collect();
         peers.len() as u64
+    }
+
+    /// Peers with an outgoing connection that is not a lookup: the ones the
+    /// target counts.
+    fn kept_peer_count(&self) -> usize {
+        let peers: HashSet<&PeerId> = self
+            .outgoing
+            .values()
+            .filter(|connection| connection.lookup_established_at.is_none())
+            .map(|connection| &connection.peer_id)
+            .collect();
+        peers.len()
     }
 
     /// Dials started toward the target since start.
@@ -232,17 +278,22 @@ impl OutgoingPeerTarget {
         }
     }
 
-    /// Record an established connection. An outgoing one counts toward the
-    /// target and holds the network group of its address, unless it goes to
-    /// a dial_peer, and verifies the peer in the book. A dial the target
-    /// started is no longer pending.
+    /// Record an established connection. An outgoing one verifies the peer in
+    /// the book. One the target, the reconnector or a seed dialed counts
+    /// toward the target and holds the network group of its address, unless
+    /// it goes to a dial_peer; so does one to an anchor while the target has
+    /// room and the group is free. Any other outgoing connection is
+    /// Kademlia's lookup. A dial the target started is no longer pending.
+    /// Returns whether the connection is a lookup.
     pub(crate) fn record_connection_established(
         &mut self,
         peer_id: PeerId,
         connection_id: ConnectionId,
         endpoint: &ConnectedPoint,
-    ) {
+    ) -> bool {
         let target_dial = self.pending.remove(&connection_id);
+        let seed_dial = self.seed_dials.remove(&connection_id);
+        let mut is_lookup = false;
         if let ConnectedPoint::Dialer { address, .. } = endpoint {
             if self
                 .dial_peer_addresses
@@ -251,29 +302,73 @@ impl OutgoingPeerTarget {
                 self.dial_peer_ids.insert(peer_id);
                 self.known_peers.remove(&peer_id);
             }
-            let group = if self.dial_peer_ids.contains(&peer_id) {
-                None
-            } else {
-                network_group(address)
-            };
+            let dial_peer = self.dial_peer_ids.contains(&peer_id);
+            let group = network_group(address);
+            let anchor = !dial_peer && self.takes_anchor(&peer_id, group);
             if let Some(known_peer) = self.known_peers.get_mut(&peer_id) {
                 known_peer.verified = true;
+                if anchor {
+                    known_peer.anchor = false;
+                }
             }
+            let lookup = !(dial_peer || anchor || seed_dial || target_dial.is_some());
             self.outgoing.insert(
                 connection_id,
                 OutgoingConnection {
                     peer_id,
-                    group,
+                    group: group.filter(|_| !dial_peer && !lookup),
                     target_established_at: target_dial.map(|_| Instant::now()),
+                    lookup_established_at: lookup.then(Instant::now),
                 },
             );
+            is_lookup = lookup;
         }
+        is_lookup
+    }
+
+    /// Whether the target takes a connection it did not dial to `peer_id` as
+    /// its own: an anchor from the saved book, while the target has room and
+    /// the anchor's group is free.
+    fn takes_anchor(&self, peer_id: &PeerId, group: Option<NetworkGroup>) -> bool {
+        self.known_peers
+            .get(peer_id)
+            .is_some_and(|known_peer| known_peer.anchor)
+            && group.is_some_and(|group| !self.held_groups().contains(&group))
+            && self.kept_peer_count() < self.target
+    }
+
+    /// Record that the node dialed an address a DNS or Nostr seed returned.
+    pub(crate) fn record_seed_dial_started(&mut self, connection_id: ConnectionId) {
+        self.seed_dials.insert(connection_id);
+    }
+
+    /// The lookup connections to close: those open `LOOKUP_SETTLE_SECS` while
+    /// no Kademlia query runs, and those open `KADEMLIA_QUERY_TIMEOUT_SECS`
+    /// whatever runs. A connection is listed until it is recorded closing.
+    pub(crate) fn finished_lookups(&self, queries_running: bool) -> Vec<ConnectionId> {
+        let query_timeout = Duration::from_secs(KADEMLIA_QUERY_TIMEOUT_SECS);
+        self.outgoing
+            .iter()
+            .filter(|(connection_id, _)| !self.closing_lookups.contains(connection_id))
+            .filter_map(|(connection_id, connection)| {
+                let open = connection.lookup_established_at?.elapsed();
+                (open >= query_timeout || (!queries_running && open >= self.lookup_settle))
+                    .then_some(*connection_id)
+            })
+            .collect()
+    }
+
+    /// Record that the node asked the swarm to close a finished lookup.
+    pub(crate) fn record_lookup_closing(&mut self, connection_id: ConnectionId) {
+        self.closing_lookups.insert(connection_id);
     }
 
     /// Record a closed connection. One the target dialed counts as a failed
     /// dial when it closed within STABLE_CONNECTION_SECS, and resets the
-    /// peer's backoff when it lasted.
-    pub(crate) fn record_connection_closed(&mut self, connection_id: ConnectionId) {
+    /// peer's backoff when it lasted. Returns whether the node closed it as a
+    /// finished lookup.
+    pub(crate) fn record_connection_closed(&mut self, connection_id: ConnectionId) -> bool {
+        let closed_lookup = self.closing_lookups.remove(&connection_id);
         let target_connection = self.outgoing.remove(&connection_id).and_then(|connection| {
             connection
                 .target_established_at
@@ -288,11 +383,13 @@ impl OutgoingPeerTarget {
             Some((peer_id, _)) => self.reset_backoff(&peer_id),
             None => {}
         }
+        closed_lookup
     }
 
     /// Record a failed outgoing connection. Backs off only when it is one of
     /// the target's dials; other dials are ignored.
     pub(crate) fn record_connection_failure(&mut self, connection_id: ConnectionId) {
+        self.seed_dials.remove(&connection_id);
         if let Some(dial) = self.pending.remove(&connection_id) {
             self.record_failure(&dial.peer_id);
         }
@@ -339,13 +436,13 @@ impl OutgoingPeerTarget {
         Some(dial)
     }
 
-    /// Whether another dial fits: the outgoing peers and every outgoing dial
-    /// in flight stay below the target and below max_established_outgoing,
+    /// Whether another dial fits: the outgoing peers other than lookups and
+    /// every outgoing dial in flight stay below the target, all outgoing
+    /// connections and dials below max_established_outgoing,
     /// and the target's own dials in flight below half of
     /// max_pending_outgoing.
     fn has_room(&self, counts: OutgoingCounts) -> bool {
-        let outgoing_peers = self.outgoing_peer_count() as usize;
-        outgoing_peers + (counts.pending as usize) < self.target
+        self.kept_peer_count() + (counts.pending as usize) < self.target
             && counts.established.saturating_add(counts.pending) < self.max_established_outgoing
             && counts.pending < self.max_pending_outgoing
             && self.pending.len() < (self.max_pending_outgoing / 2) as usize
@@ -574,6 +671,13 @@ impl OutgoingPeerTarget {
         self.known_peer_limit = known_peer_limit;
         self
     }
+
+    /// Set a shorter settle time for lookups, for tests on real connections.
+    #[cfg(test)]
+    pub(crate) fn with_lookup_settle(mut self, lookup_settle: Duration) -> Self {
+        self.lookup_settle = lookup_settle;
+        self
+    }
 }
 
 /// The wait before the next dial after `failures` failures in a row.
@@ -627,6 +731,19 @@ mod tests {
         }
     }
 
+    /// Record an outgoing connection the node keeps: one a seed dialed,
+    /// which counts and holds its group like the target's own.
+    fn connect_kept(
+        target: &mut OutgoingPeerTarget,
+        peer_id: PeerId,
+        connection: usize,
+        address: &str,
+    ) {
+        let connection_id = ConnectionId::new_unchecked(connection);
+        target.record_seed_dial_started(connection_id);
+        target.record_connection_established(peer_id, connection_id, &dialer(address));
+    }
+
     #[tokio::test(start_paused = true)]
     async fn test_dials_a_known_peer_below_the_target() {
         let config = NetworkConfig {
@@ -654,16 +771,8 @@ mod tests {
             ..NetworkConfig::default()
         };
         let mut target = OutgoingPeerTarget::new(&config, BlockedIps::default());
-        target.record_connection_established(
-            PeerId::random(),
-            ConnectionId::new_unchecked(1),
-            &dialer("/ip4/5.6.7.8/tcp/6884"),
-        );
-        target.record_connection_established(
-            PeerId::random(),
-            ConnectionId::new_unchecked(2),
-            &dialer("/ip4/9.10.11.12/tcp/6884"),
-        );
+        connect_kept(&mut target, PeerId::random(), 1, "/ip4/5.6.7.8/tcp/6884");
+        connect_kept(&mut target, PeerId::random(), 2, "/ip4/9.10.11.12/tcp/6884");
         let peer = PeerId::random();
         target.learn_addresses(peer, [&"/ip4/1.2.3.4/tcp/6884".parse().unwrap()]);
 
@@ -786,10 +895,11 @@ mod tests {
     async fn test_never_dials_a_second_peer_in_the_same_ipv6_slash_32() {
         let config = NetworkConfig::default();
         let mut target = OutgoingPeerTarget::new(&config, BlockedIps::default());
-        target.record_connection_established(
+        connect_kept(
+            &mut target,
             PeerId::random(),
-            ConnectionId::new_unchecked(1),
-            &dialer("/ip6/2001:4860:4860::8888/tcp/6884"),
+            1,
+            "/ip6/2001:4860:4860::8888/tcp/6884",
         );
         target.learn_addresses(
             PeerId::random(),
@@ -1065,11 +1175,7 @@ mod tests {
         let heard = PeerId::random();
         target.learn_addresses(held, [&"/ip4/1.2.3.4/tcp/6884".parse().unwrap()]);
         target.learn_addresses(heard, [&"/ip4/5.6.7.8/tcp/6884".parse().unwrap()]);
-        target.record_connection_established(
-            held,
-            ConnectionId::new_unchecked(1),
-            &dialer("/ip4/1.2.3.4/tcp/6884"),
-        );
+        connect_kept(&mut target, held, 1, "/ip4/1.2.3.4/tcp/6884");
 
         let mut book = target.saved_book();
         assert_eq!(book.anchors, vec![held.to_string()]);
@@ -1143,6 +1249,173 @@ mod tests {
             )
             .unwrap();
         assert_ne!(second.peer_id, anchor);
+    }
+
+    fn listener() -> ConnectedPoint {
+        ConnectedPoint::Listener {
+            local_addr: "/ip4/0.0.0.0/tcp/6884".parse().unwrap(),
+            send_back_addr: "/ip4/5.6.7.8/tcp/51234".parse().unwrap(),
+        }
+    }
+
+    /// An outgoing connection no dial of this node opened is Kademlia's
+    /// lookup. Once it has settled it closes when no query runs, and the
+    /// close is reported as the node's own.
+    #[tokio::test(start_paused = true)]
+    async fn test_a_lookup_connection_closes_after_its_query() {
+        let mut target = OutgoingPeerTarget::new(&NetworkConfig::default(), BlockedIps::default());
+        let lookup = ConnectionId::new_unchecked(1);
+        target.record_connection_established(
+            PeerId::random(),
+            lookup,
+            &dialer("/ip4/1.2.3.4/tcp/6884"),
+        );
+
+        advance(Duration::from_secs(LOOKUP_SETTLE_SECS - 1)).await;
+        assert!(target.finished_lookups(false).is_empty(), "still settling");
+        advance(Duration::from_secs(1)).await;
+        assert!(
+            target.finished_lookups(true).is_empty(),
+            "a query still runs"
+        );
+        assert_eq!(target.finished_lookups(false), vec![lookup]);
+
+        target.record_lookup_closing(lookup);
+        assert!(target.finished_lookups(false).is_empty(), "asked once");
+        assert!(target.record_connection_closed(lookup));
+        assert_eq!(target.outgoing_peer_count(), 0);
+    }
+
+    /// No query runs longer than KADEMLIA_QUERY_TIMEOUT_SECS, so a lookup
+    /// closes then even while queries keep running.
+    #[tokio::test(start_paused = true)]
+    async fn test_a_lookup_connection_closes_after_the_query_timeout() {
+        let mut target = OutgoingPeerTarget::new(&NetworkConfig::default(), BlockedIps::default());
+        let lookup = ConnectionId::new_unchecked(1);
+        target.record_connection_established(
+            PeerId::random(),
+            lookup,
+            &dialer("/ip4/1.2.3.4/tcp/6884"),
+        );
+
+        advance(Duration::from_secs(KADEMLIA_QUERY_TIMEOUT_SECS - 1)).await;
+        assert!(target.finished_lookups(true).is_empty());
+        advance(Duration::from_secs(1)).await;
+        assert_eq!(target.finished_lookups(true), vec![lookup]);
+    }
+
+    /// A lookup neither fills the target nor holds its group: the target
+    /// still dials a peer in the lookup's /16.
+    #[tokio::test(start_paused = true)]
+    async fn test_a_lookup_connection_neither_counts_nor_holds_a_group() {
+        let config = NetworkConfig {
+            target_outgoing_peers: 1,
+            ..NetworkConfig::default()
+        };
+        let mut target = OutgoingPeerTarget::new(&config, BlockedIps::default());
+        let lookup_peer = PeerId::random();
+        target.record_connection_established(
+            lookup_peer,
+            ConnectionId::new_unchecked(1),
+            &dialer("/ip4/1.2.3.4/tcp/6884"),
+        );
+        let same_group = PeerId::random();
+        target.learn_addresses(same_group, [&"/ip4/1.2.9.9/tcp/6884".parse().unwrap()]);
+
+        assert_eq!(target.outgoing_peer_count(), 1);
+        let dial = target.next_dial(OutgoingCounts::default(), |peer| *peer == lookup_peer);
+        assert_eq!(dial.map(|dial| dial.peer_id), Some(same_group));
+        assert!(target.saved_book().anchors.is_empty());
+    }
+
+    /// The target's own peers, inbound peers, dial_peers and seeds' peers
+    /// are never closed as lookups; a close the node did not ask for is not
+    /// reported as its own.
+    #[tokio::test(start_paused = true)]
+    async fn test_kept_and_inbound_connections_never_close_as_lookups() {
+        let config = NetworkConfig {
+            dial_peers: vec!["/ip4/9.9.9.9/tcp/6884".to_string()],
+            ..NetworkConfig::default()
+        };
+        let mut target = OutgoingPeerTarget::new(&config, BlockedIps::default());
+        let target_peer = PeerId::random();
+        target.learn_addresses(target_peer, [&"/ip4/1.2.3.4/tcp/6884".parse().unwrap()]);
+        let dial = target
+            .next_dial(OutgoingCounts::default(), |_| false)
+            .unwrap();
+        target.record_dial_started(ConnectionId::new_unchecked(1), dial);
+        target.record_connection_established(
+            target_peer,
+            ConnectionId::new_unchecked(1),
+            &dialer("/ip4/1.2.3.4/tcp/6884"),
+        );
+        target.record_connection_established(
+            PeerId::random(),
+            ConnectionId::new_unchecked(2),
+            &listener(),
+        );
+        target.record_connection_established(
+            PeerId::random(),
+            ConnectionId::new_unchecked(3),
+            &dialer("/ip4/9.9.9.9/tcp/6884"),
+        );
+        target.record_seed_dial_started(ConnectionId::new_unchecked(4));
+        target.record_connection_established(
+            PeerId::random(),
+            ConnectionId::new_unchecked(4),
+            &dialer("/ip4/5.6.7.8/tcp/6884"),
+        );
+
+        advance(Duration::from_secs(KADEMLIA_QUERY_TIMEOUT_SECS * 10)).await;
+        assert!(target.finished_lookups(false).is_empty());
+        assert_eq!(target.kept_peer_count(), 3, "target, dial_peer and seed");
+        for connection in 1..=4 {
+            assert!(!target.record_connection_closed(ConnectionId::new_unchecked(connection)));
+        }
+    }
+
+    /// A connection Kademlia opens to an anchor before the target dials it
+    /// is the target's: it holds the anchor's group and is never closed. An
+    /// anchor in a group the target already holds is a lookup like any
+    /// other.
+    #[tokio::test(start_paused = true)]
+    async fn test_a_connection_kademlia_opens_to_an_anchor_stays() {
+        let anchor = PeerId::random();
+        let crowded_anchor = PeerId::random();
+        let saved = |peer_id: PeerId, address: &str| SavedPeer {
+            peer_id: peer_id.to_string(),
+            addresses: vec![address.into()],
+            verified: true,
+        };
+        let mut target = OutgoingPeerTarget::new(&NetworkConfig::default(), BlockedIps::default());
+        target.load_book(SavedBook {
+            version: SAVED_BOOK_VERSION,
+            peers: vec![
+                saved(anchor, "/ip4/1.2.3.4/tcp/6884"),
+                saved(crowded_anchor, "/ip4/1.2.9.9/tcp/6884"),
+            ],
+            anchors: vec![anchor.to_string(), crowded_anchor.to_string()],
+        });
+
+        target.record_connection_established(
+            anchor,
+            ConnectionId::new_unchecked(1),
+            &dialer("/ip4/1.2.3.4/tcp/6884"),
+        );
+        target.record_connection_established(
+            crowded_anchor,
+            ConnectionId::new_unchecked(2),
+            &dialer("/ip4/1.2.9.9/tcp/6884"),
+        );
+
+        advance(Duration::from_secs(LOOKUP_SETTLE_SECS)).await;
+        assert_eq!(
+            target.finished_lookups(false),
+            vec![ConnectionId::new_unchecked(2)]
+        );
+        assert_eq!(target.kept_peer_count(), 1);
+        assert!(!target.known_peers[&anchor].anchor, "taken once");
+        assert_eq!(target.saved_book().anchors, vec![anchor.to_string()]);
     }
 
     /// A book from another format version is ignored, not misread.

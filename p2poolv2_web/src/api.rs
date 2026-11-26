@@ -130,13 +130,6 @@ pub struct Site {
     pub network: String,
     /// For the header badge, e.g. `chipnet`.
     pub badge: String,
-    /// The `--network` spelling `p2poolv2_cli bch-share-address` accepts,
-    /// for example `chipnet`. Absent on a node mining the Bitcoin chain
-    /// (no share address prefix, so no generator to show) and on nodes
-    /// older than this field, whose help page waits for it the way it
-    /// waits for the ports.
-    #[serde(default)]
-    pub cli_network: Option<String>,
     /// The port the node's stratum server listens on, which the help page
     /// prints in the URL a miner points at. Defaults while `/network` has
     /// not answered yet or an older node does not send it.
@@ -146,14 +139,6 @@ pub struct Site {
     /// the node runs without SV2; the help page then prints a placeholder.
     #[serde(default)]
     pub sv2_port: Option<u16>,
-}
-
-/// `/share_address`: the share chain address a payout CashAddr stands for
-/// on the node's own network, the same string the CLI command prints.
-#[derive(Clone, Debug, Deserialize, PartialEq)]
-pub struct ShareAddressResponse {
-    /// The generated share chain address, e.g. `p2pool:q...`.
-    pub address: String,
 }
 
 /// `/chain_info`.
@@ -180,9 +165,12 @@ pub struct SharechainSeries {
     pub uncles: Vec<SharechainPoint>,
     pub weak: Vec<SharechainPoint>,
     /// The opt-in active-miner counts; a sample taken before the metric
-    /// was available carries no point.
+    /// was available carries no point. Default empty, so the chart still
+    /// loads from a node older than the counts.
+    #[serde(default)]
     pub miners: Vec<SharechainPoint>,
     /// The opt-in active-worker counts, sampled the same way.
+    #[serde(default)]
     pub workers: Vec<SharechainPoint>,
 }
 

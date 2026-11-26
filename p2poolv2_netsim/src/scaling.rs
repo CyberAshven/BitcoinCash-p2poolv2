@@ -10,7 +10,9 @@
 //! stays within today's stale rate at 10-second shares, the operating point
 //! of upstream's stated limit of about 1,000 miners.
 //!
-//! None of the ideas is built. Each is the engine's model of it
+//! None of the ideas was built when the study ran; the node has since built
+//! weak shares, forwarding after the header check and relay without payouts.
+//! Each is the engine's model of it
 //! (`engine::Forwarding`, `engine::WeakShareLoad`, `Parameters::max_uncles`)
 //! or a scenario input that already existed (`ShareRelay::WithoutPayouts`,
 //! `peers_per_node`).

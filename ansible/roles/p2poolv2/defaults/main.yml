@@ -45,9 +45,9 @@ p2poolv2_group: "p2poolv2"
 
 # --- Network config ---
 p2poolv2_p2p_listen_address: "/ip4/0.0.0.0/tcp/6884"
-# Share chain peers, as "/ip4/<address>/tcp/<port>". Bitcoin Cash has no DNS
-# seeds yet (dns_seed is always off on chain = "bitcoin-cash"), so a node
-# joining a running share chain needs at least one peer here.
+# Share chain peers, as "/ip4/<address>/tcp/<port>". Until a Bitcoin Cash
+# network has DNS seeds, a node joining a running share chain needs at least
+# one peer here, or one found through Nostr.
 p2poolv2_dial_peers: []
 p2poolv2_blocked_ips: []
 p2poolv2_max_pending_incoming: 10
