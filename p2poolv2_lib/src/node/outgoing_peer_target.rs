@@ -176,8 +176,9 @@ pub(crate) struct OutgoingPeerTarget {
     lookup_settle: Duration,
     /// Dials started toward the target since start, for P2P health metrics.
     dials_attempted_total: u64,
-    /// Whether the node dials through Tor (`tor_proxy`), so onion addresses
-    /// are worth keeping and dialing.
+    /// Whether the node dials through Tor (`tor_proxy`, or Tor's default
+    /// SOCKS port once Tor's control port made its onion service), so onion
+    /// addresses are worth keeping and dialing.
     onion_reachable: bool,
 }
 
@@ -239,6 +240,13 @@ impl OutgoingPeerTarget {
     /// Whether the node dials through Tor, so onion addresses are reachable.
     pub(crate) fn onion_reachable(&self) -> bool {
         self.onion_reachable
+    }
+
+    /// The node dials through Tor from now on: without a `tor_proxy`, Tor's
+    /// control port has made its onion service and Tor's default SOCKS port
+    /// is used. Onion addresses learned before were not kept.
+    pub(crate) fn set_onion_reachable(&mut self) {
+        self.onion_reachable = true;
     }
 
     /// Peers with at least one established outgoing connection, lookups

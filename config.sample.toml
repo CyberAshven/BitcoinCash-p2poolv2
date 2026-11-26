@@ -12,13 +12,26 @@ listen_address = "/ip4/0.0.0.0/tcp/6884"
 # listed here are ever dialed, never ones learned from peers.
 # dial_peers = ["/ip4/203.0.113.1/tcp/6884", "/dns4/pool.example.com/tcp/6884"]
 # A Tor SOCKS5 proxy for dialing onion peers, "/onion3/<address>:<port>",
-# as Bitcoin Cash Node's -onion. Unset, onion addresses are ignored.
+# as Bitcoin Cash Node's -onion. Unset, 127.0.0.1:9050 is used once Tor's
+# control port has made this node an onion service (listen_onion), and
+# until then onion addresses are ignored.
 # tor_proxy = "127.0.0.1:9050"
+# Make this node an onion service through Tor's control port, as Bitcoin
+# Cash Node's -listenonion: on by default, and quiet (debug logs only) while
+# no Tor answers at tor_control. Tor needs "ControlPort 9051" and
+# "CookieAuthentication 1" in its torrc, with the cookie file readable by
+# the node's user, or a HashedControlPassword and tor_password. Peers with
+# Tor reach the node at /onion3/<address>:6884; the key is kept in
+# onion_v3_private_key beside the store, so the address survives restarts.
+# listen_onion = true
+# tor_control = "127.0.0.1:9051"
+# tor_password = "the password HashedControlPassword was made from"
 # Announce this node only as an onion service: peers learn only an /onion3
-# external_address. The node then takes no address from what peers observe,
-# never makes a listen address its external one, sends no listen addresses
-# through Identify and does not announce on Nostr; an IP external_address
-# stops it at start. It only announces: its dials to IP addresses, from
+# external_address, or the one listen_onion makes. The node then takes no
+# address from what peers observe, never makes a listen address its
+# external one, sends no listen addresses through Identify and does not
+# announce on Nostr; an IP external_address stops it at start. It only
+# announces: its dials to IP addresses, from
 # dial_peers, the outgoing target or Kademlia, still go out directly and
 # show those peers its IP.
 # onion_only = false

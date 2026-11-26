@@ -1391,20 +1391,42 @@ pub struct NetworkConfig {
     pub dns_seed: bool,
     /// A Tor SOCKS5 proxy, `host:port` (Tor's default is `127.0.0.1:9050`),
     /// through which the node dials `/onion3` peers, as Bitcoin Cash Node's
-    /// `-onion` does. Unset, the node neither dials nor learns onion
+    /// `-onion` does. Unset, the node uses `127.0.0.1:9050` once Tor's
+    /// control port has made its onion service (`listen_onion`), as Bitcoin
+    /// Cash Node does, and until then neither dials nor learns onion
     /// addresses. Other addresses are dialed directly either way.
     #[serde(default)]
     pub tor_proxy: Option<String>,
     /// Announce this node only as a Tor onion service, as Bitcoin Cash
     /// Node's `-discover=0` with an onion `-externalip`: peers learn only an
-    /// `/onion3` `external_address`. The node takes no address from what
-    /// peers observe, never makes a listen address its external one, sends
-    /// no listen addresses through Identify, and does not announce on Nostr,
-    /// whose relays it reaches directly. A non-onion `external_address`
-    /// stops it at start. Its own dials to IP addresses still go out
-    /// directly. Default false.
+    /// `/onion3` `external_address`, or the service `listen_onion` makes.
+    /// The node takes no address from what peers observe, never makes a
+    /// listen address its external one, sends no listen addresses through
+    /// Identify, and does not announce on Nostr, whose relays it reaches
+    /// directly. A non-onion `external_address` stops it at start. Its own
+    /// dials to IP addresses still go out directly. Default false.
     #[serde(default)]
     pub onion_only: bool,
+    /// Make this node a Tor onion service through Tor's control port
+    /// (`tor_control`), as Bitcoin Cash Node's `-listenonion` does, so
+    /// peers with Tor reach it at `/onion3/<address>:6884`. The service
+    /// forwards to the node's `listen_address`, and its key is kept in
+    /// `onion_v3_private_key` beside the store, so the address survives
+    /// restarts. Off when the node does not listen or its
+    /// `external_address` is an onion address already. While no Tor answers
+    /// the node tries again now and then, logging at debug only. Default
+    /// true.
+    #[serde(default = "default_listen_onion")]
+    pub listen_onion: bool,
+    /// Tor's control port, `host:port`, as Bitcoin Cash Node's
+    /// `-torcontrol`. Default [`DEFAULT_TOR_CONTROL`].
+    #[serde(default = "default_tor_control")]
+    pub tor_control: String,
+    /// The password for Tor's control port (`HASHEDPASSWORD`), as Bitcoin
+    /// Cash Node's `-torpassword`. Unset, the node authenticates with no
+    /// password or with Tor's cookie file (`SAFECOOKIE`).
+    #[serde(default)]
+    pub tor_password: Option<String>,
     /// DNS seed hostnames that replace the built-in ones, so a new seed can
     /// be used before a release names it. Their A/AAAA records list
     /// long-running nodes on the network's seed port (6884 on Bitcoin Cash),
@@ -1448,6 +1470,18 @@ fn default_dns_seed() -> bool {
     true
 }
 
+fn default_listen_onion() -> bool {
+    true
+}
+
+/// Tor's control port where Tor runs with its defaults, as Bitcoin Cash
+/// Node's `-torcontrol` default.
+pub const DEFAULT_TOR_CONTROL: &str = "127.0.0.1:9051";
+
+fn default_tor_control() -> String {
+    DEFAULT_TOR_CONTROL.to_string()
+}
+
 /// Public Nostr relays a node uses by default, run by different operators.
 /// Each answered an announcement lookup when they were picked (2026-11-17).
 pub const DEFAULT_NOSTR_RELAYS: [&str; 6] = [
@@ -1475,6 +1509,10 @@ pub const DEFAULT_NODE_KEY_FILE: &str = "p2p_node_key";
 
 /// File name of the saved book of known peers, beside the store.
 pub const DEFAULT_PEER_BOOK_FILE: &str = "p2p_peers.json";
+
+/// File name of the onion service's key, beside the store, as Bitcoin Cash
+/// Node names it.
+pub const DEFAULT_ONION_KEY_FILE: &str = "onion_v3_private_key";
 
 impl NetworkConfig {
     /// Where this node keeps its libp2p identity: `node_key_path`, else
@@ -1506,6 +1544,22 @@ impl NetworkConfig {
                 .parent()
                 .unwrap_or_else(|| std::path::Path::new("."))
                 .join(DEFAULT_PEER_BOOK_FILE),
+        )
+    }
+
+    /// Where this node keeps its onion service's key (`listen_onion`):
+    /// [`DEFAULT_ONION_KEY_FILE`] in the directory holding `store_path`.
+    /// `None` with `ephemeral_node_key`, whose onion address is new on every
+    /// start as its peer ID is.
+    pub fn onion_key_file(&self, store_path: &str) -> Option<std::path::PathBuf> {
+        if self.ephemeral_node_key {
+            return None;
+        }
+        Some(
+            std::path::Path::new(store_path)
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new("."))
+                .join(DEFAULT_ONION_KEY_FILE),
         )
     }
 }
@@ -1544,6 +1598,9 @@ impl Default for NetworkConfig {
             dns_seed: true,
             tor_proxy: None,
             onion_only: false,
+            listen_onion: true,
+            tor_control: default_tor_control(),
+            tor_password: None,
             dns_seed_hosts: vec![],
             node_key_path: None,
             ephemeral_node_key: false,

@@ -105,6 +105,15 @@ format and genesis re-pin.
   `/onion3/<address>:6884`. With `[network] onion_only`, the node announces
   only that address: no address from peers' observations or its listen
   addresses, no listen addresses in Identify, and no Nostr announcement.
+- Onion services through Tor's control port, on by default as Bitcoin Cash
+  Node's `-listenonion`: with Tor running, the node makes itself
+  `/onion3/<address>:6884` through `[network] tor_control`
+  (`127.0.0.1:9051`), authenticating with no password, Tor's cookie or
+  `tor_password`, keeps the key in `onion_v3_private_key` beside the store,
+  and advertises the address through Identify and Nostr while Tor keeps the
+  service. Without a `tor_proxy` it then dials onion peers through
+  `127.0.0.1:9050`. `listen_onion = false` turns it off; with no Tor running
+  the node retries quietly.
 - `/metrics` counts the connections the connection limits refused,
   incoming and outgoing (`p2p_connections_refused_total`); the node had
   ignored refused incoming connections.

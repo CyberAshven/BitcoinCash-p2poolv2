@@ -42,7 +42,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio::time::timeout;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
@@ -62,6 +62,10 @@ pub(crate) const ANNOUNCEMENT_LIFETIME: Duration = Duration::from_secs(3 * 60 * 
 
 /// How often a node publishes its announcement again.
 pub(crate) const ANNOUNCE_EVERY: Duration = Duration::from_secs(60 * 60);
+
+/// The shortest time between two announcements, so an onion service that
+/// comes and goes does not flood the relays.
+const ANNOUNCE_GAP: Duration = Duration::from_secs(60);
 
 /// How often a node short of peers asks the relays.
 pub(crate) const LOOKUP_EVERY: Duration = Duration::from_secs(10 * 60);
@@ -492,6 +496,9 @@ pub(crate) struct NostrSeeds {
     pub(crate) tag: String,
     pub(crate) keys: Keypair,
     pub(crate) own_peer: PeerId,
+    /// Whether this node announces at all: `nostr_announce` is on and it is
+    /// not `onion_only`.
+    pub(crate) announces: bool,
     /// This node's addresses, each ending in its peer ID; empty when it does
     /// not announce.
     pub(crate) announce: Vec<Multiaddr>,
@@ -505,6 +512,23 @@ pub(crate) struct NostrSeeds {
 impl NostrSeeds {
     fn accepts(&self, address: &Multiaddr) -> bool {
         self.accept_local || address_filter::is_routable_multiaddr(address)
+    }
+
+    /// What this node announces: its `external_address`, then the
+    /// addresses it gained while it runs (`run_time`), each ending in its
+    /// peer ID; nothing when it does not announce.
+    pub(crate) fn addresses(&self, run_time: &[Multiaddr]) -> Vec<Multiaddr> {
+        if !self.announces {
+            return Vec::new();
+        }
+        let mut addresses = self.announce.clone();
+        for address in run_time {
+            let address = with_peer(address.clone(), self.own_peer);
+            if !addresses.contains(&address) {
+                addresses.push(address);
+            }
+        }
+        addresses
     }
 
     /// The newest valid announcement per peer from `events`, newest first,
@@ -586,7 +610,8 @@ pub(crate) fn from_config(
             "Not announcing on Nostr: an onion_only node reaches the relays directly, which would show them its IP beside its onion address"
         );
     }
-    let announce = if config.network.nostr_announce && !config.network.onion_only {
+    let announces = config.network.nostr_announce && !config.network.onion_only;
+    let announce = if announces {
         config
             .network
             .external_address
@@ -603,6 +628,7 @@ pub(crate) fn from_config(
         tag: announcement_tag(&network_name, network_protocol),
         keys: nostr_keys(node_key)?,
         own_peer,
+        announces,
         announce,
         accept_local: regtest,
         pow_bits: MIN_POW_BITS,
@@ -643,19 +669,39 @@ pub(crate) fn spawn_lookup<C: Send + 'static>(
 }
 
 /// Spawns a task that publishes this node's announcement on every relay now
-/// and every [`ANNOUNCE_EVERY`] after.
-pub(crate) fn spawn_announcer(seeds: Arc<NostrSeeds>) -> tokio::task::JoinHandle<()> {
+/// and every [`ANNOUNCE_EVERY`] after, and again when `run_time`, the
+/// addresses the node gains while it runs (its onion service's), changes.
+/// It publishes only while it has an address, and at most once every
+/// [`ANNOUNCE_GAP`].
+pub(crate) fn spawn_announcer(
+    seeds: Arc<NostrSeeds>,
+    mut run_time: watch::Receiver<Vec<Multiaddr>>,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut every = tokio::time::interval(ANNOUNCE_EVERY);
+        let mut watching = true;
         loop {
-            every.tick().await;
+            tokio::select! {
+                _ = every.tick() => {}
+                changed = run_time.changed(), if watching => {
+                    // The node has stopped: its addresses change no more.
+                    if changed.is_err() {
+                        watching = false;
+                        continue;
+                    }
+                }
+            }
+            let addresses = seeds.addresses(&run_time.borrow_and_update());
+            if addresses.is_empty() {
+                continue;
+            }
             let event = {
                 let seeds = Arc::clone(&seeds);
                 match tokio::task::spawn_blocking(move || {
                     sign_announcement(
                         &seeds.keys,
                         &seeds.tag,
-                        &seeds.announce,
+                        &addresses,
                         unix_now(),
                         seeds.pow_bits,
                     )
@@ -678,6 +724,7 @@ pub(crate) fn spawn_announcer(seeds: Arc<NostrSeeds>) -> tokio::task::JoinHandle
                 "Announced this node on {accepted} of {} Nostr relays",
                 seeds.relays.len()
             );
+            tokio::time::sleep(ANNOUNCE_GAP).await;
         }
     })
 }

@@ -38,6 +38,7 @@ fn seeds(own: &libp2p::identity::Keypair, relays: Vec<String>, accept_local: boo
         tag: TAG.into(),
         keys: nostr_keys(own).unwrap(),
         own_peer: own.public().to_peer_id(),
+        announces: false,
         announce: vec![],
         accept_local,
         pow_bits: TEST_POW_BITS,
@@ -315,6 +316,48 @@ async fn an_announcement_goes_through_a_relay() {
         reader.pick_dials(events, &HashSet::new(), now),
         vec![address_of(&announcer, "/ip4/1.2.3.21/tcp/6890")]
     );
+}
+
+/// A node with no `external_address` announces nothing until it gains an
+/// address while it runs, its onion service's, and then announces it,
+/// ending in its peer ID.
+#[tokio::test]
+async fn the_announcer_publishes_an_address_gained_at_run_time() {
+    let (url, relay) = spawn_relay().await;
+    let key = node_key();
+    let mut announcing = seeds(&key, vec![url], false);
+    announcing.announces = true;
+    let (run_time, receiver) = watch::channel(Vec::new());
+    let announcer = spawn_announcer(Arc::new(announcing), receiver);
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        relay.events.lock().unwrap().is_empty(),
+        "nothing to announce yet"
+    );
+
+    let onion = "/onion3/2gzyxa5ihm7nsggfxnu52rck2vv4rvmdlkiu3zzui5du4xyclen53wid:6884";
+    run_time.send_modify(|addresses| addresses.push(onion.parse().unwrap()));
+    let published = timeout(Duration::from_secs(10), async {
+        loop {
+            let first = relay.events.lock().unwrap().first().cloned();
+            if let Some(event) = first {
+                return event;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the onion address was never announced");
+    announcer.abort();
+
+    let announced: Vec<&str> = published
+        .tags
+        .iter()
+        .filter(|tag| tag.first().map(String::as_str) == Some("addr"))
+        .filter_map(|tag| tag.get(1).map(String::as_str))
+        .collect();
+    assert_eq!(announced, vec![address_of(&key, onion).to_string()]);
 }
 
 /// A relay that is down or never answers costs a lookup its timeout, not

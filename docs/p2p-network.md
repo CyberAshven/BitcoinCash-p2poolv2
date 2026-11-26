@@ -126,7 +126,37 @@ through Identify enters Kademlia and the target's book only on a node with a
 `tor_proxy`, so a node without Tor never tries one. An onion address's
 network group is the first 4 bits of its key, as in Bitcoin Cash Node.
 
-To be reachable as an onion service, set one up in the torrc, as Bitcoin
+A node on a computer running Tor makes itself an onion service through Tor's
+control port, as Bitcoin Cash Node's `-listenonion` does
+(`node/tor_control.rs`). `[network] listen_onion` is on by default; the node
+connects to `tor_control` (`127.0.0.1:9051` by default) and:
+
+1. asks `PROTOCOLINFO 1` and authenticates with no password, with Tor's
+   cookie file (`SAFECOOKIE`), or with `tor_password` (`HASHEDPASSWORD`);
+2. sends `ADD_ONION` with its key, or `NEW:ED25519-V3` the first time, and
+   `Port=6884,<listen address>`: peers dial port 6884, the default, whatever
+   the node listens on, and Tor forwards to the node's `listen_address`
+   (`127.0.0.1` for `0.0.0.0`);
+3. saves the new key as `ED25519-V3:<base64>` in `onion_v3_private_key`
+   beside the store, readable by its owner only, and sends it again on every
+   later start, so the onion address stays. With `ephemeral_node_key` Tor
+   keeps no key (`Flags=DiscardPK`) and the address is new on every start;
+4. keeps the control connection open, since Tor removes the service when it
+   closes. While it is up, Identify sends `/onion3/<address>:6884`, pushed to
+   connected peers at once, and the node announces it on Nostr. When the
+   connection closes the node stops advertising it and connects again after
+   1 second, 1.5 times longer each try, at most 10 minutes.
+
+Once the service is up, a node without a `tor_proxy` dials onion peers
+through `127.0.0.1:9050`, Tor's default SOCKS port, as Bitcoin Cash Node
+does. With no Tor running, or no control port, the node logs each try at
+debug only. Tor's defaults leave the control port off; a torrc with
+`ControlPort 9051` and `CookieAuthentication 1` turns it on, and the node's
+user must be able to read the cookie file (on Debian, be in the
+`debian-tor` group). `listen_onion` is off when the node does not listen or
+its `external_address` is an onion address already.
+
+An onion service can be set up by hand instead, in the torrc, as Bitcoin
 Cash Node's `doc/tor.md` describes:
 
 ```
@@ -143,7 +173,8 @@ the port tells nothing about the node. The second address is the node's
 `listen_address`; `127.0.0.1` reaches a node listening on `0.0.0.0`. A node
 that has an IP address as well announces both, and its peer ID links them.
 
-With `onion_only = true` the node announces only its onion address:
+With `onion_only = true` the node announces only its onion address, the one
+set up by hand or the one the control port made:
 
 - An `external_address` that is not `/onion3` stops it at start.
 - It takes no external address from what peers observe, and never makes a
@@ -195,9 +226,11 @@ of peers asks those relays. No single party holds the list: the relays have
 different operators, a node asks all of its relays, and a relay can drop an
 announcement but not forge one.
 
-- **Who announces:** a node with an `external_address` and `nostr_announce`
-  on (the default). It publishes that address, ending in its peer ID, every
-  hour.
+- **Who announces:** a node with an `external_address`, or an onion service
+  made through Tor's control port, and `nostr_announce` on (the default),
+  unless it is `onion_only`. It publishes those addresses, each ending in its
+  peer ID, every hour, and again, at most once a minute, when its onion
+  service comes up, or goes away while it has another address to announce.
 - **What:** one NIP-78 app-data event (kind 30078) per node and network,
   signed with a key derived from the node key. Its `d` tag is
   `p2poolv2/<chain>-<network>/<hash>`, the hash of the node's protocol

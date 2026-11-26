@@ -80,7 +80,7 @@ fn an_onion3_address_of_another_version_is_refused() {
 /// `MultiaddrNotSupported`.
 #[test]
 fn the_onion_transport_refuses_other_addresses() {
-    let mut transport = OnionTransport::new("127.0.0.1:9050".to_string());
+    let mut transport = OnionTransport::new(OnionProxy::new(Some("127.0.0.1:9050".to_string())));
     let address: Multiaddr = "/ip4/203.0.113.1/tcp/6884".parse().unwrap();
     let result = transport.dial(
         address.clone(),
@@ -92,4 +92,27 @@ fn the_onion_transport_refuses_other_addresses() {
     assert!(
         matches!(result, Err(TransportError::MultiaddrNotSupported(refused)) if refused == address)
     );
+}
+
+/// Without a proxy an onion address falls through like any other. Once the
+/// node sets Tor's default port, as after Tor's control port made its onion
+/// service, onion addresses are dialed, and a proxy once set stays.
+#[test]
+fn the_onion_transport_dials_once_a_proxy_is_set() {
+    let proxy = OnionProxy::new(None);
+    let mut transport = OnionTransport::new(proxy.clone());
+    let onion: Multiaddr = format!("/onion3/{TOR_PROJECT_ONION}:6884").parse().unwrap();
+    let opts = DialOpts {
+        role: Endpoint::Dialer,
+        port_use: PortUse::New,
+    };
+    assert!(matches!(
+        transport.dial(onion.clone(), opts),
+        Err(TransportError::MultiaddrNotSupported(_))
+    ));
+
+    assert!(proxy.set_if_unset("127.0.0.1:9050"));
+    assert!(transport.dial(onion, opts).is_ok());
+    assert!(!proxy.set_if_unset("127.0.0.1:9150"));
+    assert_eq!(proxy.get().as_deref(), Some("127.0.0.1:9050"));
 }

@@ -23,6 +23,7 @@ pub mod request_response_handler;
 pub mod request_sender;
 pub mod response_worker;
 mod running_lock;
+mod tor_control;
 pub mod validation_worker;
 mod weak_share_fetch;
 mod weak_share_fill;
@@ -112,6 +113,12 @@ pub enum SwarmSend<C> {
     /// Dial an address once, without reconnect tracking. Used for
     /// addresses returned by DNS seeds.
     Dial(Multiaddr),
+    /// Tor's control port made this node an onion service at this address
+    /// (`tor_control`): advertise it.
+    OnionServiceUp(Multiaddr),
+    /// The control connection closed and Tor removed the service at this
+    /// address: stop advertising it.
+    OnionServiceDown(Multiaddr),
 }
 
 use connection_tracker::{BlockedIps, ConnectionAction, ConnectionTracker, PING_FAILURE_THRESHOLD};
@@ -141,14 +148,15 @@ const IDLE_CONNECTION_TIMEOUT_SECS: u64 = 600;
 ///    connects to it. The blocklist check sits after DNS because only there
 ///    is the IP behind a hostname known.
 ///
-/// With `tor_proxy`, an `/onion3` address is dialed through that Tor SOCKS5
-/// proxy first (`onion::OnionTransport`); every other address goes on to the
-/// layers above unchanged.
+/// With an onion proxy (`tor_proxy`, or Tor's default SOCKS port once Tor's
+/// control port has made the node's onion service), an `/onion3` address is
+/// dialed through that Tor SOCKS5 proxy first (`onion::OnionTransport`);
+/// every other address goes on to the layers above unchanged.
 fn base_transport(
     tcp_config: TcpConfig,
     dial_peers: &[String],
     blocked_ips: BlockedIps,
-    tor_proxy: Option<&str>,
+    onion_proxy: Option<onion::OnionProxy>,
 ) -> Boxed<TcpStream> {
     let tcp_for_dns_transport = blocked_ip_filtered_tcp(tcp_config.clone(), blocked_ips.clone());
     let fallback_tcp = blocked_ip_filtered_tcp(tcp_config, blocked_ips);
@@ -159,8 +167,8 @@ fn base_transport(
         dial_filter::is_configured_or_not_dns(address, &configured_dns)
     })
     .boxed();
-    match tor_proxy {
-        Some(proxy) => onion::OnionTransport::new(proxy.to_string())
+    match onion_proxy {
+        Some(proxy) => onion::OnionTransport::new(proxy)
             .or_transport(clearnet)
             .map(|stream, _| stream.into_inner())
             .map_err(|error| error.into_inner())
@@ -240,6 +248,18 @@ struct Node {
     nostr_seeds: Option<Arc<nostr_seeds::NostrSeeds>>,
     /// The task publishing this node's announcement, while it runs.
     nostr_announcer: Option<tokio::task::JoinHandle<()>>,
+    /// The onion service `listen_onion` asks Tor's control port for, or None
+    /// (`tor_control`).
+    onion_service: Option<tor_control::OnionService>,
+    /// The task that keeps that service, while it runs. Dropping it closes
+    /// the control connection, and Tor removes the service.
+    onion_service_task: Option<tor_control::OnionServiceTask>,
+    /// Addresses the node gains while it runs, its onion service's, for the
+    /// Nostr announcer.
+    run_time_addresses: tokio::sync::watch::Sender<Vec<Multiaddr>>,
+    /// The proxy onion dials go through, or None when the node can never
+    /// dial onion peers: neither `tor_proxy` nor an onion service.
+    onion_proxy: Option<onion::OnionProxy>,
     /// Held while the node runs, so no other node starts on its key or its
     /// peer book (`running_lock`). None for a node with `ephemeral_node_key`,
     /// which keeps neither.
@@ -318,11 +338,18 @@ impl Node {
         }
         let blocked_ips = BlockedIps::new(blocked_ips);
 
+        // Onion peers are dialed through `tor_proxy`, or, as in Bitcoin Cash
+        // Node, through Tor's default SOCKS port once Tor's control port has
+        // made this node an onion service.
+        let onion_service = tor_control::OnionService::from_config(&config);
+        let onion_proxy = (config.network.tor_proxy.is_some() || onion_service.is_some())
+            .then(|| onion::OnionProxy::new(config.network.tor_proxy.clone()));
+
         let transport = base_transport(
             tcp_config,
             &config.network.dial_peers,
             blocked_ips.clone(),
-            config.network.tor_proxy.as_deref(),
+            onion_proxy.clone(),
         )
         .upgrade(libp2p::core::upgrade::Version::V1)
         .authenticate(noise_config)
@@ -470,6 +497,10 @@ impl Node {
             dns_seeds,
             nostr_seeds,
             nostr_announcer: None,
+            onion_service,
+            onion_service_task: None,
+            run_time_addresses: tokio::sync::watch::Sender::new(Vec::new()),
+            onion_proxy,
             _node_key_lock: node_key_lock,
             _peer_book_lock: peer_book_lock,
         };
@@ -478,25 +509,95 @@ impl Node {
     }
 
     /// Starts publishing this node's announcement on its Nostr relays, when
-    /// it has relays and something to announce. The actor calls this once,
-    /// inside the runtime.
+    /// it has relays and something to announce: its `external_address`, or
+    /// the onion service Tor's control port may make. The actor calls this
+    /// once, inside the runtime.
     pub(crate) fn start_nostr_announcer(&mut self) {
         if let Some(seeds) = &self.nostr_seeds
-            && !seeds.announce.is_empty()
+            && seeds.announces
+            && (!seeds.announce.is_empty() || self.onion_service.is_some())
             && self.nostr_announcer.is_none()
         {
+            let mut announced: Vec<String> =
+                seeds.announce.iter().map(ToString::to_string).collect();
+            if self.onion_service.is_some() {
+                announced.push("its onion service once Tor makes it".to_string());
+            }
             info!(
                 "Announcing {} on {} Nostr relays",
-                seeds
-                    .announce
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join(", "),
+                announced.join(", "),
                 seeds.relays.len()
             );
-            self.nostr_announcer = Some(nostr_seeds::spawn_announcer(Arc::clone(seeds)));
+            self.nostr_announcer = Some(nostr_seeds::spawn_announcer(
+                Arc::clone(seeds),
+                self.run_time_addresses.subscribe(),
+            ));
         }
+    }
+
+    /// Starts asking Tor's control port to make this node an onion service
+    /// (`listen_onion`), forwarding to its listen port once that is known.
+    /// The actor calls this at start, and the node again when a listen
+    /// address gives the port.
+    pub(crate) fn start_onion_service(&mut self) {
+        let (Some(service), Some(port)) = (&self.onion_service, self.listen_port) else {
+            return;
+        };
+        if self.onion_service_task.is_some() {
+            return;
+        }
+        let mut service = service.clone();
+        service.target.set_port(port);
+        info!(
+            "Asking Tor's control port at {} to make this node an onion service",
+            service.control
+        );
+        self.onion_service_task = Some(tor_control::spawn(service, self.swarm_tx.clone()));
+    }
+
+    /// Tor's control port made this node an onion service at `address`:
+    /// Identify sends it from now on, pushed to connected peers at once, and
+    /// the Nostr announcer publishes it. Without a `tor_proxy`, onion peers
+    /// are dialed through Tor's default SOCKS port from now on, as Bitcoin
+    /// Cash Node does once Tor's control port answers.
+    fn onion_service_up(&mut self, address: Multiaddr) {
+        info!("This node is reachable over Tor at {address}");
+        self.swarm.add_external_address(address.clone());
+        self.push_identify();
+        self.run_time_addresses.send_modify(|addresses| {
+            if !addresses.contains(&address) {
+                addresses.push(address);
+            }
+        });
+        if let Some(proxy) = &self.onion_proxy
+            && proxy.set_if_unset(tor_control::DEFAULT_SOCKS_PROXY)
+        {
+            info!(
+                "Dialing onion peers through Tor's SOCKS port at {}, as tor_proxy is not set",
+                tor_control::DEFAULT_SOCKS_PROXY
+            );
+            self.outgoing_peer_target.set_onion_reachable();
+        }
+    }
+
+    /// Tor removed this node's onion service at `address`, its control
+    /// connection having closed: the node stops advertising it until the
+    /// control port makes it again.
+    fn onion_service_down(&mut self, address: &Multiaddr) {
+        info!(
+            "This node is no longer reachable over Tor at {address}, until Tor's control port answers again"
+        );
+        self.swarm.remove_external_address(address);
+        self.push_identify();
+        self.run_time_addresses
+            .send_modify(|addresses| addresses.retain(|known| known != address));
+    }
+
+    /// Sends this node's Identify information to every connected peer now,
+    /// rather than at its next periodic exchange.
+    fn push_identify(&mut self) {
+        let peers: Vec<PeerId> = self.swarm.connected_peers().copied().collect();
+        self.swarm.behaviour_mut().identify.push(peers);
     }
 
     /// Asks the Nostr relays for announced peers and dials the newest few,
@@ -571,6 +672,7 @@ impl Node {
         if let Some(announcer) = self.nostr_announcer.take() {
             announcer.abort();
         }
+        self.onion_service_task = None;
         for peer_id in self.swarm.connected_peers().cloned().collect::<Vec<_>>() {
             self.swarm.disconnect_peer_id(peer_id).unwrap_or_default();
         }
@@ -751,6 +853,7 @@ impl Node {
                 {
                     info!("Resolved actual listen port: {port}");
                     self.listen_port = Some(port);
+                    self.start_onion_service();
                 }
                 // An onion-only node never announces an address it listens
                 // on, as Bitcoin Cash Node with -discover=0.
@@ -1207,6 +1310,9 @@ mod tests {
             dns_seed: false,
             tor_proxy: None,
             onion_only: false,
+            listen_onion: false,
+            tor_control: crate::config::DEFAULT_TOR_CONTROL.to_string(),
+            tor_password: None,
             dns_seed_hosts: vec![],
             node_key_path: None,
             ephemeral_node_key: true,
@@ -1340,6 +1446,9 @@ mod tests {
                 dns_seed: false,
                 tor_proxy: None,
                 onion_only: false,
+                listen_onion: false,
+                tor_control: crate::config::DEFAULT_TOR_CONTROL.to_string(),
+                tor_password: None,
                 dns_seed_hosts: vec![],
                 node_key_path: None,
                 ephemeral_node_key: true,
@@ -1917,6 +2026,38 @@ mod tests {
                 "onion_only {onion_only}: {sent:?}"
             );
         }
+    }
+
+    /// The onion service Tor's control port makes is advertised, and handed
+    /// to the Nostr announcer, while it is up, and no longer once it is gone.
+    /// Once it is up, a node without a `tor_proxy` dials onion peers through
+    /// Tor's default SOCKS port, and still learns its IP address.
+    #[tokio::test]
+    async fn an_onion_service_is_advertised_while_it_is_up() {
+        let mut node = build_test_node(build_test_config("/ip4/127.0.0.1/tcp/0", None));
+        let proxy = super::onion::OnionProxy::new(None);
+        node.onion_proxy = Some(proxy.clone());
+        let mut announced = node.run_time_addresses.subscribe();
+        let address: Multiaddr = format!("/onion3/{TOR_PROJECT_ONION}:6884").parse().unwrap();
+        assert!(!node.outgoing_peer_target.onion_reachable());
+
+        node.onion_service_up(address.clone());
+        assert!(
+            node.swarm
+                .external_addresses()
+                .any(|known| *known == address)
+        );
+        assert_eq!(*announced.borrow_and_update(), vec![address.clone()]);
+        assert!(node.outgoing_peer_target.onion_reachable());
+        assert!(
+            !proxy.set_if_unset("127.0.0.1:9150"),
+            "Tor's default SOCKS port is set"
+        );
+        assert!(!node.external_address_confirmed);
+
+        node.onion_service_down(&address);
+        assert_eq!(node.swarm.external_addresses().count(), 0);
+        assert!(announced.borrow_and_update().is_empty());
     }
 
     #[tokio::test]
