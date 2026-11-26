@@ -65,12 +65,12 @@ const RPC_IN_WARMUP: i32 = -28;
 /// `RPC_METHOD_NOT_FOUND`: the node has no RPC of that name.
 const RPC_METHOD_NOT_FOUND: i32 = -32601;
 
-/// JSON-RPC invalid params: Knuth's answer to every `getblocktemplate`
+/// JSON-RPC invalid params: the Knuth answer to every `getblocktemplate`
 /// proposal, "only template mode is supported" (`get_block_template` in
 /// `src/node/src/rpc/methods.cpp`).
 const RPC_INVALID_PARAMS: i32 = -32602;
 
-/// `RPC_INVALID_PARAMETER`: BCHN's answer to a `getblocktemplate` mode it
+/// `RPC_INVALID_PARAMETER`: the BCHN answer to a `getblocktemplate` mode it
 /// does not know, "Invalid mode" (`src/rpc/mining.cpp`).
 const RPC_INVALID_PARAMETER: i32 = -8;
 

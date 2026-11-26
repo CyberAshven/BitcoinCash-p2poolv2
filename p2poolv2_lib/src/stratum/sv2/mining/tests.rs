@@ -616,8 +616,8 @@ async fn a_block_the_node_cannot_decode_is_an_invalid_template() {
 }
 
 /// Knuth answers every block proposal `-32602` "only template mode is
-/// supported". That says the pool's node checks no proposals, not that the
-/// client's template is bad, so the job is not refused as
+/// supported". That says the node behind the pool checks no proposals, not
+/// that the template of the client is bad, so the job is not refused as
 /// `invalid-template`: it gets `template-unavailable`, and the client
 /// declares again.
 #[tokio::test]

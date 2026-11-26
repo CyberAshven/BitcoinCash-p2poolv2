@@ -364,7 +364,7 @@ impl MiningChannels {
     /// the template is bad, and the client declares again. So does a node
     /// that checks no proposals, such as Knuth: an operator error, logged as
     /// a warning, not a refusal of the template. Every refusal is logged
-    /// with the node's reason.
+    /// with the reason from the node.
     pub(crate) async fn install_custom_job(
         &mut self,
         request: &SetCustomMiningJob<'_>,
@@ -457,7 +457,7 @@ impl MiningChannels {
                         }
                         // The node checks no proposals at all, so this pool
                         // cannot check any declared template: the
-                        // operator's to fix, not the client's. The client
+                        // operator to fix, not the client. The client
                         // declares again.
                         Ok(Err(error)) if error.is_proposal_unsupported() => {
                             warn!(
