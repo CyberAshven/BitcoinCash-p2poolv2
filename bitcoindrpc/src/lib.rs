@@ -65,6 +65,15 @@ const RPC_IN_WARMUP: i32 = -28;
 /// `RPC_METHOD_NOT_FOUND`: the node has no RPC of that name.
 const RPC_METHOD_NOT_FOUND: i32 = -32601;
 
+/// JSON-RPC invalid params: the Knuth answer to every `getblocktemplate`
+/// proposal, "only template mode is supported" (`get_block_template` in
+/// `src/node/src/rpc/methods.cpp`).
+const RPC_INVALID_PARAMS: i32 = -32602;
+
+/// `RPC_INVALID_PARAMETER`: the BCHN answer to a `getblocktemplate` mode it
+/// does not know, "Invalid mode" (`src/rpc/mining.cpp`).
+const RPC_INVALID_PARAMETER: i32 = -8;
+
 /// What a node answers a block proposal whose parent is not its best block.
 /// It has no verdict on such a block: it only checks one built on its tip.
 /// BCHN (`getblocktemplatecommon` in `src/rpc/mining.cpp`), BCHD
@@ -148,6 +157,18 @@ impl BitcoindRpcError {
     /// not reached yet; the node says nothing about the block itself.
     pub fn is_proposal_off_best_block(&self) -> bool {
         matches!(self, BitcoindRpcError::ProposalRejected { reason } if reason == PROPOSAL_NOT_BEST_PREVBLK)
+    }
+
+    /// Whether the node answered a block proposal that it checks no
+    /// proposals at all: it has no `getblocktemplate`, or no `proposal`
+    /// mode, as Knuth answers every proposal ("only template mode is
+    /// supported"). The node says nothing about the block.
+    pub fn is_proposal_unsupported(&self) -> bool {
+        matches!(
+            self,
+            BitcoindRpcError::RpcError { code, .. }
+                if [RPC_METHOD_NOT_FOUND, RPC_INVALID_PARAMS, RPC_INVALID_PARAMETER].contains(code)
+        )
     }
 }
 

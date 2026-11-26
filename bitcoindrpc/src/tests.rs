@@ -798,6 +798,38 @@ async fn block_proposal_off_the_best_block_is_told_apart_from_a_verdict() {
     assert!(answers.iter().all(|answer| !answer.is_transient()));
 }
 
+/// A node that checks no proposals says so with an RPC error: Knuth answers
+/// every proposal `-32602` "only template mode is supported", and BCHN
+/// answers a mode it does not know `-8` "Invalid mode". Neither is a verdict
+/// on the block. A block the node cannot read (`-22`) is one.
+#[tokio::test]
+async fn a_node_without_proposal_mode_is_told_apart_from_a_verdict() {
+    let block = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+    let mut answers = Vec::with_capacity(3);
+    for (code, message) in [
+        (-32602, "only template mode is supported"),
+        (-8, "Invalid mode"),
+        (-22, "Block decode failed"),
+    ] {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(500).set_body_json(serde_json::json!({
+                "result": null,
+                "error": {"code": code, "message": message},
+                "id": 0,
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = BitcoindRpcClient::new(&server.uri(), "user", "pass").unwrap();
+        answers.push(client.validate_block_proposal(&block).await.unwrap_err());
+    }
+    assert!(answers[0].is_proposal_unsupported());
+    assert!(answers[1].is_proposal_unsupported());
+    assert!(!answers[2].is_proposal_unsupported());
+    assert!(answers.iter().all(|answer| !answer.is_transient()));
+}
+
 #[tokio::test]
 async fn block_proposal_does_not_accept_false_as_success() {
     let server = MockServer::start().await;
