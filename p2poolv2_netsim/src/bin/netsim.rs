@@ -174,8 +174,8 @@ struct ScenarioArgs {
     /// Share transaction bytes beyond the share's own coinbase.
     #[arg(long)]
     extra_share_bytes: Option<u64>,
-    /// How shares travel: `full` (as nodes send them) or `without-payouts`
-    /// (suggested by the hybrid payout design, not built).
+    /// How shares travel: `full` (the whole share) or `without-payouts`
+    /// (as the node relays them since #131; the size is an estimate).
     #[arg(long, value_parser = ShareRelay::parse)]
     relay: Option<ShareRelay>,
     /// Node upload in Mbit/s: `50`, `uniform:10:100` or `lognormal:50:0.8`.
@@ -211,7 +211,8 @@ struct ScenarioArgs {
     /// Most uncles a share names (3 today).
     #[arg(long)]
     max_uncles: Option<usize>,
-    /// When a node forwards a share (studied, not built: after-header-check).
+    /// When a node forwards a share (after-header-check is built in the
+    /// node; the model's timing is an estimate).
     #[arg(long, value_enum)]
     forward: Option<ForwardingRule>,
     /// Seconds the header check takes when forwarding after it.
@@ -495,9 +496,10 @@ fn print_limits() {
         "1,204,800-byte share body of the hybrid rule (P2Pool share-chain rule)",
         &|sizes| check(sizes).share_body_within_hybrid_limit,
     );
-    limit("1.25 MiB P2P message (node implementation)", &|sizes| {
-        check(sizes).message_within_p2p_limit
-    });
+    limit(
+        "2,144 KiB P2P message with 960 KiB of weak shares (node implementation)",
+        &|sizes| check(sizes).message_within_p2p_limit,
+    );
     limit("1,000,000-byte transaction (BCH consensus)", &|sizes| {
         check(sizes).coinbase_within_bch_transaction_limit
     });
