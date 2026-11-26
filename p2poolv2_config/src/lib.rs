@@ -1384,9 +1384,8 @@ pub struct NetworkConfig {
     // after startup when dial_peers are set but none connected. Set false
     // to rely only on dial_peers.
     //
-    // Always off on Bitcoin Cash, whatever the file says: the built-in seeds
-    // are Bitcoin P2Poolv2 nodes and there are no Bitcoin Cash seeds yet
-    // (`Config::with_bitcoin_cash_dns_seed_off`).
+    // A Bitcoin Cash node takes the seeds of its `bitcoin_cash_network`,
+    // never Bitcoin's.
     #[serde(default = "default_dns_seed")]
     pub dns_seed: bool,
     /// A Tor SOCKS5 proxy, `host:port` (Tor's default is `127.0.0.1:9050`),
@@ -1412,6 +1411,12 @@ pub struct NetworkConfig {
     /// `tor_proxy`. `"onion"` needs `tor_proxy`.
     #[serde(default)]
     pub onlynet: Option<Vec<PeerNetwork>>,
+    /// DNS seed hostnames that replace the built-in ones, so a new seed can
+    /// be used before a release names it. Their A/AAAA records list
+    /// long-running nodes on the network's seed port (6884 on Bitcoin Cash),
+    /// or on the port an entry names as `host:port`.
+    #[serde(default)]
+    pub dns_seed_hosts: Vec<String>,
     /// File holding this node's libp2p identity, whose public key is its
     /// peer ID. Created on the first start and read on every start after,
     /// so peers, saved peer lists and announcements keep finding the node
@@ -1576,6 +1581,7 @@ impl Default for NetworkConfig {
             tor_proxy: None,
             proxy_clearnet: false,
             onlynet: None,
+            dns_seed_hosts: vec![],
             node_key_path: None,
             ephemeral_node_key: false,
             nostr_relays: default_nostr_relays(),
@@ -1888,9 +1894,6 @@ impl Config {
     /// so two Bitcoin Cash nodes on the same network must not disagree on it
     /// because one left a Bitcoin value such as `signet` in its file.
     ///
-    /// On Bitcoin Cash, `network.dns_seed` is also turned off (see
-    /// [`Config::with_bitcoin_cash_dns_seed_off`]).
-    ///
     /// `[[submit_nodes]]` with light templates is refused (see
     /// [`Config::validate_submit_nodes`]), and so are Tor settings with no
     /// `tor_proxy` to dial through (see [`Config::validate_tor_proxy`]).
@@ -1937,9 +1940,7 @@ impl Config {
         }
         loaded.validate_submit_nodes()?;
         loaded.validate_tor_proxy()?;
-        Ok(loaded
-            .with_bitcoin_cash_network_derived()
-            .with_bitcoin_cash_dns_seed_off())
+        Ok(loaded.with_bitcoin_cash_network_derived())
     }
 
     /// Refuse `[[submit_nodes]]` with `template_source = "rpc_light"`. A
@@ -1996,22 +1997,6 @@ impl Config {
     /// node. Bitcoin configurations are returned unchanged.
     pub fn with_bitcoin_cash_network_derived(mut self) -> Self {
         self.stratum.network = self.stratum.effective_network();
-        self
-    }
-
-    /// Turn `network.dns_seed` off on a Bitcoin Cash node, even when the file
-    /// or the environment sets it. Bitcoin configurations are returned
-    /// unchanged.
-    ///
-    /// The built-in DNS seeds are Bitcoin P2Poolv2 nodes, compiled in per
-    /// Bitcoin network, and a Bitcoin Cash node's `stratum.network` is a
-    /// Bitcoin network. There are no Bitcoin Cash seeds yet, so a Bitcoin Cash
-    /// node finds its peers through `dial_peers` only. The node applies the
-    /// same rule again when it picks its seeds.
-    pub fn with_bitcoin_cash_dns_seed_off(mut self) -> Self {
-        if self.stratum.chain == Chain::BitcoinCash {
-            self.network.dns_seed = false;
-        }
         self
     }
 
@@ -2521,48 +2506,47 @@ mod tests {
         });
     }
 
-    /// A Bitcoin Cash node never uses the built-in DNS seeds, which are
-    /// Bitcoin nodes: loading turns `dns_seed` off even when it is set.
+    /// A Bitcoin Cash node keeps `dns_seed` as set; its seeds are picked by
+    /// `bitcoin_cash_network`, so it never gets Bitcoin's.
     #[test]
-    fn bitcoin_cash_chipnet_load_turns_dns_seed_off_even_when_set() {
-        with_vars(
-            [
-                ("P2POOL_STRATUM__CHAIN", Some("bitcoin-cash")),
-                ("P2POOL_STRATUM__BITCOIN_CASH_NETWORK", Some("chipnet")),
-                ("P2POOL_NETWORK__DNS_SEED", Some("true")),
-            ],
-            || {
-                let config = Config::load("../config.sample.toml").unwrap();
-                assert_eq!(config.stratum.chain, Chain::BitcoinCash);
-                assert!(!config.network.dns_seed);
-            },
-        );
+    fn bitcoin_cash_load_keeps_dns_seed_as_set() {
+        for (value, expected) in [("true", true), ("false", false)] {
+            with_vars(
+                [
+                    ("P2POOL_STRATUM__CHAIN", Some("bitcoin-cash")),
+                    ("P2POOL_STRATUM__BITCOIN_CASH_NETWORK", Some("mainnet")),
+                    ("P2POOL_NETWORK__DNS_SEED", Some(value)),
+                ],
+                || {
+                    let config = Config::load("../config.sample.toml").unwrap();
+                    assert_eq!(config.stratum.network, Network::Bitcoin);
+                    assert_eq!(config.network.dns_seed, expected);
+                },
+            );
+        }
     }
 
-    /// Bitcoin Cash mainnet's `stratum.network` is Bitcoin mainnet, so it
-    /// must not inherit Bitcoin's seeds either.
+    /// `dns_seed_hosts` is empty unless the file lists hostnames.
     #[test]
-    fn bitcoin_cash_mainnet_load_turns_dns_seed_off_by_default() {
-        with_vars(
-            [
-                ("P2POOL_STRATUM__CHAIN", Some("bitcoin-cash")),
-                ("P2POOL_STRATUM__BITCOIN_CASH_NETWORK", Some("mainnet")),
-            ],
-            || {
-                let config = Config::load("../config.sample.toml").unwrap();
-                assert_eq!(config.stratum.network, Network::Bitcoin);
-                assert!(!config.network.dns_seed);
-            },
-        );
-    }
+    fn dns_seed_hosts_load_from_the_file() {
+        let config = Config::load("../config.sample.toml").unwrap();
+        assert!(config.network.dns_seed_hosts.is_empty());
 
-    #[test]
-    fn with_bitcoin_cash_dns_seed_off_leaves_bitcoin_seeds_on() {
-        let config = Config::load("../config-bitcoin.sample.toml")
+        let sample = std::fs::read_to_string("../config.sample.toml")
             .unwrap()
-            .with_bitcoin_cash_dns_seed_off();
-        assert_eq!(config.stratum.chain, Chain::Bitcoin);
-        assert!(config.network.dns_seed);
+            .replace("\r\n", "\n");
+        let with_seeds = sample.replacen(
+            "\n[network]\n",
+            "\n[network]\ndns_seed_hosts = [\"seed.example.org\"]\n",
+            1,
+        );
+        assert_ne!(with_seeds, sample, "the sample has a [network] table");
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        std::fs::write(&path, with_seeds).unwrap();
+
+        let config = Config::load(path.to_str().unwrap()).unwrap();
+        assert_eq!(config.network.dns_seed_hosts, vec!["seed.example.org"]);
     }
 
     /// A single-underscore key no longer resolves, so an operator carrying the
@@ -2747,7 +2731,7 @@ mod tests {
             config.stratum.bitcoin_cash_network,
             Some(BitcoinCashNetwork::Regtest)
         );
-        assert!(!config.network.dns_seed);
+        assert!(config.network.dns_seed);
     }
 
     /// Its CashAddr bootstrap address and the default donation parse on
@@ -2871,7 +2855,7 @@ mod tests {
             Some(BitcoinCashNetwork::Chipnet)
         );
         assert_eq!(config.stratum.network, Network::Testnet);
-        assert!(!config.network.dns_seed);
+        assert!(config.network.dns_seed);
         assert_eq!(config.bitcoinrpc.url, "http://127.0.0.1:48332");
 
         let parsed = config.stratum.parse().unwrap();

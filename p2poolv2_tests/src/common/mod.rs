@@ -34,6 +34,7 @@ pub fn default_test_config() -> Config {
             tor_proxy: None,
             proxy_clearnet: false,
             onlynet: None,
+            dns_seed_hosts: vec![],
             node_key_path: None,
             ephemeral_node_key: true,
             nostr_relays: vec![],

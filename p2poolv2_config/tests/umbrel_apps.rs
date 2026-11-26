@@ -241,7 +241,7 @@ fn bch_p2pool_mines_on_the_bitcoin_cash_node_app_on_mainnet() {
     assert_eq!(config.bitcoinrpc.username, "umbrel");
     assert_eq!(config.bitcoinrpc.password, "derived-per-umbrel");
     assert_eq!(config.stratum.zmqpubhashblock, "tcp://10.21.21.50:28332");
-    assert!(!config.network.dns_seed);
+    assert!(config.network.dns_seed);
 
     let parsed = config.stratum.parse().unwrap();
     assert_eq!(parsed.network, Network::Bitcoin);
@@ -263,7 +263,7 @@ fn bch_p2pool_external_is_a_chipnet_node_until_bchn_is_set() {
     // unconfigured app stops with a lookup error naming it.
     assert_eq!(config.bitcoinrpc.url, "http://bchn.example:48332");
     assert_eq!(config.stratum.zmqpubhashblock, "tcp://bchn.example:28332");
-    assert!(!config.network.dns_seed);
+    assert!(config.network.dns_seed);
 
     let parsed = config.stratum.parse().unwrap();
     assert_eq!(parsed.network, Network::Testnet);
