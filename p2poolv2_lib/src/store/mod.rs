@@ -37,6 +37,22 @@ const STORE_FORMAT_KEY: &[u8] = b"store_format";
 /// lists each version.
 pub const STORE_FORMAT_VERSION: u32 = 12;
 
+/// The format version a store records, as [`Store::read_store_format`]
+/// reads it without checking it against [`STORE_FORMAT_VERSION`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StoredStoreFormat {
+    /// The store records this format version.
+    Version(u32),
+    /// The store records a format version that is not four bytes long.
+    Unreadable,
+    /// The store has a genesis but records no format version: it was
+    /// written before 2026-10-30, when stores began to record one.
+    Unrecorded,
+    /// The store has neither a genesis nor a format version: nothing has
+    /// been written to it yet.
+    Fresh,
+}
+
 pub mod bch_headers;
 pub mod block_tx_metadata;
 pub mod column_families;
@@ -202,6 +218,63 @@ impl Store {
         };
         store.load_script_history_from()?;
         Ok(store)
+    }
+
+    /// Read the format version of the store at `path` without checking it
+    /// against [`STORE_FORMAT_VERSION`], so it reports a store in any format,
+    /// older or newer than the one this binary writes. Opens the store
+    /// read-only and never changes it.
+    ///
+    /// Opens exactly the column families on disk, so it also reads a store
+    /// from a newer binary with column families this one does not know, or
+    /// from an older binary missing some of ours.
+    pub fn read_store_format(path: &str) -> Result<StoredStoreFormat, StoreError> {
+        let db = Self::open_db_read_only_as_on_disk(path)?;
+        let stored = match db.cf_handle(&ColumnFamily::Metadata) {
+            Some(metadata_cf) => db.get_cf(&metadata_cf, STORE_FORMAT_KEY)?,
+            None => None,
+        };
+        let Some(bytes) = stored else {
+            return Ok(if organise::has_confirmed_genesis(&db)? {
+                StoredStoreFormat::Unrecorded
+            } else {
+                StoredStoreFormat::Fresh
+            });
+        };
+        Ok(match <[u8; 4]>::try_from(bytes.as_slice()) {
+            Ok(version) => StoredStoreFormat::Version(u32::from_le_bytes(version)),
+            Err(_) => StoredStoreFormat::Unreadable,
+        })
+    }
+
+    /// Open the store at `path` read-only with exactly the column families on
+    /// disk: ours with their options, and any this binary does not know with
+    /// default options. None is left out, and none of ours loses its merge
+    /// operator.
+    fn open_db_read_only_as_on_disk(path: &str) -> Result<DB, StoreError> {
+        let column_families_on_disk = DB::list_cf(&RocksDbOptions::default(), path)?;
+        let (known_column_families, _script_history_gc_threshold) =
+            Self::column_family_descriptors();
+        let unknown: Vec<ColumnFamilyDescriptor> =
+            unknown_column_families(&column_families_on_disk, &known_column_families)
+                .into_iter()
+                .map(|name| ColumnFamilyDescriptor::new(name, RocksDbOptions::default()))
+                .collect();
+        let column_families: Vec<ColumnFamilyDescriptor> = known_column_families
+            .into_iter()
+            .filter(|descriptor| {
+                column_families_on_disk
+                    .iter()
+                    .any(|name| name == descriptor.name())
+            })
+            .chain(unknown)
+            .collect();
+        Ok(DB::open_cf_descriptors_read_only(
+            &Self::db_options(),
+            path,
+            column_families,
+            false,
+        )?)
     }
 
     /// Open the RocksDB database at `path` with every column family and its
@@ -1421,6 +1494,198 @@ mod tests {
         assert_eq!(hashes.len(), 2);
         assert!(hashes.contains(&hash1));
         assert!(hashes.contains(&hash2));
+    }
+
+    /// Open the store at `path` writable as a bare RocksDB database, every
+    /// column family this binary uses with its own options, merge operators
+    /// included, plus the `extra` ones with default options, created when
+    /// missing. A store with a genesis holds merge operands, which a reopen
+    /// with default options could not flush.
+    fn open_with_column_families(path: &str, extra: &[&str]) -> DB {
+        let (mut column_families, _script_history_gc_threshold) =
+            Store::column_family_descriptors();
+        column_families.extend(
+            extra
+                .iter()
+                .map(|name| ColumnFamilyDescriptor::new(*name, RocksDbOptions::default())),
+        );
+        DB::open_cf_descriptors(&Store::db_options(), path, column_families).unwrap()
+    }
+
+    /// Set up a store at `path` with a genesis, then record `format` as its
+    /// store format, or delete the record for `None`.
+    fn store_with_format(path: &str, format: Option<&[u8]>) {
+        let store = Store::new(path.to_string(), false).unwrap();
+        let genesis = TestShareBlockBuilder::new().build();
+        let mut batch = Store::get_write_batch();
+        store.setup_genesis(&genesis, &mut batch).unwrap();
+        store.commit_batch(batch).unwrap();
+        let metadata_cf = store.db.cf_handle(&ColumnFamily::Metadata).unwrap();
+        match format {
+            Some(bytes) => store
+                .db
+                .put_cf(&metadata_cf, STORE_FORMAT_KEY, bytes)
+                .unwrap(),
+            None => store.db.delete_cf(&metadata_cf, STORE_FORMAT_KEY).unwrap(),
+        }
+    }
+
+    /// `Store::read_store_format` reports an older store, which startup
+    /// refuses, without refusing it.
+    #[test]
+    fn test_read_store_format_reports_an_older_store() {
+        let temp_dir = tempdir().unwrap();
+        let path = temp_dir.path().to_str().unwrap().to_string();
+        store_with_format(
+            &path,
+            Some((STORE_FORMAT_VERSION - 1).to_le_bytes().as_slice()),
+        );
+
+        assert_eq!(
+            Store::read_store_format(&path).unwrap(),
+            StoredStoreFormat::Version(STORE_FORMAT_VERSION - 1)
+        );
+    }
+
+    /// `Store::read_store_format` reports a newer store, which startup
+    /// refuses, without refusing it.
+    #[test]
+    fn test_read_store_format_reports_a_newer_store() {
+        let temp_dir = tempdir().unwrap();
+        let path = temp_dir.path().to_str().unwrap().to_string();
+        store_with_format(
+            &path,
+            Some((STORE_FORMAT_VERSION + 1).to_le_bytes().as_slice()),
+        );
+
+        assert_eq!(
+            Store::read_store_format(&path).unwrap(),
+            StoredStoreFormat::Version(STORE_FORMAT_VERSION + 1)
+        );
+    }
+
+    /// A store with a genesis and no format record was written before
+    /// stores recorded one; a record that is not four bytes is unreadable.
+    #[test]
+    fn test_read_store_format_reports_an_unrecorded_and_an_unreadable_format() {
+        let temp_dir = tempdir().unwrap();
+        let path = temp_dir.path().to_str().unwrap().to_string();
+        store_with_format(&path, None);
+        assert_eq!(
+            Store::read_store_format(&path).unwrap(),
+            StoredStoreFormat::Unrecorded
+        );
+
+        let temp_dir = tempdir().unwrap();
+        let path = temp_dir.path().to_str().unwrap().to_string();
+        store_with_format(&path, Some([1u8, 2].as_slice()));
+        assert_eq!(
+            Store::read_store_format(&path).unwrap(),
+            StoredStoreFormat::Unreadable
+        );
+    }
+
+    /// A store opened but never given a genesis records no format and is
+    /// reported as fresh.
+    #[test]
+    fn test_read_store_format_reports_a_fresh_store() {
+        let temp_dir = tempdir().unwrap();
+        let path = temp_dir.path().to_str().unwrap().to_string();
+        drop(Store::new(path.clone(), false).unwrap());
+
+        assert_eq!(
+            Store::read_store_format(&path).unwrap(),
+            StoredStoreFormat::Fresh
+        );
+    }
+
+    /// `Store::read_store_format` opens a store with a column family this
+    /// binary does not know, as a newer binary would add, and keeps it.
+    #[test]
+    fn test_read_store_format_keeps_an_unknown_column_family() {
+        let temp_dir = tempdir().unwrap();
+        let path = temp_dir.path().to_str().unwrap().to_string();
+        store_with_format(&path, Some(STORE_FORMAT_VERSION.to_le_bytes().as_slice()));
+
+        //* Add a column family this binary does not know, with a row, flushed to disk
+        let db = open_with_column_families(&path, &["from_a_newer_binary"]);
+        let unknown_cf = db.cf_handle("from_a_newer_binary").unwrap();
+        db.put_cf(&unknown_cf, b"key", b"value").unwrap();
+        db.flush_cf(&unknown_cf).unwrap();
+        drop(unknown_cf);
+        drop(db);
+
+        assert_eq!(
+            Store::read_store_format(&path).unwrap(),
+            StoredStoreFormat::Version(STORE_FORMAT_VERSION)
+        );
+
+        //* The store still opens, and the unknown column family keeps its row
+        let db = open_with_column_families(&path, &["from_a_newer_binary"]);
+        let unknown_cf = db.cf_handle("from_a_newer_binary").unwrap();
+        assert_eq!(
+            db.iterator_cf(&unknown_cf, rocksdb::IteratorMode::Start)
+                .count(),
+            1
+        );
+    }
+
+    /// A store missing one of the column families this binary uses, as a
+    /// store from an older binary can be, still reports its format.
+    #[test]
+    fn test_read_store_format_reports_a_store_missing_a_column_family() {
+        let temp_dir = tempdir().unwrap();
+        let path = temp_dir.path().to_str().unwrap().to_string();
+        store_with_format(&path, Some(STORE_FORMAT_VERSION.to_le_bytes().as_slice()));
+
+        //* Drop a column family this binary uses
+        let db = open_with_column_families(&path, &[]);
+        db.drop_cf(ColumnFamily::AcceptedBlockEffort.as_str())
+            .unwrap();
+        drop(db);
+
+        assert_eq!(
+            Store::read_store_format(&path).unwrap(),
+            StoredStoreFormat::Version(STORE_FORMAT_VERSION)
+        );
+    }
+
+    /// A store without the `Metadata` column family records no format;
+    /// with no genesis either it is reported as fresh.
+    #[test]
+    fn test_read_store_format_reports_a_store_missing_metadata_as_fresh() {
+        let temp_dir = tempdir().unwrap();
+        let path = temp_dir.path().to_str().unwrap().to_string();
+        drop(Store::new(path.clone(), false).unwrap());
+
+        //* Drop the column family that holds the store format
+        let db = open_with_column_families(&path, &[]);
+        db.drop_cf(ColumnFamily::Metadata.as_str()).unwrap();
+        drop(db);
+
+        assert_eq!(
+            Store::read_store_format(&path).unwrap(),
+            StoredStoreFormat::Fresh
+        );
+    }
+
+    /// A store without the `BlockHeight` column family has no genesis; with
+    /// no format recorded either it is reported as fresh.
+    #[test]
+    fn test_read_store_format_reports_an_unrecorded_store_missing_block_height_as_fresh() {
+        let temp_dir = tempdir().unwrap();
+        let path = temp_dir.path().to_str().unwrap().to_string();
+        store_with_format(&path, None);
+
+        //* Drop the column family the genesis check reads
+        let db = open_with_column_families(&path, &[]);
+        db.drop_cf(ColumnFamily::BlockHeight.as_str()).unwrap();
+        drop(db);
+
+        assert_eq!(
+            Store::read_store_format(&path).unwrap(),
+            StoredStoreFormat::Fresh
+        );
     }
 
     #[test]

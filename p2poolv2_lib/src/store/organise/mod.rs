@@ -11,6 +11,8 @@ mod confirmed;
 pub mod organise_block;
 pub mod organise_header;
 
+pub(super) use confirmed::has_confirmed_genesis;
+
 const BRANCH_INITIAL_CAPACITY: usize = 16;
 
 /// Type to capture candidate and confirmed chains as vector of

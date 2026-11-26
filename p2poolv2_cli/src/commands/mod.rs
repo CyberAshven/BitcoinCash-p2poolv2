@@ -188,6 +188,8 @@ pub enum Commands {
 pub enum DbCommands {
     /// Clean up dense heights by invalidating excess HeaderValid blocks
     CleanupDenseHeights,
+    /// Print the store format version of the store and the one this binary writes
+    Version,
 }
 
 #[derive(Subcommand, Debug)]

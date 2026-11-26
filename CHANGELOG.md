@@ -101,6 +101,10 @@ format and genesis re-pin.
   read newest first from the end of the store without walking the rest, from
   upstream `64934868` and `9afcdeff`. The response stays a bare array, and
   without `num` it still lists every found block, as the dashboards need.
+- `p2poolv2_cli --db-path <store> db version` prints the store format version
+  a store records and the one the binary writes. It opens the store
+  read-only as it is on disk and reports an older or newer store instead of
+  refusing it, from upstream `1bc752a6`.
 - `/metrics` counts the connections the connection limits refused,
   incoming and outgoing (`p2p_connections_refused_total`); the node had
   ignored refused incoming connections.

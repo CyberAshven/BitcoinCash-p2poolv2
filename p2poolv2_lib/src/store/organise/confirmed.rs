@@ -20,6 +20,17 @@ use super::{Chain, Height, TopResult, height_to_key_with_suffix};
 const CONFIRMED_SUFFIX: &str = ":f";
 const TOP_CONFIRMED_KEY: &str = "meta:top_confirmed_height";
 
+/// Whether `db` has a share confirmed at height 0, read straight from the
+/// `BlockHeight` column family, for `Store::read_store_format`, which opens
+/// a store without a `Store`. A store without that column family has none.
+pub(in crate::store) fn has_confirmed_genesis(db: &rocksdb::DB) -> Result<bool, StoreError> {
+    let Some(block_height_cf) = db.cf_handle(&ColumnFamily::BlockHeight) else {
+        return Ok(false);
+    };
+    let key = height_to_key_with_suffix(0, CONFIRMED_SUFFIX);
+    Ok(db.get_cf(&block_height_cf, key)?.is_some())
+}
+
 impl Store {
     /// Check that every block in the list has its body stored and
     /// that all uncles referenced by each block also have their

@@ -111,6 +111,7 @@ be stopped (RocksDB does not support concurrent access).
 
 ```sh
 p2poolv2_cli --db-path /path/to/store.db db cleanup-dense-heights
+p2poolv2_cli --db-path /path/to/store.db db version
 ```
 
 #### cleanup-dense-heights
@@ -119,6 +120,18 @@ Walk the height index and invalidate excess HeaderValid blocks at
 heights with more than 20 blocks. Retains Confirmed, Candidate, and
 BlockValid blocks, plus HeaderValid blocks that are referenced as
 uncles by other blocks.
+
+#### version
+
+Print the store format version the store records and the one this
+binary writes. The store is opened read-only, as it is on disk, and an
+older or newer format is reported, not refused: a node refuses to start
+on a store whose format differs from the one it writes.
+
+```text
+Store format version: 12
+Binary store format version: 12
+```
 
 ### bch-share-address
 
