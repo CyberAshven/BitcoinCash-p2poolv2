@@ -7,8 +7,10 @@
 //!
 //! A task connects to `[network] tor_control` and speaks Tor's control
 //! protocol (control-spec.txt): `PROTOCOLINFO 1`, then `AUTHENTICATE` with no
-//! password, with Tor's cookie file (`SAFECOOKIE`), or with `tor_password`
-//! (`HASHEDPASSWORD`), then `ADD_ONION`. The service's virtual port is always
+//! password, with the cookie file of Tor (`COOKIE`), or with `tor_password`
+//! (`HASHEDPASSWORD`), then `ADD_ONION`. `tor_password` is the stronger
+//! choice: `COOKIE` sends the cookie itself to whatever answers on
+//! `tor_control`. The service's virtual port is always
 //! 6884, the default P2Pool port, whatever the node listens on, as Bitcoin
 //! Cash Node keeps its default port "to avoid decloaking"; Tor forwards it to
 //! the node's listen address.
@@ -29,11 +31,8 @@
 use super::SwarmSend;
 use super::onion::onion3_target;
 use crate::config::{Config, PeerNetwork};
-use bitcoin::secp256k1::rand::random;
-use hmac::{Hmac, KeyInit, Mac};
 use libp2p::Multiaddr;
 use libp2p::multiaddr::Protocol;
-use sha2::Sha256;
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
@@ -48,8 +47,6 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
 use tracing::{debug, info, warn};
-
-type HmacSha256 = Hmac<Sha256>;
 
 /// The port peers dial on this node's onion service, whatever it listens on.
 pub(crate) const ONION_SERVICE_PORT: u16 = 6884;
@@ -79,14 +76,8 @@ const MAX_LINE_BYTES: u64 = 100_000;
 /// Most lines one reply may have.
 const MAX_REPLY_LINES: usize = 1_000;
 
-/// Bytes in Tor's authentication cookie and in each `SAFECOOKIE` nonce.
+/// Bytes in the authentication cookie of Tor.
 const COOKIE_BYTES: usize = 32;
-const NONCE_BYTES: usize = 32;
-
-/// The HMAC keys of `SAFECOOKIE` authentication (control-spec.txt,
-/// `AUTHCHALLENGE`).
-const SERVER_HASH_KEY: &[u8] = b"Tor safe cookie authentication server-to-controller hash";
-const CLIENT_HASH_KEY: &[u8] = b"Tor safe cookie authentication controller-to-server hash";
 
 /// How an ed25519 v3 onion key starts, as `ADD_ONION` takes and gives it.
 const KEY_TYPE: &str = "ED25519-V3:";
@@ -418,9 +409,12 @@ fn parse_protocol_info(lines: &[String]) -> Result<AuthMethods, String> {
     })
 }
 
-/// Authenticates as Bitcoin Cash Node does: with `HASHEDPASSWORD` when a
-/// password is set, else with no password when Tor asks for none, else with
-/// `SAFECOOKIE`.
+/// Authenticates with `HASHEDPASSWORD` when a password is set, else with no
+/// password when Tor asks for none, else with the cookie file Tor names
+/// (`COOKIE`). `SAFECOOKIE`, which Bitcoin Cash Node uses, needs two HMAC
+/// keys that the control spec fixes as constant strings, so it is not used.
+/// `COOKIE` sends the cookie itself: a program other than Tor listening on
+/// `tor_control` would learn it. `tor_password` avoids that.
 async fn authenticate(
     connection: &mut BufReader<TcpStream>,
     service: &OnionService,
@@ -439,21 +433,13 @@ async fn authenticate(
         format!("AUTHENTICATE {}", hex::encode(password.as_bytes()))
     } else if offers("NULL") {
         "AUTHENTICATE".to_string()
-    } else if offers("SAFECOOKIE") {
+    } else if offers("COOKIE") {
         let cookie_file = auth
             .cookie_file
             .as_deref()
-            .ok_or("Tor offers SAFECOOKIE authentication but names no cookie file")?;
+            .ok_or("Tor offers COOKIE authentication but names no cookie file")?;
         let cookie = read_cookie(cookie_file)?;
-        let client_nonce: [u8; NONCE_BYTES] = random();
-        let challenge = command(
-            connection,
-            &format!("AUTHCHALLENGE SAFECOOKIE {}", hex::encode(client_nonce)),
-        )
-        .await?
-        .accepted("AUTHCHALLENGE")?;
-        let client_hash = answer_challenge(&challenge, &cookie, &client_nonce)?;
-        format!("AUTHENTICATE {}", hex::encode(client_hash))
+        format!("AUTHENTICATE {}", hex::encode(cookie))
     } else if offers("HASHEDPASSWORD") {
         return Err("Tor asks for a password (HASHEDPASSWORD): set tor_password".into());
     } else {
@@ -479,47 +465,6 @@ fn read_cookie(path: &str) -> Result<Vec<u8>, String> {
         ));
     }
     Ok(cookie)
-}
-
-/// Checks Tor's `AUTHCHALLENGE` reply, which proves Tor knows the cookie,
-/// and gives the hash that proves the node read it (control-spec.txt,
-/// `AUTHCHALLENGE`).
-fn answer_challenge(
-    lines: &[String],
-    cookie: &[u8],
-    client_nonce: &[u8],
-) -> Result<[u8; 32], String> {
-    let answer = lines
-        .iter()
-        .find_map(|line| line.strip_prefix("AUTHCHALLENGE "))
-        .ok_or("AUTHCHALLENGE: no answer line")?;
-    let mapping = parse_mapping(answer)?;
-    let decode = |key: &str| {
-        mapping
-            .get(key)
-            .and_then(|value| hex::decode(value).ok())
-            .ok_or_else(|| format!("AUTHCHALLENGE: no {key}"))
-    };
-    let server_hash = decode("SERVERHASH")?;
-    let server_nonce = decode("SERVERNONCE")?;
-    if server_nonce.len() != NONCE_BYTES {
-        return Err(format!(
-            "AUTHCHALLENGE: a server nonce of {} bytes",
-            server_nonce.len()
-        ));
-    }
-    let message = [cookie, client_nonce, &server_nonce].concat();
-    let mut server_mac =
-        HmacSha256::new_from_slice(SERVER_HASH_KEY).expect("HMAC takes any key length");
-    server_mac.update(&message);
-    server_mac.verify_slice(&server_hash).map_err(|_| {
-        "Tor's SERVERHASH does not match its cookie: something else answers on the control port"
-            .to_string()
-    })?;
-    let mut client_mac =
-        HmacSha256::new_from_slice(CLIENT_HASH_KEY).expect("HMAC takes any key length");
-    client_mac.update(&message);
-    Ok(client_mac.finalize().into_bytes().into())
 }
 
 /// The `ADD_ONION` command: the saved key or a new one, with

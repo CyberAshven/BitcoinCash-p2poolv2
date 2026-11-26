@@ -133,8 +133,12 @@ control port, as Bitcoin Cash Node's `-listenonion` does
 (`node/tor_control.rs`). `[network] listen_onion` is on by default; the node
 connects to `tor_control` (`127.0.0.1:9051` by default) and:
 
-1. asks `PROTOCOLINFO 1` and authenticates with no password, with Tor's
-   cookie file (`SAFECOOKIE`), or with `tor_password` (`HASHEDPASSWORD`);
+1. asks `PROTOCOLINFO 1` and authenticates with `tor_password`
+   (`HASHEDPASSWORD`), with no password, or with the cookie file of Tor
+   (`COOKIE`). A password is the stronger choice: `COOKIE` sends the cookie
+   itself to whatever answers on `tor_control`. `SAFECOOKIE`, which Bitcoin
+   Cash Node uses, is not used here: it needs two HMAC keys that the control
+   spec fixes as constant strings;
 2. sends `ADD_ONION` with its key, or `NEW:ED25519-V3` the first time, and
    `Port=6884,<listen address>`: peers dial port 6884, the default, whatever
    the node listens on, and Tor forwards to the node's `listen_address`

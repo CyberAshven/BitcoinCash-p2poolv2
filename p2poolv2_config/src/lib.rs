@@ -1430,7 +1430,9 @@ pub struct NetworkConfig {
     pub tor_control: String,
     /// The password for Tor's control port (`HASHEDPASSWORD`), as Bitcoin
     /// Cash Node's `-torpassword`. Unset, the node authenticates with no
-    /// password or with Tor's cookie file (`SAFECOOKIE`).
+    /// password or with the cookie file of Tor (`COOKIE`), which sends the
+    /// cookie itself to whatever answers on `tor_control`; a password is the
+    /// stronger choice.
     #[serde(default)]
     pub tor_password: Option<String>,
     /// Dial IPv4, IPv6 and host-name peers through `tor_proxy` too, names
