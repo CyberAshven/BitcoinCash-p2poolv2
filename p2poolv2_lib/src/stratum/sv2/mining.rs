@@ -99,7 +99,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use tokio::time::timeout;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 /// Bytes of extranonce a miner rolls on an extended channel (SV1 enonce2).
 pub const EXTRANONCE_SIZE: u16 = 8;
@@ -361,7 +361,10 @@ impl MiningChannels {
     /// on a parent the node has left gets `stale-chain-tip`, the code of a
     /// job whose parent is not the pool template's, and a check that times
     /// out or whose request fails gets `template-unavailable`: neither says
-    /// the template is bad, and the client declares again.
+    /// the template is bad, and the client declares again. So does a node
+    /// that checks no proposals, such as Knuth: an operator error, logged as
+    /// a warning, not a refusal of the template. Every refusal is logged
+    /// with the reason from the node.
     pub(crate) async fn install_custom_job(
         &mut self,
         request: &SetCustomMiningJob<'_>,
@@ -442,27 +445,46 @@ impl MiningChannels {
             {
                 Ok(Ok(())) => (),
                 rejected => {
-                    debug!("Rejected declared BCH template: {rejected:?}");
                     let code = match &rejected {
                         // The node has left the declared parent, so it has
                         // no verdict on the block: the client declares
                         // again on the new tip.
                         Ok(Err(error)) if error.is_proposal_off_best_block() => {
+                            debug!(
+                                "Declared BCH template is on a parent the node has left: {error}"
+                            );
                             ERROR_CODE_SET_CUSTOM_MINING_JOB_STALE_CHAIN_TIP
+                        }
+                        // The node checks no proposals at all, so this pool
+                        // cannot check any declared template: the
+                        // operator to fix, not the client. The client
+                        // declares again.
+                        Ok(Err(error)) if error.is_proposal_unsupported() => {
+                            warn!(
+                                "Cannot check a declared BCH template: the node does not check block proposals ({error}). Job Declaration needs a node that does, such as BCHN"
+                            );
+                            "template-unavailable"
                         }
                         // The node's verdict on the block: its reject
                         // reason, or an RPC error for a block it cannot
                         // read (`Block decode failed`).
-                        Ok(Err(BitcoindRpcError::ProposalRejected { .. })) => "invalid-template",
+                        Ok(Err(error @ BitcoindRpcError::ProposalRejected { .. })) => {
+                            warn!("Refused a declared BCH template: {error}");
+                            "invalid-template"
+                        }
                         Ok(Err(error @ BitcoindRpcError::RpcError { .. }))
                             if !error.is_transient() =>
                         {
+                            warn!("Refused a declared BCH template: {error}");
                             "invalid-template"
                         }
                         // No answer about the block: the check timed out,
                         // the request failed, or the node is still
                         // starting. The client asks again.
-                        _ => "template-unavailable",
+                        _ => {
+                            debug!("No answer checking a declared BCH template: {rejected:?}");
+                            "template-unavailable"
+                        }
                     };
                     return custom_job_error(request, code);
                 }
