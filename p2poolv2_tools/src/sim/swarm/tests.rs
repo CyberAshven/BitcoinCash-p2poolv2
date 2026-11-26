@@ -285,12 +285,20 @@ fn late_miner_starts_with_its_emitter_off() {
     assert!(config.contains("seed = 2\n"));
 }
 
+/// "P2Pool-sim-swarm-nodes-99" is 25 characters, one past the 24 of an
+/// operator line.
 #[test]
 fn long_pool_signature_is_refused() {
-    // "P2Pool-sim-xyz-99" is 17 bytes.
     let mut long = settings(100);
-    long.pool_signature_prefix = "P2Pool-sim-xyz-".to_string();
+    long.pool_signature_prefix = "P2Pool-sim-swarm-nodes-".to_string();
     assert!(check_pool_signature(&long).is_err());
+}
+
+#[test]
+fn pool_signature_with_a_slash_is_refused() {
+    let mut slashed = settings(2);
+    slashed.pool_signature_prefix = "P2Pool/sim-".to_string();
+    assert!(check_pool_signature(&slashed).is_err());
 }
 
 #[test]

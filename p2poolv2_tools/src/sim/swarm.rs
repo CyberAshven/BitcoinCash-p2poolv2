@@ -30,6 +30,7 @@ use crate::seeded::SeededSequence;
 use crate::sim::RunDir;
 use crate::sim::addresses::{DEFAULT_MINER_ADDRESS, check_payout_address, share_address};
 use crate::sim::bitcoind::{Bitcoind, CallOutcome, RpcSettings, WALLET};
+use p2poolv2_config::coinbase_tag::{MAX_OPERATOR_LENGTH, check_coinbase_name};
 use p2poolv2_config::{MAX_PAYOUT_LEVEL, MIN_PAYOUT_LEVEL, payout_level_below_minimum};
 use serde_json::Value;
 use std::fmt::Write as _;
@@ -37,9 +38,6 @@ use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
-
-/// The config rejects a pool signature over 16 bytes.
-const MAX_POOL_SIGNATURE_LENGTH: usize = 16;
 
 /// The swarm's settings, from the same environment variables
 /// `run-swarm.sh` read.
@@ -463,20 +461,20 @@ fn sim_options(settings: &SwarmSettings, index: usize) -> String {
     format!("{weak_shares}{weak_asks}{virtual_miners}")
 }
 
-/// The longest pool signature, the highest node's, must fit the config's
-/// 16-byte limit.
+/// The longest pool signature, the one of the highest node, must pass the
+/// coinbase name rules of the config for an operator line, at most
+/// `MAX_OPERATOR_LENGTH` characters.
 fn check_pool_signature(settings: &SwarmSettings) -> ToolResult<()> {
     let longest = format!(
         "{}{}",
         settings.pool_signature_prefix,
         settings.node_count.saturating_sub(1)
     );
-    if longest.len() > MAX_POOL_SIGNATURE_LENGTH {
-        return Err(ToolError::message(format!(
-            "pool signature '{longest}' exceeds {MAX_POOL_SIGNATURE_LENGTH} bytes; shorten POOL_SIGNATURE_PREFIX"
-        )));
-    }
-    Ok(())
+    check_coinbase_name(&longest, MAX_OPERATOR_LENGTH).map_err(|reason| {
+        ToolError::message(format!(
+            "pool signature {reason}; change POOL_SIGNATURE_PREFIX"
+        ))
+    })
 }
 
 /// Build `p2poolv2_sim` with the `sim` feature in `profile` and return its

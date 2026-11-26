@@ -5,6 +5,7 @@
 pub mod band_policy;
 pub mod block_template;
 pub mod coinbase;
+pub mod coinbase_tag;
 pub mod difficulty;
 pub(crate) mod error;
 pub mod gbt;

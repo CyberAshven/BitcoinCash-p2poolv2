@@ -46,7 +46,6 @@ async fn build_test_state(node_handle: NodeHandle) -> (Arc<AppState>, tempfile::
     let tracker_handle = start_tracker_actor();
     let state = Arc::new(AppState {
         app_config: AppConfig {
-            pool_signature_length: 0,
             network: bitcoin::Network::Signet,
             cash_network: None,
             cors_allowed: false,
@@ -339,7 +338,7 @@ async fn test_metrics_endpoint_exposes_coinbase_split() {
         min_difficulty_mark: None,
     };
 
-    let pool_signature = b"P2Poolv2";
+    let pool_signature = b"P2Poolv2\x0fCyberAshven\x0fBCHN 29.2.1 node1\x0fzg690z";
 
     // Build outputs
     let outputs = vec![
@@ -387,7 +386,6 @@ async fn test_metrics_endpoint_exposes_coinbase_split() {
     let node_handle = NodeHandle::new_for_test();
     let state = Arc::new(AppState {
         app_config: AppConfig {
-            pool_signature_length: 8,
             network: bitcoin::Network::Signet,
             cash_network: None,
             cors_allowed: false,
@@ -498,7 +496,6 @@ async fn build_auth_test_state() -> (Arc<AppState>, tempfile::TempDir, String) {
 
     let state = Arc::new(AppState {
         app_config: AppConfig {
-            pool_signature_length: 0,
             network: bitcoin::Network::Signet,
             cash_network: None,
             cors_allowed: false,
@@ -828,7 +825,6 @@ async fn test_cors_headers_present_when_enabled() {
 
     let state = Arc::new(AppState {
         app_config: AppConfig {
-            pool_signature_length: 0,
             network: bitcoin::Network::Signet,
             cash_network: None,
             cors_allowed: true,

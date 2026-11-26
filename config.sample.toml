@@ -226,14 +226,25 @@ version_mask = "1fffe000"
 # coinbase pays the shares holding the last 3 BCH blocks of work (by the
 # paying block's own difficulty) behind a 100-share maturity; see
 # docs/architecture/payout-distribution.md.
-# Add a pool signature, if you want. Comment out the line if you want
-# to mine anonymous blocks. This signature is only used to show others
-# how large your pool is, if you are running private, there is no need
-# to add a pool signature. Maximum length 16 bytes.
-# It only tags the coinbases this node builds. It is not a share-chain rule:
-# peers read each block's signature from its own coinbase, so nodes with
-# different signatures, or none, still accept each other's shares.
-pool_signature = "P2Poolv2"
+# The coinbase tag. Each coinbase this node builds carries
+# "P2Poolv2", the operator line, the node line and the chain line, separated
+# by the byte 0x0F, as DATUM tags are (docs/stratum.md, "The coinbase tag").
+# Explorers that read DATUM tags show the operator line.
+# pool_signature is the operator line: at most 24 characters. Unset, empty
+# or "P2Poolv2" (the old default) leaves the operator line empty, so the
+# node line never stands in its place.
+# node_label goes on the node line after the node software and version the
+# node reports, such as "BCHN 29.2.1 node1": at most 8 characters.
+# The chain line is computed from the share chain and never configured.
+# A name holds only letters, digits, spaces, '.', '_' and '-', and no word
+# of 20 or more characters made only of base58, hex or CashAddr characters,
+# so no address, email or URL goes on chain. A name that breaks a rule stops
+# the node at start; it is never cut short.
+# The tag only marks the coinbases this node builds. It is not a share-chain
+# rule: peers read the tag of each block from its coinbase, so nodes with
+# different tags, or none, still accept the shares of one another.
+# pool_signature = "Example Pool"
+# node_label = "node1"
 # Maximum concurrent stratum connections (default: 90% of OS file descriptor limit)
 # max_connections = 1000
 

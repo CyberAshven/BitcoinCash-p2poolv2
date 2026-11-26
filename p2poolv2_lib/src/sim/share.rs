@@ -195,7 +195,9 @@ mod tests {
     #[mockall_double::double]
     use crate::shares::chain::chain_store_handle::ChainStoreHandle;
 
-    const POOL_SIGNATURE: &[u8] = b"sim_pool";
+    /// A whole coinbase tag, as a node writes it: the sim reads it back
+    /// whatever its lines and length.
+    const POOL_SIGNATURE: &[u8] = b"P2Poolv2\x0fsim_pool\x0fBCHN 29.2.1 sim\x0fzg690z";
 
     fn test_template() -> BlockTemplate {
         let data =

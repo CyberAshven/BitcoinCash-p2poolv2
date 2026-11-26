@@ -21,7 +21,7 @@ use bitcoin::consensus::{deserialize, serialize};
 use bitcoin::hashes::{self, Hash, sha256d};
 use bitcoin::network::Network;
 use bitcoin::opcodes::all::{OP_PUSHBYTES_32, OP_RETURN};
-use bitcoin::script::{Instruction, PushBytesBuf};
+use bitcoin::script::{Instruction, PushBytesBuf, Script};
 use bitcoin::transaction::{Sequence, Transaction, TxIn, TxOut, Version};
 use hashes::sha256;
 use hex::FromHex;
@@ -62,8 +62,9 @@ const COINBASE_TRANSACTION_FIELD_BYTES: usize =
     4 + 1 + 36 + 1 + SEQUENCE_LENGTH + 1 + LOCKTIME_LENGTH;
 
 /// Bitcoin Cash's consensus limit on a coinbase scriptSig. A declared
-/// prefix is at most 88 bytes, plus the 12-byte extranonce.
-const MAX_COINBASE_SCRIPT_SIG_BYTES: usize = 100;
+/// prefix is at most 88 bytes, plus the 12-byte extranonce. The coinbase
+/// tag gets what the other pushes leave (`coinbase_tag::MAX_COINBASE_TAG_BYTES`).
+pub(crate) const MAX_COINBASE_SCRIPT_SIG_BYTES: usize = 100;
 
 /// Extra bytes the output count takes from 253 outputs on (a three-byte
 /// CompactSize instead of one).
@@ -480,25 +481,23 @@ pub fn split_coinbase(coinbase: &Transaction) -> Result<(String, String), WorkEr
 /// `coinbase2` has the following structure:
 ///
 ///  `nsecs` (`[0x08] + [8 bytes]`)
-///  `pool_signature` (`[len_byte] + [data]`)
+///  `pool_signature`, the coinbase tag (a data push: its opcode, then its
+///  bytes)
 ///  `sequence` (4 bytes)
 ///  `output_count` (CompactSize)
 ///  `outputs` (serialized `Vec<TxOut>`, ending with the padding and
 ///  commitment outputs when a commitment is present)
 ///  `lock_time` (4 bytes)
 ///
-/// This function parses this structure to return the `Vec<TxOut>`.
-pub fn extract_outputs_from_coinbase2(
-    coinbase2_hex: &str,
-    pool_signature_len: usize,
-) -> Result<Vec<TxOut>, WorkError> {
+/// This function parses this structure to return the `Vec<TxOut>`. The two
+/// pushes are read as script pushes, so the coinbase tag gives its own
+/// length, whatever the operator, node and chain lines hold.
+pub fn extract_outputs_from_coinbase2(coinbase2_hex: &str) -> Result<Vec<TxOut>, WorkError> {
     let coinbase2_bytes = Vec::from_hex(coinbase2_hex).map_err(|_| WorkError {
         message: "Error parsing coinbase hex".into(),
     })?;
 
-    let nsecs_push_len = 1 + 8; // opcode + 8 bytes for u64
-    let pool_sig_push_len = 1 + pool_signature_len;
-    let script_sig_part2_len = nsecs_push_len + pool_sig_push_len;
+    let script_sig_part2_len = script_sig_part2_length(&coinbase2_bytes)?;
     let output_data_start_index = script_sig_part2_len + SEQUENCE_LENGTH;
 
     // Bounds check: need at least start_index + LOCKTIME_LENGTH bytes
@@ -515,6 +514,22 @@ pub fn extract_outputs_from_coinbase2(
     deserialize::<Vec<TxOut>>(output_data).map_err(|_| WorkError {
         message: "Bad outputs in coinbase2".into(),
     })
+}
+
+/// The bytes of the nanosecond time push and the coinbase tag push that
+/// start `coinbase2_bytes`, read as script pushes.
+fn script_sig_part2_length(coinbase2_bytes: &[u8]) -> Result<usize, WorkError> {
+    let mut pushes = Script::from_bytes(coinbase2_bytes).instructions();
+    let has_both_pushes = matches!(
+        pushes.next(),
+        Some(Ok(Instruction::PushBytes(nsecs))) if nsecs.len() == 8
+    ) && matches!(pushes.next(), Some(Ok(Instruction::PushBytes(_))));
+    if !has_both_pushes {
+        return Err(WorkError {
+            message: "coinbase2 too short for its nanosecond time and coinbase tag pushes".into(),
+        });
+    }
+    Ok(coinbase2_bytes.len() - pushes.as_script().len())
 }
 
 /// Extracts the commitment hash from the coinbase's last output.
@@ -552,9 +567,11 @@ pub(crate) struct CoinbaseFields {
     pub(crate) extranonce: Vec<u8>,
     /// The nanosecond timestamp push, the scriptSig's fourth item.
     pub(crate) nsecs: u64,
-    /// The pool signature push, the scriptSig's fifth item. It only tags the
-    /// coinbase, so it is read from the block rather than taken from config:
-    /// nodes configured with different signatures still agree on validity.
+    /// The pool signature push, the fifth item of the scriptSig: the coinbase tag
+    /// of the node that built the coinbase (`coinbase_tag`), whatever its
+    /// lines and length. It only tags the coinbase, so it is read from the
+    /// block rather than taken from config: nodes with different tags, or
+    /// older nodes with a plain signature, still agree on validity.
     pub(crate) pool_signature: Vec<u8>,
     /// The BIP141 witness commitment output, if the coinbase has one.
     pub(crate) witness_commitment: Option<WitnessCommitment>,
@@ -580,7 +597,7 @@ pub(crate) fn parse_bitcoin_coinbase_fields(
     };
     //* The first push is the height, which the header carries. The next four
     //* are the aux flags, the extranonce, the nanosecond timestamp and the
-    //* pool signature, which is an empty push when none is configured.
+    //* pool signature, the coinbase tag, read as opaque bytes of any length.
     let mut pushes = input
         .script_sig
         .instructions()
@@ -1035,7 +1052,7 @@ mod tests {
             },
         ];
 
-        let pool_sig = b"P2Poolv2";
+        let pool_sig = b"P2Poolv2\x0fCyberAshven\x0fBCHN 29.2.1 node1\x0fzg690z";
         //  Build and Split
         let coinbase_tx = build_bitcoin_coinbase_transaction(
             Version(1),
@@ -1060,8 +1077,7 @@ mod tests {
         let (_coinbase1, coinbase2_hex) = split_coinbase(&coinbase_tx).unwrap();
 
         //  Parse
-        let extracted_outputs =
-            extract_outputs_from_coinbase2(&coinbase2_hex, pool_sig.len()).unwrap();
+        let extracted_outputs = extract_outputs_from_coinbase2(&coinbase2_hex).unwrap();
 
         //  Verify
         assert_eq!(extracted_outputs, expected_outputs);
@@ -1079,28 +1095,35 @@ mod tests {
     #[test]
     fn test_extract_outputs_from_coinbase2_bounds_checking() {
         // Test empty input
-        let result = extract_outputs_from_coinbase2("", 8);
+        let result = extract_outputs_from_coinbase2("");
         assert!(result.is_err());
         assert!(result.unwrap_err().message.contains("too short"));
 
         // Test input that's too short for the expected structure
-        // With pool_signature_len=8:
-        // min_len = 9(nsecs) + 9(pool_sig) + 4(seq) + 4(locktime) = 26 bytes = 52 hex chars
         let short_hex = "00112233445566778899aabbccddeeff"; // 16 bytes = 32 hex chars
-        let result = extract_outputs_from_coinbase2(short_hex, 8);
+        let result = extract_outputs_from_coinbase2(short_hex);
         assert!(result.is_err());
         assert!(result.unwrap_err().message.contains("too short"));
 
+        // A coinbase tag push longer than the bytes left is too short too
+        let cut_tag_hex = format!("08{}40{}", "00".repeat(8), "00".repeat(4));
+        let result = extract_outputs_from_coinbase2(&cut_tag_hex);
+        assert!(result.unwrap_err().message.contains("too short"));
+
+        // No room for the sequence and locktime after the pushes
+        let no_sequence_hex = format!("08{}00{}", "00".repeat(8), "00".repeat(7));
+        let result = extract_outputs_from_coinbase2(&no_sequence_hex);
+        assert!(result.unwrap_err().message.contains("too short"));
+
         // Test exactly at minimum length (should fail on deserialize, not bounds)
-        // Need 26 bytes minimum: 52 hex chars
-        let min_hex = hex::encode([0u8; 26]);
-        let result = extract_outputs_from_coinbase2(&min_hex, 8);
+        let min_hex = format!("08{}00{}", "00".repeat(8), "00".repeat(8));
+        let result = extract_outputs_from_coinbase2(&min_hex);
         assert!(result.is_err());
         // This should fail on deserialize, not bounds check
         assert!(result.unwrap_err().message.contains("Bad outputs"));
 
         // Test invalid hex
-        let result = extract_outputs_from_coinbase2("not_valid_hex!", 8);
+        let result = extract_outputs_from_coinbase2("not_valid_hex!");
         assert!(result.is_err());
         assert!(result.unwrap_err().message.contains("parsing coinbase hex"));
     }

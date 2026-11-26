@@ -44,6 +44,7 @@ use p2poolv2_lib::stratum::node_p2p_listener::{
 };
 use p2poolv2_lib::stratum::server::{StratumServerBuilder, Sv2Listener};
 use p2poolv2_lib::stratum::sv2::start_template_provider;
+use p2poolv2_lib::stratum::work::coinbase_tag::{ShareChainId, coinbase_tag_for_node};
 use p2poolv2_lib::stratum::work::gbt::start_gbt;
 use p2poolv2_lib::stratum::work::notify::start_notify;
 use p2poolv2_lib::stratum::work::prepared_notify::PreparedNotifyParams;
@@ -330,6 +331,14 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
         exit_sender.subscribe(),
     );
 
+    let share_chain_id = ShareChainId::new(
+        config.stratum.network,
+        config.stratum.chain,
+        genesis.block_hash(),
+    );
+    let coinbase_tag =
+        coinbase_tag_for_node(&stratum_config, &config.bitcoinrpc, share_chain_id).await;
+
     let bitcoinrpc_config = config.bitcoinrpc.clone();
     let extra_submit_nodes = config.submit_nodes.clone();
 
@@ -508,6 +517,7 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
             template_tx,
             chain_store_handle_for_notify,
             &cloned_stratum_config,
+            coinbase_tag,
             payout,
             pool_difficulty_for_notify,
             notify_transactions,
@@ -694,7 +704,6 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
         monitoring_event_sender.clone(),
         stratum_config.network,
         bch_share_network,
-        stratum_config.pool_signature,
         api_pplns_window,
         stratum_config.port,
         stratum_config.sv2_port,

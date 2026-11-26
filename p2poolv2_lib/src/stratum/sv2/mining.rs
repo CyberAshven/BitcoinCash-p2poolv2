@@ -60,6 +60,7 @@ use crate::stratum::server::StratumContext;
 use crate::stratum::session::Session;
 use crate::stratum::validate_username;
 use crate::stratum::work::band_policy::miner_job_band;
+use crate::stratum::work::coinbase_tag::check_declared_coinbase_tag;
 use crate::stratum::work::difficulty::validate::build_coinbase_from_components;
 use crate::stratum::work::gbt::compute_merkle_root_from_branches;
 use crate::stratum::work::level_policy::session_payout_level;
@@ -355,6 +356,12 @@ impl MiningChannels {
     /// eligibility. Its token must carry the channel's own donation, and a
     /// nonempty token commitment must pass this network's ASERT header band.
     ///
+    /// The declarator names itself in its own coinbase tag, but the share
+    /// lands on this share chain: its scriptSig prefix must carry a tag with
+    /// the `P2Poolv2` line and the chain line of this node, under the name
+    /// rules (`check_declared_coinbase_tag`), or the job gets
+    /// `invalid-coinbase-tag` and the reason is logged as a warning.
+    ///
     /// The node checks a Full-Template job's block as a proposal. Only its
     /// own answer about the block, a reject reason or an error for a block
     /// it cannot read, is `invalid-template`. A proposal
@@ -406,6 +413,16 @@ impl MiningChannels {
             .session
             .share_owner
             .ok_or("authorized channel has no share owner")?;
+        if let Err(reason) = current
+            .share_chain_id()
+            .ok_or_else(|| "this node names no share chain on its jobs".to_string())
+            .and_then(|share_chain_id| {
+                check_declared_coinbase_tag(request.coinbase_prefix.as_bytes(), share_chain_id)
+            })
+        {
+            warn!("Rejected SV2 custom job: {reason}");
+            return custom_job_error(request, "invalid-coinbase-tag");
+        }
         let (job, proposal) =
             match validate_custom_job(request, declared, payout, owner, self.version_mask) {
                 Ok(validated) => validated,

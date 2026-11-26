@@ -172,6 +172,9 @@ node issued. Its Success and Error have the fields of
   own cannot use the set and moves to its next pool.
 - **Validation.** The job is checked as any declared job
   ([Rules a declared job must meet](../bch-job-declaration.md#rules-a-declared-job-must-meet)).
+  Its `coinbase_prefix` carries a [coinbase tag](../stratum.md#the-coinbase-tag)
+  with the chain line of the node, or the custom job gets
+  `invalid-coinbase-tag`; the outputs answer does not check it.
   A coinbase that differs from the set is refused with the usual
   `DeclareMiningJob.Error` or `SetCustomMiningJob.Error`; for a custom job
   the code is `invalid-custom-job`, with the reason, such as

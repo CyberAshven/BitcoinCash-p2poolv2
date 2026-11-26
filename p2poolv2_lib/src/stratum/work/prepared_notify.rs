@@ -8,6 +8,7 @@ use super::coinbase::build_bitcoin_coinbase_transaction;
 use super::coinbase::{
     LOCKTIME_LENGTH, build_coinbase, check_bch_coinbase_limit, get_timestamp_bytes, split_coinbase,
 };
+use super::coinbase_tag::ShareChainId;
 use super::error::WorkError;
 use super::gbt::build_merkle_branches_for_template;
 use super::merge_tokens::{MinerTokenJob, TokenSet};
@@ -332,9 +333,20 @@ pub struct PreparedNotifyParams {
     merge_mining_offset: Option<usize>,
     /// Shared payout tree behind these params' coinbase root output.
     payout_tree: Option<Arc<PayoutTree>>,
+    /// The share chain ID the chain line of the coinbase tag of this node
+    /// names (`stratum::work::coinbase_tag`), which the tag of a job a miner
+    /// declares on these params must name too. `None` refuses every declared
+    /// job.
+    share_chain_id: Option<ShareChainId>,
 }
 
 impl PreparedNotifyParams {
+    /// The share chain ID the coinbase tag of this node names, which a
+    /// declared job must name too; `None` when none was set.
+    pub(crate) fn share_chain_id(&self) -> Option<ShareChainId> {
+        self.share_chain_id
+    }
+
     /// Template whose share-chain payout snapshot this job commits to.
     pub(crate) fn template(&self) -> &Arc<BlockTemplate> {
         &self.template
@@ -472,6 +484,7 @@ impl PreparedNotifyParams {
         .spend_cost(self.spend_cost)
         .weak_shares(self.weak_ratio, self.weak_shares.to_vec(), self.weak_asking)
         .weak_target(self.weak_target)
+        .share_chain_id(self.share_chain_id)
         .share_transactions(self.share_transactions.to_vec());
         builder.pplns_weights = Some(Arc::clone(weights));
         builder.build()
@@ -836,6 +849,7 @@ pub(crate) struct PreparedNotifyParamsBuilder {
     weak_asking: u16,
     weak_target: Option<Target>,
     share_transactions: Vec<ShareTransaction>,
+    share_chain_id: Option<ShareChainId>,
 }
 
 impl PreparedNotifyParamsBuilder {
@@ -875,7 +889,16 @@ impl PreparedNotifyParamsBuilder {
             weak_asking: 0,
             weak_target: None,
             share_transactions: Vec::new(),
+            share_chain_id: None,
         }
+    }
+
+    /// The share chain ID the coinbase tag in `pool_signature` names, which
+    /// a job a miner declares on these params must name too. By default
+    /// none, which refuses every declared job.
+    pub fn share_chain_id(mut self, share_chain_id: Option<ShareChainId>) -> Self {
+        self.share_chain_id = share_chain_id;
+        self
     }
 
     /// The weak ratio every share on these params carries, one step from the
@@ -1268,6 +1291,7 @@ impl PreparedNotifyParamsBuilder {
             merge_token_split,
             merge_mining_offset,
             payout_tree: self.payouts.tree.map(Arc::new),
+            share_chain_id: self.share_chain_id,
         })
     }
 }

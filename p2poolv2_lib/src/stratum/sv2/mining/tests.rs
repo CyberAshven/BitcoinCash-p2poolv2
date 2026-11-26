@@ -24,8 +24,10 @@ use crate::test_utils::{
     test_bch_prepared_with_payee_count, test_bch_prepared_with_tokens, test_bch_solve_custom_job,
     test_bch_stratum_context, test_merge_token_set,
 };
+use binary_sv2::B0255;
 use bitcoin::consensus::{deserialize, serialize};
 use bitcoin::hashes::sha256d;
+use bitcoin::script::Builder;
 use bitcoin::{Address, Amount, CompressedPublicKey, Network, Transaction};
 use bitcoindrpc::BitcoindRpcClient;
 use bitcoindrpc::test_utils::{mock_submit_block_with_any_body, setup_mock_bitcoin_rpc};
@@ -236,6 +238,92 @@ async fn a_declared_job_past_the_minimum_difficulty_mark_is_refused() {
     let prepared = test_bch_prepared_for_template(at_mark);
     let token = prepared
         .mining_job_token([2; 32], prepared.template().curtime)
+        .unwrap();
+    let (mut request_bytes, declared) = test_bch_custom_job(
+        Arc::clone(&prepared),
+        token,
+        vec![],
+        false,
+        prepared.template().coinbasevalue,
+    );
+    let request = SetCustomMiningJob::from_bytes(&mut request_bytes).unwrap();
+    let frames = channels
+        .install_custom_job(&request, declared, Some(prepared))
+        .await
+        .unwrap();
+    assert_eq!(
+        frame_type(&frames[0]),
+        MESSAGE_TYPE_SET_CUSTOM_MINING_JOB_SUCCESS
+    );
+    assert_eq!(channels.channels[&1].jobs.len(), 1);
+}
+
+/// A declared job whose scriptSig prefix carries no coinbase tag, or the
+/// tag of another share chain, is refused with `invalid-coinbase-tag`; with
+/// the tag of this share chain it is installed.
+#[tokio::test]
+async fn a_declared_job_must_carry_the_coinbase_tag_of_this_share_chain() {
+    let (ctx, _emissions, _directories) = test_bch_stratum_context("http://127.0.0.1:1").await;
+    let mut channels = MiningChannels::new(ctx, DEFAULT_VERSION_MASK);
+    let mut open = open_extended_request(&bch_identity());
+    channels
+        .handle(MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL, &mut open, None)
+        .await
+        .unwrap();
+    let prepared = test_bch_prepared();
+    let height = i64::from(prepared.template().height);
+    let untagged = Builder::new()
+        .push_int(height)
+        .push_slice(b"miner")
+        .into_bytes();
+    let other_chain = Builder::new()
+        .push_int(height)
+        .push_slice(b"P2Poolv2\x0fminer\x0f\x0fqqqqqq")
+        .into_bytes();
+
+    let token = prepared
+        .mining_job_token([1; 32], prepared.template().curtime)
+        .unwrap();
+    let (mut request_bytes, declared) = test_bch_custom_job(
+        Arc::clone(&prepared),
+        token,
+        vec![],
+        false,
+        prepared.template().coinbasevalue,
+    );
+    let mut request = SetCustomMiningJob::from_bytes(&mut request_bytes).unwrap();
+    request.coinbase_prefix = B0255::new(&untagged).unwrap();
+    let frames = channels
+        .install_custom_job(&request, declared, Some(Arc::clone(&prepared)))
+        .await
+        .unwrap();
+    let mut response_payload = payload(&frames[0]);
+    let error = SetCustomMiningJobError::from_bytes(&mut response_payload).unwrap();
+    assert_eq!(error.error_code.as_utf8_or_hex(), "invalid-coinbase-tag");
+
+    let token = prepared
+        .mining_job_token([2; 32], prepared.template().curtime)
+        .unwrap();
+    let (mut request_bytes, declared) = test_bch_custom_job(
+        Arc::clone(&prepared),
+        token,
+        vec![],
+        false,
+        prepared.template().coinbasevalue,
+    );
+    let mut request = SetCustomMiningJob::from_bytes(&mut request_bytes).unwrap();
+    request.coinbase_prefix = B0255::new(&other_chain).unwrap();
+    let frames = channels
+        .install_custom_job(&request, declared, Some(Arc::clone(&prepared)))
+        .await
+        .unwrap();
+    let mut response_payload = payload(&frames[0]);
+    let error = SetCustomMiningJobError::from_bytes(&mut response_payload).unwrap();
+    assert_eq!(error.error_code.as_utf8_or_hex(), "invalid-coinbase-tag");
+    assert!(channels.channels[&1].jobs.is_empty());
+
+    let token = prepared
+        .mining_job_token([3; 32], prepared.template().curtime)
         .unwrap();
     let (mut request_bytes, declared) = test_bch_custom_job(
         Arc::clone(&prepared),

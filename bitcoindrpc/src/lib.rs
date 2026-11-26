@@ -291,6 +291,16 @@ pub struct GetMiningInfo {
     pub mining_block_size_limit: Option<u64>,
 }
 
+/// The field of `getnetworkinfo` that is read.
+#[derive(Debug, Deserialize, PartialEq, Eq)]
+pub struct GetNetworkInfo {
+    /// The user agent the node announces to its peers (BIP 14), such as
+    /// `/Bitcoin Cash Node:29.2.1(EB32.0)/` on BCHN, `/bchd:0.22.4/` on BCHD
+    /// or `/Knuth:1.7.0/`. `None` when the node does not report one.
+    #[serde(default)]
+    pub subversion: Option<String>,
+}
+
 /// The fields of a verbose `getblockheader` result that are read.
 #[derive(Debug, Deserialize)]
 struct VerboseBlockHeader {
@@ -527,6 +537,14 @@ impl BitcoindRpcClient {
 
     pub async fn getmininginfo(&self) -> Result<GetMiningInfo, BitcoindRpcError> {
         self.request("getmininginfo", vec![]).await
+    }
+
+    /// The node software and version, from the `subversion` of
+    /// `getnetworkinfo`.
+    /// A node without the RPC answers `RPC_METHOD_NOT_FOUND`
+    /// ([`BitcoindRpcError::is_method_not_found`]).
+    pub async fn getnetworkinfo(&self) -> Result<GetNetworkInfo, BitcoindRpcError> {
+        self.request("getnetworkinfo", vec![]).await
     }
 
     /// Hash, as hex, of the tip of the node's best chain.
