@@ -13,7 +13,7 @@ use crate::accounting::payout::simple_pplns::SimplePplnsShare;
 use crate::shares::bch_headers::KnownBchHeader;
 use crate::shares::share_block::{ShareBlock, ShareHeader};
 use crate::store::Store;
-use crate::store::found_block::{EffortSnapshot, FoundBlock};
+use crate::store::found_block::{EffortSnapshot, FoundBlock, LatestFoundBlocks};
 use crate::store::hashrate_samples::HashrateSample;
 use crate::store::payout_tree::StoredPayoutTree;
 use crate::store::prune_blocks::PruneStats;
@@ -177,6 +177,16 @@ impl StoreHandle {
     /// Get BCHN-accepted pool blocks, ordered by Bitcoin Cash height.
     pub fn get_found_blocks(&self) -> Result<Vec<FoundBlock>, StoreError> {
         self.store.get_found_blocks()
+    }
+
+    /// Get the `limit` most recent found bitcoin blocks, highest bitcoin
+    /// height first, with a count of entries bounded by `scan_limit`.
+    pub fn get_latest_found_blocks(
+        &self,
+        limit: usize,
+        scan_limit: usize,
+    ) -> Result<LatestFoundBlocks, StoreError> {
+        self.store.get_latest_found_blocks(limit, scan_limit)
     }
 
     /// Get claimed block candidates still awaiting BCHN verification.
@@ -610,6 +620,7 @@ mockall::mock! {
         pub fn get_chain_tip(&self) -> Result<BlockHash, StoreError>;
         pub fn get_total_work(&self) -> Result<Work, StoreError>;
         pub fn get_found_blocks(&self) -> Result<Vec<FoundBlock>, StoreError>;
+        pub fn get_latest_found_blocks(&self, limit: usize, scan_limit: usize) -> Result<LatestFoundBlocks, StoreError>;
         pub fn get_candidate_found_blocks(&self) -> Result<Vec<FoundBlock>, StoreError>;
         pub fn get_bch_header(&self, block_hash: &BlockHash) -> Result<Option<KnownBchHeader>, StoreError>;
         pub async fn add_bch_headers(&self, headers: Vec<KnownBchHeader>) -> Result<(), StoreError>;

@@ -346,6 +346,13 @@ The top-level values are the newest sample (read live before the first one).
 Bitcoin blocks found by the pool, newest first. The same data `/metrics`
 exposes as `found_block_time_seconds`.
 
+| Parameter | Default | Range | Meaning |
+|---|---|---|---|
+| `num` | every block | 1..=100 | Number of most recent found blocks |
+
+With `num`, the node reads only those blocks from its store. The response
+is the same array either way.
+
 ```json
 [{"bitcoin_height":289001,"bitcoin_blockhash":"0000...","share_blockhash":"47fb...",
   "bitcoin_time":1792675942,"miner_bitcoin_address":"bchtest:qr..."}]

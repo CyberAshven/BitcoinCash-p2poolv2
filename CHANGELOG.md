@@ -97,6 +97,10 @@ format and genesis re-pin.
 
 ### Added
 
+- `/found_blocks?num=N` returns the N most recent found blocks (1 to 100),
+  read newest first from the end of the store without walking the rest, from
+  upstream `64934868` and `9afcdeff`. The response stays a bare array, and
+  without `num` it still lists every found block, as the dashboards need.
 - `/metrics` counts the connections the connection limits refused,
   incoming and outgoing (`p2p_connections_refused_total`); the node had
   ignored refused incoming connections.
