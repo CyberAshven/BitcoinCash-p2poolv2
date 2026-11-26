@@ -21,6 +21,8 @@ config.toml
 config-dev.toml
 config-*-copy.toml
 config-node2.toml
+config-node1-chipnet.toml
+config-node2-chipnet.toml
 # The cargo aliases for the developer tools (docs/tooling.md) are not a node
 # config.
 !/.cargo/config.toml
@@ -54,7 +56,15 @@ perf.data
 # Local node run logs
 node-start.log
 node-start.log.prev
+node1-start.log
 node2-start.log
+mainnet-start.log
+
+# Per-node libp2p identity and peer book: chipnet node1 keeps its own in
+# ./node1/, node2 in the root; a fresh mainnet node would generate its own
+# beside its store, and none of these are shared.
+p2p_node_key*
+p2p_peers.json*
 
 # nix outputs
 /result*

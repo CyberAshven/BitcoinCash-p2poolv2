@@ -11,8 +11,8 @@ use crate::format::url_decode;
 use crate::layout::{Footer, Header, PageFrame, Trail};
 use crate::route::{PAGE_SIZE, Route};
 use crate::views::{
-    BlockPage, BlocksPage, HelpPage, MinerPage, MinersPage, OverviewPage, SearchPage, SettingsPage,
-    SharePage, SharesPage,
+    BlockPage, BlocksPage, HelpPage, MinerPage, MinersPage, OverviewPage, PeersPage, SearchPage,
+    SettingsPage, SharePage, SharesPage,
 };
 use futures::{SinkExt, StreamExt};
 use gloo_net::websocket::{Message, futures::WebSocket};
@@ -239,6 +239,7 @@ pub fn App() -> impl IntoView {
                     view! { <MinerPage address=address page=page /> }.into_any()
                 }
                 Route::Share(hash) => view! { <SharePage hash=hash /> }.into_any(),
+                Route::Peers => view! { <PeersPage /> }.into_any(),
                 Route::Help => view! { <HelpPage /> }.into_any(),
                 Route::Settings => view! { <SettingsPage /> }.into_any(),
                 Route::Search(text) => view! { <SearchPage text=text /> }.into_any(),

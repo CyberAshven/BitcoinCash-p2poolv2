@@ -58,6 +58,8 @@ async fn build_test_state(node_handle: NodeHandle) -> (Arc<AppState>, tempfile::
         monitoring_event_sender: create_monitoring_event_channel(),
         auth_user: None,
         auth_token: None,
+        stratum_port: 3333,
+        sv2_port: None,
         pplns_window: None,
     });
     (state, temp_dir)
@@ -397,6 +399,8 @@ async fn test_metrics_endpoint_exposes_coinbase_split() {
         monitoring_event_sender: create_monitoring_event_channel(),
         auth_user: None,
         auth_token: None,
+        stratum_port: 3333,
+        sv2_port: None,
         pplns_window: None,
     });
 
@@ -506,6 +510,8 @@ async fn build_auth_test_state() -> (Arc<AppState>, tempfile::TempDir, String) {
         monitoring_event_sender: create_monitoring_event_channel(),
         auth_user: Some(username.to_string()),
         auth_token: Some(token),
+        stratum_port: 3333,
+        sv2_port: None,
         pplns_window: None,
     });
     (state, temp_dir, base64_credentials)
@@ -834,6 +840,8 @@ async fn test_cors_headers_present_when_enabled() {
         monitoring_event_sender: create_monitoring_event_channel(),
         auth_user: None,
         auth_token: None,
+        stratum_port: 3333,
+        sv2_port: None,
         pplns_window: None,
     });
 
@@ -904,6 +912,8 @@ async fn test_hashrate_route_serves_history() {
         pool: Some(5.0),
         local: None,
         network: Some(7.0),
+        miners: Some(1),
+        workers: Some(1),
     });
     let app = build_router_with_history(
         state.clone(),

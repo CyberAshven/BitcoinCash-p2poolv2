@@ -60,12 +60,25 @@ pub const MAX_HISTORY_POINTS: usize = 2_592_000 / 60;
 const RECENT_BLOCKS: usize = 5;
 
 /// Confirmed share heights the overview's Recent shares lists; the shares
-/// page has them all.
+/// page has them all. [`RECENT_ROWS`] caps the rows those heights expand
+/// to, uncles included.
 const RECENT_SHARES: usize = 5;
+
+/// Rows the overview's Recent shares table renders: the height window
+/// expands to a row per share plus a row per uncle, and this truncates the
+/// result to a fixed count so the panel keeps the same size on every
+/// refresh, whatever uncles the window carries, as the node's own
+/// `OVERVIEW_ROWS` does.
+const RECENT_ROWS: usize = 5;
+
+/// Connected peers the overview's Peers panel lists; the peers page has
+/// them all. The panel keeps this many rows at every count so a peer
+/// joining or leaving never changes its height.
+const RECENT_PEERS: usize = 5;
 
 /// What the overview's peers panel says when its request answered and no
 /// peer is connected.
-const NO_PEERS_YET: &str =
+pub const NO_PEERS_YET: &str =
     "No p2pool peers connected right now. They appear here once the node dials or accepts a peer.";
 
 /// A confirmed share or one of its uncles, as the overview lists it.
@@ -118,11 +131,29 @@ pub fn share_rows(shares: &[Share], found: &HashSet<String>) -> Vec<ShareRow> {
     rows
 }
 
+/// The rows the overview's Recent shares panel holds: the window's rows,
+/// capped at [`RECENT_ROWS`], dropping oldest rows only, so a share row
+/// still sits directly above its uncles and the panel keeps the same size
+/// on every refresh, whatever uncles the window carries. The node's own
+/// overview truncates the same way.
+pub fn capped_share_rows(shares: &[Share], found: &HashSet<String>) -> Vec<ShareRow> {
+    let mut rows = share_rows(shares, found);
+    rows.truncate(RECENT_ROWS);
+    rows
+}
+
 /// The newest `MAX_HISTORY_POINTS` samples of `history`.
 pub fn capped_history(mut history: Vec<HashratePoint>) -> Vec<HashratePoint> {
     let excess = history.len().saturating_sub(MAX_HISTORY_POINTS);
     history.drain(..excess);
     history
+}
+
+/// The peers the overview's panel lists: the `RECENT_PEERS` the endpoint
+/// sent first, in its longest-uptime order. The panel's note still counts
+/// every peer, and the peers page lists them all.
+pub fn capped_peers(peers: &[Peer]) -> Vec<Peer> {
+    peers.iter().take(RECENT_PEERS).cloned().collect()
 }
 
 /// The network difficulty `hashrate` implies: its current network hashrate,
@@ -187,27 +218,70 @@ pub fn shares_table(rows: Vec<ShareRow>) -> impl IntoView {
     }
 }
 
-/// One connected peer as the peers table's row: its IP (or the full
-/// multiaddr when the IP is not known, or the dash when neither is there),
-/// its version with the identify agent prefix dropped, the connection
-/// direction, its uptime and its latest ping round trip.
-fn peer_row_view(peer: &Peer) -> impl IntoView {
-    let address = peer.ip.as_deref().unwrap_or(peer.address.as_str());
-    let address = if address.is_empty() {
+/// A peer's address cell: its IP with the connection's port, or the full
+/// multiaddr when the IP is not known (its own `/tcp/` component already
+/// carries the port), or the dash when neither is there.
+fn peer_address(peer: &Peer) -> String {
+    if let Some(ip) = peer.ip.as_deref().filter(|ip| !ip.is_empty()) {
+        return match peer_port(&peer.address) {
+            Some(port) => format!("{ip}:{port}"),
+            None => ip.to_string(),
+        };
+    }
+    if peer.address.is_empty() {
         UNKNOWN.to_string()
     } else {
-        address.to_string()
-    };
+        peer.address.clone()
+    }
+}
+
+/// The TCP port in a peer's multiaddr: the digits after `/tcp/` up to the
+/// next component, or none when the address carries no transport port.
+fn peer_port(address: &str) -> Option<&str> {
+    let (_, tail) = address.split_once("/tcp/")?;
+    let port = tail.split('/').next().unwrap_or("");
+    (!port.is_empty() && port.bytes().all(|byte| byte.is_ascii_digit())).then_some(port)
+}
+
+/// One connected peer as the peers table's row: its address as host:port
+/// (or the full multiaddr when the IP is not known, or the dash when
+/// neither is there), its version with the identify agent prefix dropped,
+/// the connection direction, its uptime and its latest ping round trip.
+fn peer_row_view(peer: Peer) -> impl IntoView {
+    let address = peer_address(&peer);
     let version = agent_version(peer.version.as_deref());
     let latency = optional(peer.latency_ms, fmt_latency);
     view! {
         <tr>
             <td class="mono peer-addr">{address}</td>
             <td>{version}</td>
-            <td>{peer.direction.clone()}</td>
+            <td>{peer.direction}</td>
             <td>{fmt_duration(peer.connected_secs)}</td>
             <td class="mono">{latency}</td>
         </tr>
+    }
+}
+
+/// The connected peers table: the overview and the peers page render the
+/// same five columns, so one component holds the markup.
+#[component]
+pub fn PeerTable(peers: Vec<Peer>) -> impl IntoView {
+    let rows = peers.into_iter().map(peer_row_view).collect_view();
+    view! {
+        <div class="table-wrap">
+            <table class="table">
+                <thead>
+                    <tr>
+                        <th>"Address:port"</th>
+                        <th>"Version"</th>
+                        <th>"Direction"</th>
+                        <th>"Uptime"</th>
+                        <th>"Latency"</th>
+                    </tr>
+                </thead>
+                <tbody>{rows}</tbody>
+            </table>
+        </div>
     }
 }
 
@@ -228,6 +302,44 @@ fn failure<T: 'static>(resource: &LocalResource<Result<T, String>>) -> Option<St
     resource.with(|value| match value {
         Some(Err(message)) => Some(message.clone()),
         _ => None,
+    })
+}
+
+/// The sliding window the node's local hashrate is measured over, in
+/// seconds. Kept in sync with p2poolv2_lib's metrics `SUBMISSION_WINDOW_SECS`
+/// (the web crate does not depend on the node), the same way
+/// `format.rs` carries `BLOCK_INTERVAL_SECONDS`.
+const SUBMISSION_WINDOW_SECS: u64 = 600;
+
+/// The node's hashrate the KPI card shows: `current`, the rate `/hashrate`
+/// read live, else the newest of `history` inside the window that has one.
+/// Samples only accumulate when a metric goes quiet, so the newest one can
+/// be the stale value a stopped miner left behind; `fresh` cuts a sample
+/// that has outlived the window it measures, leaving the card a dash
+/// instead of frozen. With history, `current` is the newest sample's own
+/// value, so it takes the same test; with no samples `current` is the live
+/// window read and passes on its own. `now` is unix seconds the caller
+/// holds already (the page clock), not a clock read of its own.
+fn local_rate(
+    current: Option<f64>,
+    history: &[HashratePoint],
+    now: u64,
+    fresh: impl Fn(u64) -> bool,
+) -> Option<f64> {
+    let current = if history
+        .last()
+        .is_none_or(|newest| fresh(now.saturating_sub(newest.time)))
+    {
+        current
+    } else {
+        None
+    };
+    current.or_else(|| {
+        history
+            .iter()
+            .rev()
+            .filter(|point| fresh(now.saturating_sub(point.time)))
+            .find_map(|point| point.local_hashrate)
     })
 }
 
@@ -292,6 +404,10 @@ pub fn OverviewPage() -> impl IntoView {
     let dmax_visible = RwSignal::new(crate::app::stored_flag("p2pool.dmax-visible"));
     let uncles_visible = RwSignal::new(crate::app::stored_flag("p2pool.uncles-visible"));
     let weak_visible = RwSignal::new(crate::app::stored_flag("p2pool.weak-visible"));
+    // The miners/workers count lines are opt-in like the network line, so
+    // they start from their own opt-in flags.
+    let miners_visible = RwSignal::new(crate::app::stored_opt_in_flag("p2pool.miners-visible"));
+    let workers_visible = RwSignal::new(crate::app::stored_opt_in_flag("p2pool.workers-visible"));
     // The chips write the flip back so the next visit keeps it. `"1"`/`"0"`
     // suits both flags: [stored_flag] reads only `"0"` as off, and
     // [stored_opt_in_flag] reads only `"1"` as on.
@@ -328,10 +444,11 @@ pub fn OverviewPage() -> impl IntoView {
         .unwrap_or_default()
     });
     // The overview shows the few newest heights; `recent` stays newest
-    // first, and the shares page carries the whole chain.
+    // first, and the shares page carries the whole chain. The rows cap
+    // keeps the panel a fixed height when the window carries uncles.
     let rows = Signal::derive(move || {
         recent.with(|shares| {
-            found.with(|found| share_rows(&shares[..shares.len().min(RECENT_SHARES)], found))
+            found.with(|found| capped_share_rows(&shares[..shares.len().min(RECENT_SHARES)], found))
         })
     });
     let history = Memo::new(move |_| {
@@ -383,6 +500,11 @@ pub fn OverviewPage() -> impl IntoView {
         Memo::new(move |_| loaded(&sharechain, |data| to_points(&data.uncles)).unwrap_or_default());
     let sc_weak =
         Memo::new(move |_| loaded(&sharechain, |data| to_points(&data.weak)).unwrap_or_default());
+    let sc_miners =
+        Memo::new(move |_| loaded(&sharechain, |data| to_points(&data.miners)).unwrap_or_default());
+    let sc_workers = Memo::new(move |_| {
+        loaded(&sharechain, |data| to_points(&data.workers)).unwrap_or_default()
+    });
     // Harmonize the KPI cards: fall back to the newest non-null history
     // sample when the live read is unknown, so all three cards show a value
     // (or all show the dash) together.
@@ -427,15 +549,15 @@ pub fn OverviewPage() -> impl IntoView {
             totals.unwrap_or_else(|| format!("{UNKNOWN} rejected of {UNKNOWN} shares")),
         ]
     });
-    // The node's overview shows the newest sample that has this node's rate.
+    // The node's overview shows the newest sample that has this node's
+    // rate, aged against the page clock (which ticks every second) so a
+    // sample older than the submission window it measures cannot stand in
+    // for a live rate that no longer exists.
     let local_rate = Signal::derive(move || {
+        let now = clock.get();
         loaded(&hashrate, |hashrate| {
-            let newest = hashrate.local_hashrate.or_else(|| {
-                hashrate
-                    .history
-                    .iter()
-                    .rev()
-                    .find_map(|point| point.local_hashrate)
+            let newest = local_rate(hashrate.local_hashrate, &hashrate.history, now, |age| {
+                age <= SUBMISSION_WINDOW_SECS
             });
             optional(newest, fmt_hashrate)
         })
@@ -539,6 +661,8 @@ pub fn OverviewPage() -> impl IntoView {
                     diff_max=sc_dmax
                     uncles=sc_uncles
                     weak=sc_weak
+                    miners=sc_miners
+                    workers=sc_workers
                     blocks=chart_blocks
                     range=zoom
                     label=label
@@ -547,6 +671,8 @@ pub fn OverviewPage() -> impl IntoView {
                     dmax_visible=dmax_visible
                     uncles_visible=uncles_visible
                     weak_visible=weak_visible
+                    miners_visible=miners_visible
+                    workers_visible=workers_visible
                     blocks_visible=blocks_visible
                 />
             }
@@ -620,6 +746,26 @@ pub fn OverviewPage() -> impl IntoView {
                     >
                         <span class="legend-dot dmax"></span>
                         "Max diff"
+                    </button>
+                    <button
+                        class="legend-chip"
+                        class:off=move || !miners_visible.get()
+                        type="button"
+                        aria-pressed=move || miners_visible.get().to_string()
+                        on:click=flip(miners_visible, "p2pool.miners-visible")
+                    >
+                        <span class="legend-dot miners"></span>
+                        "Miners"
+                    </button>
+                    <button
+                        class="legend-chip"
+                        class:off=move || !workers_visible.get()
+                        type="button"
+                        aria-pressed=move || workers_visible.get().to_string()
+                        on:click=flip(workers_visible, "p2pool.workers-visible")
+                    >
+                        <span class="legend-dot workers"></span>
+                        "Workers"
                     </button>
                     <button
                         class="legend-chip"
@@ -779,19 +925,9 @@ pub fn OverviewPage() -> impl IntoView {
                 view! { <p class="empty-state">{NO_PEERS_YET}</p> }.into_any()
             }
             Some(Ok(peers_list)) => view! {
-                <div class="table-wrap">
-                    <table class="table">
-                        <thead>
-                            <tr>
-                                <th>"Address"</th>
-                                <th>"Version"</th>
-                                <th>"Direction"</th>
-                                <th>"Uptime"</th>
-                                <th>"Latency"</th>
-                            </tr>
-                        </thead>
-                        <tbody>{peers_list.iter().map(peer_row_view).collect_view()}</tbody>
-                    </table>
+                <PeerTable peers=capped_peers(&peers_list) />
+                <div class="panel-more">
+                    <a href=Route::Peers.href()>"All connected peers \u{2192}"</a>
                 </div>
             }
             .into_any(),
@@ -876,6 +1012,64 @@ pub fn OverviewPage() -> impl IntoView {
 mod tests {
     use super::*;
     use crate::api::Uncle;
+
+    /// A connected peer as `/peers` reports it, at `address`.
+    fn connected_peer(address: &str) -> Peer {
+        Peer {
+            ip: Some(address.to_string()),
+            address: format!("/ip4/{address}/tcp/6886"),
+            direction: "Inbound".to_string(),
+            connected_secs: 60,
+            version: Some("p2poolv2/0.0.1-alpha".to_string()),
+            latency_ms: Some(0.5),
+        }
+    }
+
+    /// A peer variant the address tests reshape freely.
+    fn bare_peer(ip: Option<&str>, address: &str) -> Peer {
+        Peer {
+            ip: ip.map(str::to_string),
+            address: address.to_string(),
+            direction: "Inbound".to_string(),
+            connected_secs: 60,
+            version: None,
+            latency_ms: None,
+        }
+    }
+
+    #[test]
+    fn test_an_address_is_the_ip_followed_by_the_connection_port() {
+        // The live multiaddr keeps going after the port with /p2p/<peer id>.
+        let peer = bare_peer(
+            Some("104.164.55.69"),
+            "/ip4/104.164.55.69/tcp/6887/p2p/12D3KooWExample",
+        );
+        assert_eq!(peer_address(&peer), "104.164.55.69:6887");
+    }
+
+    #[test]
+    fn test_an_address_falls_back_to_the_multiaddr_or_the_ip_alone() {
+        let no_ip = bare_peer(None, "/ip6/2001:db8::1/tcp/6884");
+        assert_eq!(peer_address(&no_ip), "/ip6/2001:db8::1/tcp/6884");
+
+        let no_port = bare_peer(Some("10.0.0.1"), "/dns4/seed.example");
+        assert_eq!(peer_address(&no_port), "10.0.0.1");
+
+        assert_eq!(peer_address(&bare_peer(None, "")), UNKNOWN);
+    }
+
+    #[test]
+    fn test_the_port_is_the_digits_after_tcp_and_nothing_else() {
+        assert_eq!(
+            peer_port("/ip4/1.2.3.4/tcp/6887/p2p/12D3KooW"),
+            Some("6887")
+        );
+        assert_eq!(peer_port("/ip4/1.2.3.4/tcp/39196"), Some("39196"));
+        assert_eq!(peer_port("/dns4/seed.example"), None);
+        assert_eq!(peer_port("/ip4/1.2.3.4/tcp//p2p/x"), None);
+        assert_eq!(peer_port("/ip4/1.2.3.4/tcp/12ab"), None);
+        assert_eq!(peer_port(""), None);
+    }
 
     #[test]
     fn test_uncles_follow_the_share_that_includes_them() {
@@ -977,6 +1171,137 @@ mod tests {
     }
 
     #[test]
+    fn test_recent_shares_hold_five_rows_when_a_share_carries_an_uncle() {
+        let shares = vec![
+            Share {
+                blockhash: "h5".to_string(),
+                height: 5,
+                miner_bitcoin_address: "bchtest:a".to_string(),
+                miner_address: "tp2pool:a".to_string(),
+                timestamp: 50,
+                bits: 0x1d00_ffff,
+                uncles: Vec::new(),
+                weak_count: 0,
+            },
+            Share {
+                blockhash: "h4".to_string(),
+                height: 4,
+                miner_bitcoin_address: "bchtest:b".to_string(),
+                miner_address: "tp2pool:b".to_string(),
+                timestamp: 40,
+                bits: 0x1d00_ffff,
+                uncles: vec![Uncle {
+                    blockhash: "u4".to_string(),
+                    miner_bitcoin_address: "bchtest:c".to_string(),
+                    miner_address: "tp2pool:c".to_string(),
+                    timestamp: 39,
+                    height: Some(4),
+                }],
+                weak_count: 0,
+            },
+            Share {
+                blockhash: "h3".to_string(),
+                height: 3,
+                miner_bitcoin_address: "bchtest:d".to_string(),
+                miner_address: "tp2pool:d".to_string(),
+                timestamp: 30,
+                bits: 0x1d00_ffff,
+                uncles: Vec::new(),
+                weak_count: 0,
+            },
+            Share {
+                blockhash: "h2".to_string(),
+                height: 2,
+                miner_bitcoin_address: "bchtest:e".to_string(),
+                miner_address: "tp2pool:e".to_string(),
+                timestamp: 20,
+                bits: 0x1d00_ffff,
+                uncles: Vec::new(),
+                weak_count: 0,
+            },
+            Share {
+                blockhash: "h1".to_string(),
+                height: 1,
+                miner_bitcoin_address: "bchtest:f".to_string(),
+                miner_address: "tp2pool:f".to_string(),
+                timestamp: 10,
+                bits: 0x1d00_ffff,
+                uncles: Vec::new(),
+                weak_count: 0,
+            },
+        ];
+        let rows = capped_share_rows(&shares, &HashSet::new());
+
+        assert_eq!(rows.len(), RECENT_ROWS, "the uncle does not grow the panel");
+        assert_eq!(
+            rows.iter()
+                .map(|row| (row.blockhash.as_str(), row.is_uncle))
+                .collect::<Vec<_>>(),
+            vec![
+                ("h5", false),
+                ("h4", false),
+                ("u4", true),
+                ("h3", false),
+                ("h2", false),
+            ],
+            "the uncle stays under the share that includes it and the oldest row drops"
+        );
+    }
+
+    #[test]
+    fn test_recent_shares_without_uncles_keep_all_five_rows() {
+        let shares: Vec<Share> = (1..=5)
+            .map(|height| Share {
+                blockhash: format!("h{height}"),
+                height,
+                miner_bitcoin_address: "bchtest:a".to_string(),
+                miner_address: "tp2pool:a".to_string(),
+                timestamp: u64::from(height) * 10,
+                bits: 0x1d00_ffff,
+                uncles: Vec::new(),
+                weak_count: 0,
+            })
+            .collect();
+        let rows = capped_share_rows(&shares, &HashSet::new());
+
+        assert_eq!(rows.len(), RECENT_ROWS);
+        assert_eq!(rows[0].height, Some(5));
+        assert_eq!(rows[4].height, Some(1));
+    }
+
+    #[test]
+    fn test_the_peers_panel_keeps_the_five_longest_connected() {
+        let peers: Vec<Peer> = ["1", "2", "3", "4", "5", "6"]
+            .iter()
+            .map(|octet| connected_peer(&format!("10.0.0.{octet}")))
+            .collect();
+        let capped = capped_peers(&peers);
+
+        assert_eq!(capped.len(), RECENT_PEERS);
+        assert_eq!(
+            capped
+                .iter()
+                .map(|peer| peer.ip.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                Some("10.0.0.1".to_string()),
+                Some("10.0.0.2".to_string()),
+                Some("10.0.0.3".to_string()),
+                Some("10.0.0.4".to_string()),
+                Some("10.0.0.5".to_string()),
+            ],
+            "the sixth peer falls off the capped panel, in the endpoint's order"
+        );
+    }
+
+    #[test]
+    fn test_capping_fewer_peers_than_the_cap_keeps_them() {
+        let peers = vec![connected_peer("10.0.0.1")];
+        assert_eq!(capped_peers(&peers), peers);
+        assert!(capped_peers(&Vec::new()).is_empty());
+    }
+
+    #[test]
     fn test_the_first_error_is_shown() {
         assert_eq!(
             first_error([
@@ -989,5 +1314,81 @@ mod tests {
             Some("a".to_string())
         );
         assert_eq!(first_error([None, None, None, None, None]), None);
+    }
+
+    /// A history point carrying only this node's rate, at `time`.
+    fn local_point(time: u64, local: f64) -> HashratePoint {
+        HashratePoint {
+            time,
+            pool_hashrate: None,
+            local_hashrate: Some(local),
+            network_hashrate: None,
+        }
+    }
+
+    /// The freshness test the KPI signal applies: a sample must sit inside
+    /// the submission window it measures.
+    fn fresh(age: u64) -> bool {
+        age <= SUBMISSION_WINDOW_SECS
+    }
+
+    #[test]
+    fn test_the_local_rate_drops_a_sample_older_than_the_submission_window() {
+        // The miner stopped and the last sample froze on its decay value;
+        // with history, the response's top-level rate *is* that newest
+        // sample, so both the direct read and the scan must age out.
+        let history = [local_point(8_000, 37.3e9)];
+        assert_eq!(local_rate(Some(37.3e9), &history, 10_000, fresh), None);
+    }
+
+    #[test]
+    fn test_the_local_rate_keeps_a_sample_inside_the_submission_window() {
+        let history = [local_point(9_600, 37.3e9)];
+        assert_eq!(
+            local_rate(None, &history, 10_000, fresh),
+            Some(37.3e9),
+            "a sample young enough to describe the window still carries the card"
+        );
+    }
+
+    #[test]
+    fn test_the_local_rate_looks_past_a_fresh_sample_with_no_value() {
+        // The newest sample is fresh but carries no rate (a sampler tick
+        // between submissions): the scan must continue to the sample behind
+        // it instead of stopping at the first fresh point. What sits behind
+        // is older, though, so a rate can only come from the stale side.
+        let without_rate = HashratePoint {
+            time: 9_600,
+            pool_hashrate: None,
+            local_hashrate: None,
+            network_hashrate: None,
+        };
+        assert_eq!(
+            local_rate(
+                None,
+                &[without_rate, local_point(8_000, 37.3e9)],
+                10_000,
+                fresh
+            ),
+            None,
+            "all other samples are stale once the fresh ones carry nothing"
+        );
+        assert_eq!(
+            local_rate(
+                None,
+                &[local_point(9_600, 5.0e6), local_point(8_000, 37.3e9)],
+                10_000,
+                fresh
+            ),
+            Some(5.0e6),
+            "the fresh newest sample's own value is what answers"
+        );
+    }
+
+    #[test]
+    fn test_the_local_rate_trusts_the_live_read_without_history() {
+        // No samples yet: the response's rate is the live window read, not
+        // a stored value, and stands on its own.
+        assert_eq!(local_rate(Some(42.0e9), &[], 10_000, fresh), Some(42.0e9));
     }
 }

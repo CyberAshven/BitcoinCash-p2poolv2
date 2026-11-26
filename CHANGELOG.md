@@ -394,6 +394,18 @@ format and genesis re-pin.
 
 ### Fixed
 
+- A declared Stratum V2 job is no longer refused as `invalid-template` when
+  the node behind the pool checks no block proposals. Knuth answers every
+  proposal "only template mode is supported", and the pool took that for a
+  verdict on the block, so a pool on Knuth refused every declared job. Such
+  a node now gets `template-unavailable` and a warning that Job Declaration
+  needs a node that checks proposals, such as BCHN. Every refused
+  declaration is now logged at warn with the reason from the node; it was
+  debug only.
+- A bad `[stratum]` setting, such as a `pool_signature` over 16 bytes, no
+  longer makes the node panic after it has opened its store and waited for
+  its Bitcoin node. The node now refuses to start at once and logs the
+  reason as an error.
 - A read-only store open (`p2poolv2_cli --db-path`, `verify_chain`) opens
   every column family with its own options. It had reopened them with
   default options, without the merge operators of the height, child, txid
