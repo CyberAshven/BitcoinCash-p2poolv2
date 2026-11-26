@@ -57,8 +57,8 @@ pub enum StoreError {
     /// delete the store and resync.
     OutdatedStore(String),
     /// The column families of a store on disk differ from the ones this
-    /// build uses. Raised by a read-only open, which opens exactly this
-    /// build's column families and so cannot leave one out.
+    /// build uses. Raised by a read-only open, which opens exactly the
+    /// column families this build uses and so cannot leave one out.
     ColumnFamilyMismatch(String),
 }
 
