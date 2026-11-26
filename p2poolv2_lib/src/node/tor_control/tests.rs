@@ -105,12 +105,6 @@ fn service_address() -> Multiaddr {
     format!("/onion3/{SERVICE_ID}:6884").parse().unwrap()
 }
 
-fn hmac_sha256(key: &[u8], message: &[u8]) -> Vec<u8> {
-    let mut mac = HmacSha256::new_from_slice(key).unwrap();
-    mac.update(message);
-    mac.finalize().into_bytes().to_vec()
-}
-
 /// With no password asked for, the node authenticates with none, and
 /// `ADD_ONION` forwards virtual port 6884 to its listen address.
 #[tokio::test]
@@ -150,35 +144,23 @@ async fn a_node_authenticates_with_its_tor_password() {
     ));
 }
 
-/// SAFECOOKIE: the node reads the cookie file Tor names, checks Tor's
-/// server hash, and answers with the client hash, both HMAC-SHA256 over the
-/// cookie and the two nonces.
+/// COOKIE: the node reads the cookie file Tor names and sends it, hex
+/// encoded. Tor offers SAFECOOKIE beside it, as it does with
+/// CookieAuthentication set; the node never asks for an AUTHCHALLENGE.
 #[tokio::test]
-async fn a_node_authenticates_with_tors_cookie() {
+async fn a_node_authenticates_with_the_tor_cookie() {
     let dir = tempdir().unwrap();
     let cookie_path = dir.path().join("control_auth_cookie");
     let cookie = [0x5au8; COOKIE_BYTES];
     std::fs::write(&cookie_path, cookie).unwrap();
-    let server_nonce = [0x17u8; NONCE_BYTES];
-
-    let expected_client_hash = Arc::new(Mutex::new(None));
-    let expected = Arc::clone(&expected_client_hash);
+    let expected = format!("AUTHENTICATE {}", hex::encode(cookie));
     let answers = tor_answers("COOKIE,SAFECOOKIE", Some(cookie_path.display().to_string()));
     let tor = FakeTor::start(move |command| {
-        if let Some(client_nonce) = command.strip_prefix("AUTHCHALLENGE SAFECOOKIE ") {
-            let client_nonce = hex::decode(client_nonce).unwrap();
-            let message = [&cookie[..], &client_nonce[..], &server_nonce[..]].concat();
-            *expected.lock().unwrap() = Some(hex::encode(hmac_sha256(CLIENT_HASH_KEY, &message)));
-            format!(
-                "250 AUTHCHALLENGE SERVERHASH={} SERVERNONCE={}\r\n",
-                hex::encode(hmac_sha256(SERVER_HASH_KEY, &message)),
-                hex::encode(server_nonce)
-            )
-        } else if let Some(client_hash) = command.strip_prefix("AUTHENTICATE ") {
-            if expected.lock().unwrap().as_deref() == Some(client_hash) {
+        if command.starts_with("AUTHENTICATE") {
+            if command == expected {
                 "250 OK\r\n".into()
             } else {
-                "515 Authentication failed: Safe cookie response did not match expected value.\r\n"
+                "515 Authentication failed: Authentication cookie did not match expected value.\r\n"
                     .into()
             }
         } else {
@@ -189,35 +171,32 @@ async fn a_node_authenticates_with_tors_cookie() {
 
     let (address, _connection) = open(&service(&tor.address, None)).await.unwrap();
     assert_eq!(address, service_address());
-    assert!(expected_client_hash.lock().unwrap().is_some());
+    assert!(
+        !tor.commands()
+            .iter()
+            .any(|command| command.starts_with("AUTHCHALLENGE")),
+        "{:?}",
+        tor.commands()
+    );
 }
 
-/// A control port that does not know the cookie, so not Tor, sends a server
-/// hash that does not match it. The node stops there and sends no client
-/// hash, which would prove it read the cookie.
+/// A cookie file that is not 32 bytes is not the cookie of Tor: the node
+/// stops before it sends anything from it.
 #[tokio::test]
-async fn a_server_hash_that_does_not_match_the_cookie_is_refused() {
+async fn a_cookie_file_of_the_wrong_size_is_refused() {
     let dir = tempdir().unwrap();
     let cookie_path = dir.path().join("control_auth_cookie");
-    std::fs::write(&cookie_path, [0x5au8; COOKIE_BYTES]).unwrap();
-    let answers = tor_answers("COOKIE,SAFECOOKIE", Some(cookie_path.display().to_string()));
-    let tor = FakeTor::start(move |command| {
-        if command.starts_with("AUTHCHALLENGE SAFECOOKIE ") {
-            format!(
-                "250 AUTHCHALLENGE SERVERHASH={} SERVERNONCE={}\r\n",
-                hex::encode([0u8; 32]),
-                hex::encode([0x17u8; NONCE_BYTES])
-            )
-        } else {
-            answers(command)
-        }
-    })
+    std::fs::write(&cookie_path, [0x5au8; 16]).unwrap();
+    let tor = FakeTor::start(tor_answers(
+        "COOKIE",
+        Some(cookie_path.display().to_string()),
+    ))
     .await;
 
     match open(&service(&tor.address, None)).await {
-        Err(Failure::Refused(error)) => assert!(error.contains("SERVERHASH"), "{error}"),
+        Err(Failure::Refused(error)) => assert!(error.contains("16 bytes"), "{error}"),
         Err(other) => panic!("expected a refusal, got {other:?}"),
-        Ok(_) => panic!("the node logged in to a control port that does not know the cookie"),
+        Ok(_) => panic!("the node logged in with a cookie file of the wrong size"),
     }
     assert!(
         !tor.commands()

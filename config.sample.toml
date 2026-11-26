@@ -16,13 +16,17 @@ listen_address = "/ip4/0.0.0.0/tcp/6884"
 # control port has made this node an onion service (listen_onion), and
 # until then onion addresses are ignored.
 # tor_proxy = "127.0.0.1:9050"
-# Make this node an onion service through Tor's control port, as Bitcoin
-# Cash Node's -listenonion: on by default, and quiet (debug logs only) while
-# no Tor answers at tor_control. Tor needs "ControlPort 9051" and
-# "CookieAuthentication 1" in its torrc, with the cookie file readable by
-# the node's user, or a HashedControlPassword and tor_password. Peers with
-# Tor reach the node at /onion3/<address>:6884; the key is kept in
-# onion_v3_private_key beside the store, so the address survives restarts.
+# Make this node an onion service through the Tor control port, as
+# -listenonion in Bitcoin Cash Node: on by default, and quiet (debug logs
+# only) while no Tor answers at tor_control. Tor needs "ControlPort 9051" in
+# its torrc and one way to log in. The stronger one is a password: run
+# "tor --hash-password <password>", put "HashedControlPassword <hash>" in
+# the torrc and the password in tor_password. Without one, the node logs in
+# with "CookieAuthentication 1" (COOKIE), which sends the cookie itself to
+# whatever answers at tor_control, so the cookie file must be readable by
+# the user of the node. Peers with Tor reach the node at
+# /onion3/<address>:6884; the key is kept in onion_v3_private_key beside the
+# store, so the address survives restarts.
 # listen_onion = true
 # tor_control = "127.0.0.1:9051"
 # tor_password = "the password HashedControlPassword was made from"
