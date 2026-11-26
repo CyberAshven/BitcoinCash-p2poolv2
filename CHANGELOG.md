@@ -384,6 +384,14 @@ format and genesis re-pin.
 
 ### Fixed
 
+- A declared Stratum V2 job is no longer refused as `invalid-template` when
+  the pool's node checks no block proposals. Knuth answers every proposal
+  "only template mode is supported", and the pool took that for the node's
+  verdict, so a pool on Knuth refused every declared job. Such a node now
+  gets `template-unavailable`
+  and a warning that Job Declaration needs a node that checks proposals, such
+  as BCHN. Every refused declaration is now logged at warn with the node's
+  reason; it was debug only.
 - A Bitcoin Cash window no longer pays from a paying chain cut short by a
   header the node lacks. The walk from the paying block's prev stopped at
   the first unknown header and paid only the shares above it, so a node

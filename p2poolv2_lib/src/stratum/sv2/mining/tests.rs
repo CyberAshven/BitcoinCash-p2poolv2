@@ -615,6 +615,24 @@ async fn a_block_the_node_cannot_decode_is_an_invalid_template() {
     );
 }
 
+/// Knuth answers every block proposal `-32602` "only template mode is
+/// supported". That says the pool's node checks no proposals, not that the
+/// client's template is bad, so the job is not refused as
+/// `invalid-template`: it gets `template-unavailable`, and the client
+/// declares again.
+#[tokio::test]
+async fn a_node_without_proposal_mode_is_template_unavailable() {
+    let no_proposals = ResponseTemplate::new(500).set_body_json(serde_json::json!({
+        "result": null,
+        "error": { "code": -32602, "message": "only template mode is supported" },
+        "id": 0,
+    }));
+    assert_eq!(
+        custom_job_error_for_proposal_answer(no_proposals).await,
+        "template-unavailable"
+    );
+}
+
 #[tokio::test]
 async fn new_bits_on_the_same_parent_send_a_new_prev_hash() {
     let (ctx, _emissions, _dirs) = test_bch_stratum_context("http://127.0.0.1:1").await;
