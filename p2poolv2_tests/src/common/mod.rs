@@ -33,6 +33,7 @@ pub fn default_test_config() -> Config {
             dns_seed: false,
             tor_proxy: None,
             onion_only: false,
+            dns_seed_hosts: vec![],
             node_key_path: None,
             ephemeral_node_key: true,
             nostr_relays: vec![],

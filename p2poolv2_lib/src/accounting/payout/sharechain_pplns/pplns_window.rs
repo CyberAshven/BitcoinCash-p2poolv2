@@ -1649,6 +1649,12 @@ impl PplnsWindow {
             let chain = PayingChain::walk(top, top_place, low_height, |hash| {
                 self.bch_place(hash, chain_store_handle)
             })?;
+            // A chain cut short by a header this node lacks would pay fewer
+            // shares than a node with every header pays, so the window
+            // waits for the header, and the short chain is not kept.
+            if let Some(block) = chain.missing() {
+                return Err(WindowError::UnknownBchPrev { block: *block });
+            }
             self.paying_chain = Some(chain);
         }
         let chain = self.paying_chain.as_ref().expect("walked above");
@@ -6755,6 +6761,67 @@ mod tests {
                 "{missing}: {error}"
             );
         }
+    }
+
+    /// A gap in the paying chain, here c2 between the paying prev c3 and
+    /// c1, the parent of the share on s2, leaves the window unresolved,
+    /// though every share's prev is known. Stopping at the gap would leave
+    /// out the share on s2, which a node with c2 pays: two nodes would build
+    /// and check different coinbases for one share.
+    #[test]
+    fn test_bch_window_waits_for_a_gap_in_the_paying_chain() {
+        let tree = bch_tree();
+        let headers = shares_around_the_paying_chain(&tree);
+        let without_c2 = || {
+            store_knowing(
+                tree.iter()
+                    .filter(|(name, _)| **name != "c2")
+                    .map(|(_, block)| *block),
+            )
+        };
+        let paying_block = PayingBlock::new(1, tree["c3"].block_hash());
+        let mut window = current_chain_window(5);
+        cache_shares(&mut window, &headers);
+
+        let error = window
+            .get_distribution_from_start_hash(headers[0].block_hash(), paying_block, &without_c2())
+            .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                WindowError::UnknownBchPrev { block } if block == tree["c2"].block_hash()
+            ),
+            "{error}"
+        );
+        let error = window
+            .get_window_credits_from_start_hash(
+                headers[0].block_hash(),
+                paying_block,
+                &without_c2(),
+                10,
+            )
+            .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                WindowError::UnknownBchPrev { block } if block == tree["c2"].block_hash()
+            ),
+            "{error}"
+        );
+
+        // Once c2 is known, the same window resolves and pays the share on
+        // s2.
+        let distribution = window
+            .get_distribution_from_start_hash(
+                headers[0].block_hash(),
+                paying_block,
+                &store_knowing(tree.values().copied()),
+            )
+            .unwrap();
+        assert!(
+            distribution.contains_key(&headers[3].miner_bitcoin_address),
+            "the share on s2 is paid once the chain is complete"
+        );
     }
 
     /// The window is sized by the nBits Bitcoin Cash requires after the

@@ -167,11 +167,17 @@ pub const SHARE_BODY_LIMIT_BYTES: u64 = 200 * 1024;
 /// `p2poolv2_lib/src/shares/validation/mod.rs`, on PR #33 and on chipnet.
 pub const HYBRID_SHARE_BODY_LIMIT_BYTES: u64 = BCH_MAX_TRANSACTION_BYTES + 200 * 1024;
 
-/// Largest P2P message a node decodes: `MAX_P2P_MESSAGE_SIZE` (1.25 MiB) in
-/// `p2poolv2_lib/src/node/messages.rs`, raised from 1 MiB with the hybrid
-/// payout rule to hold the largest share. An implementation limit of this
-/// node, not a share-chain rule: a larger share cannot be relayed at all.
-pub const MAX_P2P_MESSAGE_BYTES: u64 = 1_280 * 1024;
+/// Largest P2P message a node decodes: `MAX_P2P_MESSAGE_SIZE` (2,144 KiB) in
+/// `p2poolv2_lib/src/node/messages.rs`, sized for the largest share with
+/// [`WEAK_SHARE_ROOM_BYTES`] of carried weak shares. An implementation limit
+/// of this node, not a share-chain rule: a larger share cannot be relayed at
+/// all.
+pub const MAX_P2P_MESSAGE_BYTES: u64 = 2_144 * 1024;
+
+/// The most carried weak shares a `ShareBlock` message holds: `WEAK_BYTES`
+/// (960 KiB) in `p2poolv2_lib/src/shares/weak.rs`. The limit check keeps this
+/// room in the message, so 1,184 KiB is left for the share itself.
+pub const WEAK_SHARE_ROOM_BYTES: u64 = 960 * 1024;
 
 /// Payout outputs a Bitcoin Cash coinbase could hold under the earlier
 /// share-chain rule (decision 14, `payout-cap11`): `BCH_MAX_COINBASE_PAYOUTS`

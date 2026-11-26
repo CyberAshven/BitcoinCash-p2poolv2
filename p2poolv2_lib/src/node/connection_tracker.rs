@@ -148,6 +148,8 @@ pub(crate) struct ConnectionTracker {
     ping_failures_total: u64,
     /// Connections closed for failing ping, for P2P health metrics.
     connections_closed_unresponsive_total: u64,
+    /// Connections the connection limits refused, for P2P health metrics.
+    connections_refused_total: u64,
 }
 
 impl ConnectionTracker {
@@ -160,6 +162,7 @@ impl ConnectionTracker {
             connections_total: 0,
             ping_failures_total: 0,
             connections_closed_unresponsive_total: 0,
+            connections_refused_total: 0,
         }
     }
 
@@ -265,6 +268,12 @@ impl ConnectionTracker {
         self.connections_closed_unresponsive_total += 1;
     }
 
+    /// Count a connection, incoming or outgoing, the connection limits
+    /// refused.
+    pub(crate) fn record_refused_connection(&mut self) {
+        self.connections_refused_total += 1;
+    }
+
     /// Number of peers with at least one open connection.
     pub(crate) fn connected_peer_count(&self) -> u64 {
         self.connected_peers.len() as u64
@@ -283,6 +292,11 @@ impl ConnectionTracker {
     /// Connections closed for failing ping since start.
     pub(crate) fn connections_closed_unresponsive_total(&self) -> u64 {
         self.connections_closed_unresponsive_total
+    }
+
+    /// Connections the connection limits refused since start.
+    pub(crate) fn connections_refused_total(&self) -> u64 {
+        self.connections_refused_total
     }
 
     /// Clear a connection's ping failure count, after a successful ping or when

@@ -33,7 +33,6 @@ pub mod messages;
 pub mod p2p_message_handlers;
 
 use crate::accounting::payout::simple_pplns::SimplePplnsShare;
-use crate::config::Chain;
 use crate::monitoring_events::{MonitoringEvent, MonitoringEventSender, PeerResponse, PeerStatus};
 use crate::node::messages::Message;
 use crate::node::p2p_health::P2pHealth;
@@ -66,7 +65,7 @@ use libp2p::tcp::tokio::{TcpStream, Transport as TcpTransport};
 use libp2p::{
     Multiaddr, Swarm,
     kad::{Event as KademliaEvent, QueryResult},
-    swarm::{DialError, SwarmEvent, dial_opts::DialOpts},
+    swarm::{DialError, ListenError, SwarmEvent, dial_opts::DialOpts},
 };
 use std::collections::HashSet;
 use std::error::Error;
@@ -418,12 +417,19 @@ impl Node {
         let (swarm_tx, swarm_rx) = mpsc::channel(100);
 
         let dns_seeds = if config.network.dns_seed {
-            dns_seeds::dns_seeds_for_chain(config.stratum.chain, config.stratum.network)
+            dns_seeds::dns_seeds_for_chain(
+                config.stratum.chain,
+                config.stratum.network,
+                config.stratum.bitcoin_cash_network,
+                &config.network.dns_seed_hosts,
+            )
         } else {
             None
         };
-        if config.stratum.chain == Chain::BitcoinCash {
-            info!("DNS seeds are off on Bitcoin Cash, which has none yet; dialing dial_peers only");
+        if dns_seeds.is_none() {
+            info!(
+                "No DNS seeds for this network; finding peers through dial_peers, Nostr and saved peers"
+            );
         }
 
         let request_response_handler = RequestResponseHandler::new(
@@ -521,10 +527,10 @@ impl Node {
     /// dns_seeds::dns_seed_delay.
     fn query_dns_seeds_if_isolated(&self) {
         let connected_peer_count = self.connection_tracker.connected_peer_count();
-        match self.dns_seeds {
+        match &self.dns_seeds {
             Some(seeds) if connected_peer_count == 0 => {
                 info!("No peers connected, querying DNS seeds");
-                dns_seeds::spawn_dns_seed_dials(seeds, self.swarm_tx.clone());
+                dns_seeds::spawn_dns_seed_dials(seeds.clone(), self.swarm_tx.clone());
             }
             Some(_) => {
                 info!("Skipping DNS seeds, {connected_peer_count} peers already connected");
@@ -585,6 +591,7 @@ impl Node {
             connections_closed_unresponsive_total: self
                 .connection_tracker
                 .connections_closed_unresponsive_total(),
+            connections_refused_total: self.connection_tracker.connections_refused_total(),
             outbound_failures_total: self.request_response_handler.outbound_failures_total(),
             inbound_failures_total: self.request_response_handler.inbound_failures_total(),
             responses_dropped_total: self.request_response_handler.responses_dropped_total(),
@@ -906,6 +913,30 @@ impl Node {
                     debug!("Removing unreachable peer {peer_id} from the routing table");
                     self.swarm.behaviour_mut().remove_peer(&peer_id);
                 }
+                if matches!(error, DialError::Denied { .. }) {
+                    self.connection_tracker.record_refused_connection();
+                }
+                Ok(())
+            }
+            // Counted so `/metrics` shows the connection limits at work; a
+            // refusal is not logged above debug, since a peer can repeat it.
+            SwarmEvent::IncomingConnectionError {
+                connection_id,
+                send_back_addr,
+                error,
+                peer_id,
+                ..
+            } => {
+                if matches!(error, ListenError::Denied { .. }) {
+                    self.connection_tracker.record_refused_connection();
+                    debug!(
+                        "Refused incoming connection {connection_id} from {peer_id:?} at {send_back_addr}: {error}"
+                    );
+                } else {
+                    debug!(
+                        "Incoming connection {connection_id} from {send_back_addr} failed: {error}"
+                    );
+                }
                 Ok(())
             }
             SwarmEvent::Behaviour(event) => match event {
@@ -1176,6 +1207,7 @@ mod tests {
             dns_seed: false,
             tor_proxy: None,
             onion_only: false,
+            dns_seed_hosts: vec![],
             node_key_path: None,
             ephemeral_node_key: true,
             nostr_relays: vec![],
@@ -1308,6 +1340,7 @@ mod tests {
                 dns_seed: false,
                 tor_proxy: None,
                 onion_only: false,
+                dns_seed_hosts: vec![],
                 node_key_path: None,
                 ephemeral_node_key: true,
                 nostr_relays: vec![],
@@ -1906,10 +1939,11 @@ mod tests {
         assert!(node.dns_seeds.is_none());
     }
 
-    /// A Bitcoin Cash node gets no DNS seeds even with `dns_seed` on and a
-    /// network that has Bitcoin seeds: those seeds are Bitcoin nodes.
+    /// A Bitcoin Cash node with `dns_seed` on gets its own network's seeds,
+    /// never Bitcoin's, even on a `stratum.network` that has Bitcoin seeds:
+    /// those seeds are Bitcoin nodes.
     #[tokio::test]
-    async fn test_dns_seeds_disabled_on_bitcoin_cash() {
+    async fn test_a_bitcoin_cash_node_gets_its_own_seeds_not_bitcoins() {
         let mut config = build_test_config("", None);
         config.stratum.chain = Chain::BitcoinCash;
         config.stratum.bitcoin_cash_network = Some(BitcoinCashNetwork::Chipnet);
@@ -1917,7 +1951,14 @@ mod tests {
         config.network.dns_seed = true;
         let node = build_test_node(config);
 
-        assert!(node.dns_seeds.is_none());
+        assert_eq!(
+            node.dns_seeds,
+            super::dns_seeds::dns_seeds_for_bitcoin_cash(BitcoinCashNetwork::Chipnet)
+        );
+        assert_ne!(
+            node.dns_seeds,
+            super::dns_seeds::dns_seeds_for_network(bitcoin::Network::Testnet4)
+        );
     }
 
     /// A node that does not listen still dials its configured peers.
@@ -2206,6 +2247,43 @@ mod tests {
         let health = node.p2p_health();
         assert_eq!(health.ping_failures_total, 3);
         assert_eq!(health.connections_closed_unresponsive_total, 1);
+    }
+
+    /// Connections the limits refuse, incoming and outgoing, show on
+    /// `/metrics`; other connection errors do not count as refusals.
+    #[tokio::test]
+    async fn refused_connections_are_counted() {
+        use libp2p::swarm::{ConnectionDenied, ListenError};
+
+        let mut node = build_test_node(build_test_config("/ip4/127.0.0.1/tcp/0", None));
+        let address: Multiaddr = "/ip4/11.6.0.1/tcp/7005".parse().unwrap();
+        let incoming = |id, error| SwarmEvent::IncomingConnectionError {
+            connection_id: ConnectionId::new_unchecked(id),
+            local_addr: address.clone(),
+            send_back_addr: address.clone(),
+            error,
+            peer_id: Some(PeerId::random()),
+        };
+
+        node.handle_swarm_event(incoming(
+            1,
+            ListenError::Denied {
+                cause: ConnectionDenied::new(io::Error::other("max_established_per_peer")),
+            },
+        ))
+        .unwrap();
+        node.handle_swarm_event(incoming(2, ListenError::Aborted))
+            .unwrap();
+        node.handle_swarm_event(SwarmEvent::OutgoingConnectionError {
+            connection_id: ConnectionId::new_unchecked(3),
+            peer_id: Some(PeerId::random()),
+            error: DialError::Denied {
+                cause: ConnectionDenied::new(io::Error::other("max_established_outgoing")),
+            },
+        })
+        .unwrap();
+
+        assert_eq!(node.p2p_health().connections_refused_total, 2);
     }
 
     #[tokio::test]

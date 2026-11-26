@@ -1,8 +1,8 @@
 # PHOTON minimum-payout study and retained tree prototype
 
 The main proposed path is the owner's **2026-10-30** minimum-payout design:
-won tokens create balances, miners choose multiples of a voted token cost
-`C` (floor 10, default 20), and a single direct split pays the queue first
+won tokens create balances, miners choose a multiple (at least 10, default
+20) of a voted token cost `C`, and a single direct split pays the queue first
 come, first served, then pays the rest ahead within the expected credit of
 shares already found, over a 48-hour window. The owner adopted those rules
 on 2026-10-30 for the PHOTON pool only; they do not change BCH P2Pool, and
@@ -82,16 +82,17 @@ modes. Tables, methods and the other capacity probes (`--small-capacity`,
 `cargo photon-payout-sim --summary` reproduces the compact tables in
 [simulation-summary.md](simulation-summary.md); the full inputs, integer
 checks and methods are in [simulation-results.md](simulation-results.md).
-The runs use the rules exactly as written in section 5 of the design
-document, and under them small miners are not paid within the 5,000-win
-horizon. The causes and candidate changes, none adopted, are in the design
-document's "Simulation findings" subsection.
+The runs use the rules as first written (most owed first, never paid
+ahead, a 4,096-script window cap and 100 launch wins of history), and under
+them small miners are not paid within the 5,000-win horizon. The causes are
+in the design document's "Simulation findings" subsection.
 
 `cargo photon-payout-sim --candidate-summary` re-runs the same scenarios
-under the four candidate changes, which the owner adopted with the 48-hour
-window: first come, first served; pay-ahead bounded by the expected credit of shares already found,
-with no launch history; no window script cap; and 10-second or 1-second
-shares with 12-hour or 48-hour windows. Tables:
+under the four changes the owner adopted, with the 48-hour window: first
+come, first served; pay-ahead bounded by the expected credit of shares
+already found; no window script cap; and no launch history. The runs
+compare 10-second and 1-second shares and 12-hour and 48-hour windows.
+Tables:
 [candidate-summary.md](candidate-summary.md); per-period detail:
 [candidate-results.md](candidate-results.md) (`--candidate`). At 1,000
 miners no win is blocked and the fixed probe is paid about every 1.0 to
@@ -217,7 +218,8 @@ The final heavy run completed on 2026-10-30 (Asia/Riyadh): full-tree test
 leaves, including wide weights, and use valid public P2SH20 `OP_TRUE`
 funding to avoid benchmarking signatures. Full-tree execution uses distinct
 signed funding outpoints and actual parent txids and source outputs.
-Regular tests have 130 passing cases; the two ignored heavy tests were run
+The tree's regular tests have 130 passing cases, and with the lean and
+simulation tests the crate has 207; the two ignored heavy tests were run
 separately and both passed. No valid-case or VM budget failure remains.
 
 With four ordinary P2PKH funders per spend, the 4,096-leaf tree consumes
