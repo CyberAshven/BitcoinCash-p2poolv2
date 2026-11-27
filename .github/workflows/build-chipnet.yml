@@ -18,11 +18,11 @@ jobs:
     runs-on: windows-2022
     timeout-minutes: 90
     env:
-      COMMIT: e3cf4c8872cbbc2940f44b91d8824da3a0cb0c94
+      COMMIT: 2fb23487aa216b09d2a36a4f4df144a3d0b12ef1
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: e3cf4c8872cbbc2940f44b91d8824da3a0cb0c94
+          ref: 2fb23487aa216b09d2a36a4f4df144a3d0b12ef1
           fetch-depth: 0
           persist-credentials: false
 
