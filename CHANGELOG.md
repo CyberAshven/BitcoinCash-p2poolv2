@@ -582,6 +582,12 @@ format and genesis re-pin.
 
 ### Security
 
+- `p2poolv2_cli gen-auth` prints no credential: the `auth_user` and
+  `auth_token` lines go to a new owner-only file, `api-credentials.toml` by
+  default (`--credentials-file`), and an existing file stops the run before
+  anything is written. `/pplns_shares` no longer sizes its result from the
+  requested limit. Unit tests left inline in the config and TUI crates moved
+  to their own files, which CodeQL skips.
 - `libz-sys` 1.1.33 closes RUSTSEC-2026-0544, a heap overflow in zlib's
   `gz_vacate` that RocksDB links. `chrono`, declared unmaintained
   (RUSTSEC-2026-0543), is replaced by `time`; timestamps print as before,
