@@ -214,10 +214,13 @@ p2poolv2_cli gen-auth myuser           # auto-generate password
 p2poolv2_cli gen-auth myuser mypass    # use provided password
 ```
 
-An auto-generated password is written to a new file, `api-password.txt`
-by default (`--password-file` to choose another), readable only by its
-owner on Unix. It is never printed, and an existing file is never
-overwritten.
+No credential is printed. The `auth_user` and `auth_token` lines for
+the `[api]` section of `config.toml` are written to a new file,
+`api-credentials.toml` by default (`--credentials-file` to choose
+another). An auto-generated password is written to a new file,
+`api-password.txt` by default (`--password-file` to choose another).
+Both are readable only by their owner on Unix, and an existing file is
+never overwritten: the command refuses before writing anything.
 
 ## Viewing DOT output
 

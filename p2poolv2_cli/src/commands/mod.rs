@@ -181,6 +181,10 @@ pub enum Commands {
         /// never overwritten)
         #[arg(long, default_value = "api-password.txt")]
         password_file: std::path::PathBuf,
+        /// New file that receives the auth_user and auth_token lines for
+        /// config.toml (owner-only; never overwritten)
+        #[arg(long, default_value = "api-credentials.toml")]
+        credentials_file: std::path::PathBuf,
     },
 }
 
@@ -254,8 +258,14 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
             username,
             password,
             password_file,
+            credentials_file,
         }) => {
-            commands::gen_auth::execute(username.clone(), password.clone(), password_file)?;
+            commands::gen_auth::execute(
+                username.clone(),
+                password.clone(),
+                password_file,
+                credentials_file,
+            )?;
         }
         Some(Commands::BchAuxpow { command }) => {
             commands::bch_auxpow::execute(command)?;
