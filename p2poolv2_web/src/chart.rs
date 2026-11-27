@@ -24,6 +24,8 @@
 use crate::api::{FoundBlock, HashratePoint};
 use crate::format::{fmt_day_time, fmt_difficulty, fmt_hashrate};
 use leptos::prelude::*;
+use std::cmp::Ordering;
+use std::collections::HashMap;
 use wasm_bindgen::JsCast;
 
 /// Most points drawn per series, as on the node's chart.
@@ -45,6 +47,16 @@ const CUBE_SIZE: f64 = 5.6;
 /// Half the diamond's diagonal: its reach past the centre, in viewBox
 /// units. A hit strip half that wide plus this reaches a marker.
 const CUBE_HALF_DIAG: f64 = CUBE_SIZE * std::f64::consts::SQRT_2 / 2.0;
+/// Horizontal width of one time slice of found blocks, in viewBox units:
+/// blocks this close share one diamond and one cluster of tooltip rows, so a
+/// dense range draws one marker per slice instead of a diamond per block
+/// saturating the figure (a Month range holds thousands of blocks;
+/// bucketed this way they land in a few dozen slices).
+const SLICE_PX: f64 = 12.0;
+/// At most this many of a slice's blocks ride into one tooltip as `Block`
+/// rows; any beyond collapse into a single "... and N more" continuation
+/// line, so a dense slice cannot flood the tip with a row per block.
+const TOOLTIP_BLOCK_LIMIT: usize = 3;
 /// Narrowest zoom, in seconds: samples land once a minute, and a window
 /// of three keeps at least two in view so the lines always draw (a
 /// polyline of one point paints nothing).
@@ -184,36 +196,51 @@ impl TightFrame {
     }
 }
 
-/// A found block drawn as a diamond: its height for the `<title>`, its
-/// time (seconds) clamped into the frame, and the marker's centre in
-/// viewBox units. Blocks outside the drawn window are dropped rather
-/// than drawn off the axis, as on the node's chart.
+/// A time slice's worth of found blocks, drawn as ONE diamond (at the
+/// slice's newest block, snapped to the pool line) instead of a diamond
+/// per block, with the heights riding into any reaching zone's tooltip.
+/// The heights run newest first (descending height), so a dense slice's
+/// rows read as the most recent finds first. Blocks outside the drawn
+/// window are dropped rather than drawn off the axis, as on the node's
+/// chart.
 #[derive(Clone, Debug, PartialEq)]
-pub struct PlottedBlock {
+pub struct BlockSlice {
+    /// The slice's newest block: its time places the marker, its sample
+    /// value its height on the line, its height titles a single-block slice.
     pub height: u64,
     pub time: f64,
+    /// Marker centre in viewBox units (x on the time axis, y on the line).
     pub cx: f64,
     pub cy: f64,
+    /// Heights of every block in the slice, newest first.
+    pub heights: Vec<u64>,
 }
 
-/// The found blocks of `blocks` inside `frame`, each snapped to the
-/// pool line at its time (node, then network, as fallbacks) for its
-/// height. `blocks` is skipped as a whole when no series is drawn:
-/// there is no line to snap to.
-fn window_blocks(
+/// The found blocks of `blocks` inside `frame` bucketed into time slices
+/// [SLICE_PX] wide -- the bucket is the block's x in slice widths, i.e.
+/// the time bucket expressed in viewBox units, the same quotient the
+/// node's chart computes -- so each slice draws ONE diamond (its newest
+/// block, snapped to the pool line at its time, node then network as
+/// fallbacks) instead of a diamond per block saturating a dense range,
+/// and its height list feeds the tips' capped rows (see
+/// [TOOLTIP_BLOCK_LIMIT]). The marker is the slice's tallest (newest)
+/// block and the heights come out newest first, whatever order the
+/// blocks arrive in. `blocks` is skipped as a whole when no series is
+/// drawn: there is no line to snap to.
+fn window_slices(
     blocks: &[FoundBlock],
     frame: &Frame,
     pool: &[(u64, f64)],
     local: &[(u64, f64)],
     network: &[(u64, f64)],
-) -> Vec<PlottedBlock> {
+) -> Vec<BlockSlice> {
     let Some(points) = [pool, local, network]
         .into_iter()
         .find(|series| !series.is_empty())
     else {
         return Vec::new();
     };
-    blocks
+    let marked: Vec<(u64, f64, f64, f64)> = blocks
         .iter()
         .filter_map(|block| {
             let time = block.bitcoin_time as f64;
@@ -221,25 +248,68 @@ fn window_blocks(
                 return None;
             }
             let (_, value) = nearest(points, time)?;
-            Some(PlottedBlock {
-                height: block.bitcoin_height,
-                time,
-                cx: frame.x(time),
-                cy: frame.y(value),
-            })
+            Some((block.bitcoin_height, time, frame.x(time), frame.y(value)))
         })
-        .collect()
+        .collect();
+    bucket_slices(marked)
+}
+
+/// Bucket `(height, time, cx, cy)` blocks into the [SLICE_PX] slices
+/// their marker x positions fall in, newest slice first. Each slice keeps
+/// its tallest block as the marker and every height sorted newest first,
+/// whatever order the blocks arrive in.
+fn bucket_slices(marked: Vec<(u64, f64, f64, f64)>) -> Vec<BlockSlice> {
+    let mut slice_index: HashMap<usize, usize> = HashMap::with_capacity(marked.len());
+    let mut slices: Vec<BlockSlice> = Vec::with_capacity(marked.len());
+    for (height, time, cx, cy) in marked {
+        let bucket = ((cx - PAD_LEFT) / SLICE_PX) as usize;
+        if let Some(&position) = slice_index.get(&bucket) {
+            let slice = &mut slices[position];
+            let insert = slice
+                .heights
+                .iter()
+                .position(|known| *known < height)
+                .unwrap_or(slice.heights.len());
+            slice.heights.insert(insert, height);
+            if height > slice.height {
+                slice.height = height;
+                slice.time = time;
+                slice.cx = cx;
+                slice.cy = cy;
+            }
+        } else {
+            slice_index.insert(bucket, slices.len());
+            slices.push(BlockSlice {
+                height,
+                time,
+                cx,
+                cy,
+                heights: vec![height],
+            });
+        }
+    }
+    // Newest slice first, so a tip that reaches several slices lists their
+    // heights newest first, as the found-blocks feed reads.
+    slices.sort_by(|slice_a, slice_b| {
+        slice_b
+            .time
+            .partial_cmp(&slice_a.time)
+            .unwrap_or(Ordering::Equal)
+            .then_with(|| slice_b.height.cmp(&slice_a.height))
+    });
+    slices
 }
 
 /// What one render draws: each series' points, the frame around them and
-/// the found blocks marked on it.
+/// the found blocks bucketed into time slices (one diamond each) marked
+/// on it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Drawn {
     pub frame: Frame,
     pub pool: Vec<(u64, f64)>,
     pub local: Vec<(u64, f64)>,
     pub network: Vec<(u64, f64)>,
-    pub blocks: Vec<PlottedBlock>,
+    pub blocks: Vec<BlockSlice>,
 }
 
 /// One series of `history` within `range` (all of it for `None`), averaged
@@ -460,7 +530,7 @@ pub fn draw(
         log_floor,
         log_top,
     };
-    let blocks = window_blocks(blocks, &frame, &pool, &local, &network);
+    let blocks = window_slices(blocks, &frame, &pool, &local, &network);
     Some(Drawn {
         frame,
         pool,
@@ -472,7 +542,8 @@ pub fn draw(
 
 /// What one sharechain chart render draws: the seven series (height, diff
 /// min, diff max, uncles, weak, miners, workers), the tight-domain frame
-/// around them, and found blocks marked on the height line.
+/// around them, and found blocks bucketed into time slices (one diamond
+/// each) marked on the height line.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SharechainDrawn {
     pub frame: TightFrame,
@@ -483,7 +554,7 @@ pub struct SharechainDrawn {
     pub weak: Vec<(u64, f64)>,
     pub miners: Vec<(u64, f64)>,
     pub workers: Vec<(u64, f64)>,
-    pub blocks: Vec<PlottedBlock>,
+    pub blocks: Vec<BlockSlice>,
 }
 
 /// Names of all seven sharechain series, for tip rows and tracers. Order
@@ -567,9 +638,10 @@ pub fn sharechain_draw(
         log_floor,
         log_top,
     };
-    // Blocks snap to the height line at their time.
+    // Blocks snap to the height line at their time, then bucket into
+    // time slices [SLICE_PX] wide as the hashrate chart's blocks do.
     let plotted = if !h.is_empty() {
-        blocks
+        let marked: Vec<(u64, f64, f64, f64)> = blocks
             .iter()
             .filter_map(|block| {
                 let time = block.bitcoin_time as f64;
@@ -577,14 +649,10 @@ pub fn sharechain_draw(
                     return None;
                 }
                 let (_, value) = nearest(&h, time)?;
-                Some(PlottedBlock {
-                    height: block.bitcoin_height,
-                    time,
-                    cx: frame.x(time),
-                    cy: frame.y(value),
-                })
+                Some((block.bitcoin_height, time, frame.x(time), frame.y(value)))
             })
-            .collect()
+            .collect();
+        bucket_slices(marked)
     } else {
         Vec::new()
     };
@@ -977,7 +1045,12 @@ struct SharechainHitZone {
     at_class: &'static str,
     zone: usize,
     nearests: Vec<(&'static str, Option<(u64, f64)>)>,
-    blocks: Vec<u64>,
+    /// In-window block slices whose diamond this zone's strip reaches: up
+    /// to [TOOLTIP_BLOCK_LIMIT] of their heights ride into the tip as
+    /// `Block height` rows (then one "... and N more" continuation line),
+    /// and the same reach tags the diamonds with this zone number for the
+    /// hover grow.
+    slices: Vec<usize>,
 }
 
 /// The hit zones tiling the plot, one per `STEP_PX` step of `fx`.
@@ -990,7 +1063,7 @@ fn sharechain_hit_zones(
     weak: &[(u64, f64)],
     miners: &[(u64, f64)],
     workers: &[(u64, f64)],
-    window_blocks: &[PlottedBlock],
+    window_slices: &[BlockSlice],
     frame: &TightFrame,
 ) -> Vec<SharechainHitZone> {
     let plot_width = WIDTH - PAD_LEFT - PAD_RIGHT;
@@ -1024,16 +1097,20 @@ fn sharechain_hit_zones(
                 (*class, nearest)
             })
             .collect();
-        let blocks: Vec<u64> = window_blocks
+        // Slices whose diamond this strip reaches: half the strip plus
+        // the marker's half-diagonal -- the same reach the tips' capped
+        // block rows and the diamonds' data-zone tags use.
+        let slices: Vec<usize> = window_slices
             .iter()
-            .filter(|block| (block.cx - fx).abs() <= STEP_PX / 2.0 + CUBE_HALF_DIAG)
-            .map(|block| block.height)
+            .enumerate()
+            .filter(|(_, slice)| (slice.cx - fx).abs() <= STEP_PX / 2.0 + CUBE_HALF_DIAG)
+            .map(|(position, _slice)| position)
             .collect();
         zones.push(SharechainHitZone {
             at_class,
             zone: index + 2,
             nearests,
-            blocks,
+            slices,
         });
     }
     zones
@@ -1240,14 +1317,17 @@ pub fn SharechainChart(
         let zones = sharechain_hit_zones(
             &height, &diff_min, &diff_max, &uncles, &weak, &miners, &workers, &blocks, &frame,
         );
-        // Found-block diamonds on the height line, tagged with zone
-        // numbers whose strips reach them.
+        // Found-block diamonds on the height line: one per time slice,
+        // tagged with the zone numbers whose strips reach them. A slice's
+        // title names its one block, or the slice's count when several
+        // share the diamond.
         let cubes = blocks
             .iter()
-            .map(|block| {
+            .enumerate()
+            .map(|(position, slice)| {
                 let tagged: Vec<usize> = zones
                     .iter()
-                    .filter(|zone| zone.blocks.contains(&block.height))
+                    .filter(|zone| zone.slices.contains(&position))
                     .map(|zone| zone.zone)
                     .collect();
                 let data_zone = (!tagged.is_empty()).then(|| {
@@ -1257,20 +1337,28 @@ pub fn SharechainChart(
                         .collect::<Vec<_>>()
                         .join(" ")
                 });
-                let title = format!(
-                    "Block {} \u{b7} {}",
-                    block.height,
-                    fmt_day_time(block.time as u64)
-                );
+                let title = if slice.heights.len() == 1 {
+                    format!(
+                        "Block {} \u{b7} {}",
+                        slice.height,
+                        fmt_day_time(slice.time as u64)
+                    )
+                } else {
+                    format!(
+                        "{} blocks \u{b7} {}",
+                        slice.heights.len(),
+                        fmt_day_time(slice.time as u64)
+                    )
+                };
                 view! {
                     <rect
                         class="cube"
                         data-zone=data_zone
-                        x=format!("{:.1}", block.cx - CUBE_SIZE / 2.0)
-                        y=format!("{:.1}", block.cy - CUBE_SIZE / 2.0)
+                        x=format!("{:.1}", slice.cx - CUBE_SIZE / 2.0)
+                        y=format!("{:.1}", slice.cy - CUBE_SIZE / 2.0)
                         width=format!("{CUBE_SIZE:.1}")
                         height=format!("{CUBE_SIZE:.1}")
-                        transform=format!("rotate(45 {:.1} {:.1})", block.cx, block.cy)
+                        transform=format!("rotate(45 {:.1} {:.1})", slice.cx, slice.cy)
                     >
                         {title}
                     </rect>
@@ -1496,15 +1584,24 @@ pub fn SharechainChart(
                                     <span class="key workers">"Workers"</span> {" "} <b>{formatted}</b>
                                 }
                             }));
-                        let block_rows: Vec<_> = zone
-                            .blocks
+                        // Blocks whose diamond this strip reaches: up to
+                        // [TOOLTIP_BLOCK_LIMIT] rows, newest first, and the
+                        // rest folded into one "... and N more" line, as
+                        // on the node's chart.
+                        let heights: Vec<u64> = zone
+                            .slices
                             .iter()
+                            .flat_map(|position| blocks[*position].heights.iter().copied())
+                            .collect();
+                        let block_rows = heights
+                            .iter()
+                            .take(TOOLTIP_BLOCK_LIMIT)
                             .map(|height| {
                                 view! {
                                     <span class="key blocks">"Block"</span> {" "} <b>{height.to_string()}</b>
                                 }
                             })
-                            .collect();
+                            .collect::<Vec<_>>();
                         let all_rows: Vec<_> = [
                             height_row, dmin_row, dmax_row, uncles_row, weak_row, miners_row,
                             workers_row,
@@ -1522,10 +1619,23 @@ pub fn SharechainChart(
                                 view! { {row} {br} }
                             })
                             .collect_view();
+                        // The overflow line rides after the last row, so a
+                        // slice past the cap still folds into exactly one
+                        // line. Its `View` type differs from a Block row's,
+                        // hence a separate tail child instead of one chain.
+                        let more = (heights.len() > TOOLTIP_BLOCK_LIMIT).then(|| {
+                            view! {
+                                <br />
+                                <span class="more">
+                                    {format!("... and {} more", heights.len() - TOOLTIP_BLOCK_LIMIT)}
+                                </span>
+                            }
+                        });
                         let tip = view! {
                             <b>{header}</b>
                             <br />
                             {body}
+                            {more}
                         };
                         if zone.at_class == "at-right" {
                             view! {
@@ -1767,10 +1877,12 @@ struct HitZone {
     pool_nearest: Option<(u64, f64)>,
     local_nearest: Option<(u64, f64)>,
     network_nearest: Option<(u64, f64)>,
-    /// In-window blocks whose marker this zone's strip reaches: their
-    /// heights ride into the tip as `Block height` rows, and the same
-    /// reach tags the markers with this zone number for the hover grow.
-    blocks: Vec<u64>,
+    /// In-window block slices whose diamond this zone's strip reaches: up
+    /// to [TOOLTIP_BLOCK_LIMIT] of their heights ride into the tip as
+    /// `Block height` rows (then one "... and N more" continuation line),
+    /// and the same reach tags the diamonds with this zone number for the
+    /// hover grow.
+    slices: Vec<usize>,
 }
 
 /// The hit zones tiling the plot, one per `STEP_PX` step of `fx`.
@@ -1778,7 +1890,7 @@ fn hit_zones(
     pool: &[(u64, f64)],
     local: &[(u64, f64)],
     network: &[(u64, f64)],
-    window_blocks: &[PlottedBlock],
+    window_slices: &[BlockSlice],
     frame: &Frame,
 ) -> Vec<HitZone> {
     let plot_width = WIDTH - PAD_LEFT - PAD_RIGHT;
@@ -1795,14 +1907,16 @@ fn hit_zones(
         } else {
             "at-right"
         };
-        // Blocks whose marker this strip reaches: half the strip plus the
-        // marker's half-diagonal. Their heights ride into the tip (two
-        // nearby blocks then both show), and the same reach tags the
-        // markers so pages.css can grow them on the same hover.
-        let blocks: Vec<u64> = window_blocks
+        // Slices whose diamond this strip reaches: half the strip plus the
+        // marker's half-diagonal. Their heights ride into the tip (capped
+        // at [TOOLTIP_BLOCK_LIMIT] rows, the rest one "... and N more"
+        // line), and the same reach tags the diamonds so pages.css can
+        // grow them on the same hover -- one reach test for both effects.
+        let slices: Vec<usize> = window_slices
             .iter()
-            .filter(|block| (block.cx - fx).abs() <= STEP_PX / 2.0 + CUBE_HALF_DIAG)
-            .map(|block| block.height)
+            .enumerate()
+            .filter(|(_, slice)| (slice.cx - fx).abs() <= STEP_PX / 2.0 + CUBE_HALF_DIAG)
+            .map(|(position, _slice)| position)
             .collect();
         zones.push(HitZone {
             at_class,
@@ -1810,7 +1924,7 @@ fn hit_zones(
             pool_nearest,
             local_nearest,
             network_nearest,
-            blocks,
+            slices,
         });
     }
     zones
@@ -1990,17 +2104,20 @@ pub fn HashrateChart(
             {ticks}
         };
         let zones = hit_zones(&pool, &local, &network, &blocks, &frame);
-        // The found-block diamonds, in window order, carrying the zone
+        // The found-block diamonds: one per time slice, carrying the zone
         // numbers whose strips reach them (pages.css grows a marker on any
         // of its tagged zones' hover). Drawn between the series dots and the
         // tracers, so a hovered tracer never covers a marker, and after the
-        // gridlines, so a marker never dims under them.
+        // gridlines, so a marker never dims under them. A slice's title
+        // names its one block, or the slice's count when several share the
+        // diamond.
         let cubes = blocks
             .iter()
-            .map(|block| {
+            .enumerate()
+            .map(|(position, slice)| {
                 let tagged: Vec<usize> = zones
                     .iter()
-                    .filter(|zone| zone.blocks.contains(&block.height))
+                    .filter(|zone| zone.slices.contains(&position))
                     .map(|zone| zone.zone)
                     .collect();
                 let data_zone = (!tagged.is_empty()).then(|| {
@@ -2010,20 +2127,28 @@ pub fn HashrateChart(
                         .collect::<Vec<_>>()
                         .join(" ")
                 });
-                let title = format!(
-                    "Block {} \u{b7} {}",
-                    block.height,
-                    fmt_day_time(block.time as u64)
-                );
+                let title = if slice.heights.len() == 1 {
+                    format!(
+                        "Block {} \u{b7} {}",
+                        slice.height,
+                        fmt_day_time(slice.time as u64)
+                    )
+                } else {
+                    format!(
+                        "{} blocks \u{b7} {}",
+                        slice.heights.len(),
+                        fmt_day_time(slice.time as u64)
+                    )
+                };
                 view! {
                     <rect
                         class="cube"
                         data-zone=data_zone
-                        x=format!("{:.1}", block.cx - CUBE_SIZE / 2.0)
-                        y=format!("{:.1}", block.cy - CUBE_SIZE / 2.0)
+                        x=format!("{:.1}", slice.cx - CUBE_SIZE / 2.0)
+                        y=format!("{:.1}", slice.cy - CUBE_SIZE / 2.0)
                         width=format!("{CUBE_SIZE:.1}")
                         height=format!("{CUBE_SIZE:.1}")
-                        transform=format!("rotate(45 {:.1} {:.1})", block.cx, block.cy)
+                        transform=format!("rotate(45 {:.1} {:.1})", slice.cx, slice.cy)
                     >
                         {title}
                     </rect>
@@ -2130,13 +2255,18 @@ pub fn HashrateChart(
                                 value,
                             )}</b>
                         });
-                        // Blocks whose marker this strip reaches: after
-                        // Network, one row each (two nearby blocks then
-                        // both show, since both diamonds sit under the
-                        // cursor).
-                        let block_rows = zone
-                            .blocks
+                        // Blocks whose diamond this strip reaches: after Network, up to
+                        // [TOOLTIP_BLOCK_LIMIT] rows, newest first, and the
+                        // rest folded into one "... and N more" line, as
+                        // on the node's chart.
+                        let heights: Vec<u64> = zone
+                            .slices
                             .iter()
+                            .flat_map(|position| blocks[*position].heights.iter().copied())
+                            .collect();
+                        let block_rows = heights
+                            .iter()
+                            .take(TOOLTIP_BLOCK_LIMIT)
                             .map(|height| {
                                 view! {
                                     <span class="key blocks">"Block"</span> {" "} <b>{height.to_string()}</b>
@@ -2156,10 +2286,23 @@ pub fn HashrateChart(
                                 view! { {row} {br} }
                             })
                             .collect_view();
+                        // The overflow line rides after the last row, so a
+                        // slice past the cap still folds into exactly one
+                        // line. Its `View` type differs from a Block row's,
+                        // hence a separate tail child instead of one chain.
+                        let more = (heights.len() > TOOLTIP_BLOCK_LIMIT).then(|| {
+                            view! {
+                                <br />
+                                <span class="more">
+                                    {format!("... and {} more", heights.len() - TOOLTIP_BLOCK_LIMIT)}
+                                </span>
+                            }
+                        });
                         let tip = view! {
                             <b>{header}</b>
                             <br />
                             {body}
+                            {more}
                         };
                         if zone.at_class == "at-right" {
                             view! {
@@ -2509,31 +2652,32 @@ mod tests {
             log_floor: 1,
             log_top: 2,
         };
-        let marked = vec![PlottedBlock {
+        let marked = vec![BlockSlice {
             height: 42,
             time: 150.0,
             cx: 392.0,
             cy: 214.0,
+            heights: vec![42],
         }];
         let zones = hit_zones(&pool, &[], &[], &marked, &frame);
         // Strips at x = 388 (zone 41) and x = 396 (zone 42) are within
         // half a strip plus the marker's half-diagonal of the centre at
         // x = 392; the neighbours at 380 and 404 are not.
-        assert_eq!(zones[39].blocks, vec![42]);
-        assert_eq!(zones[40].blocks, vec![42]);
-        assert!(zones[38].blocks.is_empty());
-        assert!(zones[41].blocks.is_empty());
+        assert_eq!(zones[39].slices, vec![0]);
+        assert_eq!(zones[40].slices, vec![0]);
+        assert!(zones[38].slices.is_empty());
+        assert!(zones[41].slices.is_empty());
         // The reverse map the cube's data-zone is built from: both zones.
         let tagged: Vec<usize> = zones
             .iter()
-            .filter(|zone| zone.blocks.contains(&42))
+            .filter(|zone| zone.slices.contains(&0))
             .map(|zone| zone.zone)
             .collect();
         assert_eq!(tagged, vec![41, 42]);
     }
 
     #[test]
-    fn test_two_blocks_under_one_strip_both_ride_into_its_tip() {
+    fn test_two_slices_a_slice_apart_both_reach_one_strip() {
         let pool = vec![(100, 10.0), (200, 10.0)];
         let frame = Frame {
             start: 100.0,
@@ -2541,21 +2685,91 @@ mod tests {
             log_floor: 1,
             log_top: 2,
         };
+        // Newest slice first, as [bucket_slices] orders them.
         let marked = vec![
-            PlottedBlock {
+            BlockSlice {
+                height: 43,
+                time: 151.0,
+                cx: 400.0,
+                cy: 214.0,
+                heights: vec![43],
+            },
+            BlockSlice {
                 height: 42,
                 time: 150.0,
                 cx: 392.0,
                 cy: 214.0,
-            },
-            PlottedBlock {
-                height: 43,
-                time: 151.0,
-                cx: 398.3,
-                cy: 214.0,
+                heights: vec![42],
             },
         ];
         let zones = hit_zones(&pool, &[], &[], &marked, &frame);
-        assert_eq!(zones[40].blocks, vec![42, 43], "strip x = 396 reaches both");
+        // Strip x = 396 sits 4 px from each marker (centres at 392 and
+        // 400), inside the reach of half a strip plus the half-diagonal.
+        assert_eq!(
+            zones[40].slices,
+            vec![0, 1],
+            "one strip reaches both slices, newest first"
+        );
+        // The strips beside each marker reach it alone.
+        assert_eq!(zones[39].slices, vec![1]);
+        assert_eq!(zones[41].slices, vec![0]);
+    }
+
+    #[test]
+    fn test_blocks_within_one_slice_share_one_diamond_newest_first() {
+        let history = [point(100, 10.0, None), point(200, 10.0, None)];
+        let found = [block(42, 150), block(43, 151)];
+        let drawn = draw(&history, &found, None, true, false, false).unwrap();
+        // x(150) = 392 and x(151) = 398.32 share a 12 px slice, so one
+        // diamond carries both, marked at the newest block's position.
+        assert_eq!(drawn.blocks.len(), 1);
+        let slice = &drawn.blocks[0];
+        assert_eq!(slice.height, 43, "the newest block marks the slice");
+        assert_eq!(slice.time, 151.0);
+        assert_eq!(slice.cx, drawn.frame.x(151.0));
+        assert_eq!(slice.heights, vec![43, 42], "heights run newest first");
+    }
+
+    #[test]
+    fn test_six_blocks_bucket_into_four_slices_newest_first() {
+        let history = [point(100, 10.0, None), point(1_100, 10.0, None)];
+        let found = [
+            block(40, 100),
+            block(41, 101),
+            block(42, 119),
+            block(43, 120),
+            block(44, 138),
+            block(45, 157),
+        ];
+        let drawn = draw(&history, &found, None, true, false, false).unwrap();
+        // A slice spans ~18.99 s here: t100/t101 share slice 0, t119/t120
+        // slice 1, t138 slice 2 and t157 slice 3 -- six blocks, four
+        // diamonds, listed newest slice first.
+        assert_eq!(drawn.blocks.len(), 4);
+        assert_eq!(drawn.blocks[0].heights, vec![45]);
+        assert_eq!(drawn.blocks[1].heights, vec![44]);
+        assert_eq!(drawn.blocks[2].heights, vec![43, 42]);
+        assert_eq!(drawn.blocks[3].heights, vec![41, 40]);
+        assert_eq!(drawn.blocks[0].height, 45, "each slice marks at its newest");
+        assert_eq!(drawn.blocks[3].height, 41);
+    }
+
+    #[test]
+    fn test_a_dense_slice_keeps_every_height_newest_first() {
+        let history = [point(100, 10.0, None), point(1_100, 10.0, None)];
+        let found = [
+            block(40, 100),
+            block(41, 101),
+            block(42, 102),
+            block(43, 103),
+            block(44, 104),
+        ];
+        let drawn = draw(&history, &found, None, true, false, false).unwrap();
+        // All five seconds land in one slice; its heights feed the tips'
+        // capped rows (see [TOOLTIP_BLOCK_LIMIT]) newest first.
+        assert_eq!(drawn.blocks.len(), 1);
+        assert_eq!(drawn.blocks[0].height, 44, "tallest (newest) marks it");
+        assert_eq!(drawn.blocks[0].time, 104.0);
+        assert_eq!(drawn.blocks[0].heights, vec![44, 43, 42, 41, 40]);
     }
 }
