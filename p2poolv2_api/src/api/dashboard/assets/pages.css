@@ -437,6 +437,15 @@ tr.uncle-row {
   color: var(--pico-muted-color);
   padding-top: 0.4rem;
 }
+/* Continuation line in a tracer tooltip: names the blocks a slice holds
+   past the tip's row cap (chart.rs emits at most TOOLTIP_BLOCK_LIMIT Block
+   rows per hover). Muted and smaller than the rows it continues, with no
+   diamond key. */
+.chart-wrap .chart-tip .more {
+  font-size: 0.62rem;
+  font-style: italic;
+  color: var(--pico-muted-color);
+}
 .chart-wrap .key::before {
   content: "";
   display: inline-block;
