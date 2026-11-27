@@ -19,6 +19,7 @@
 //! cannot crowd them.
 
 use maud::{Markup, PreEscaped, html};
+use std::collections::HashMap;
 
 /// Most points drawn per series.
 const MAX_POINTS: usize = 240;
@@ -42,6 +43,16 @@ const CUBE_SIZE: f64 = 5.6;
 /// test), shared by the tooltip's Block rows and the markers' `data-zone`
 /// grow tags.
 const CUBE_HALF_DIAG: f64 = CUBE_SIZE * std::f64::consts::SQRT_2 / 2.0;
+/// Horizontal width of one time slice of found blocks, in viewBox units:
+/// blocks this close share one diamond and one cluster of tooltip rows, so a
+/// dense range draws one marker per slice instead of a diamond per block
+/// saturating the figure (a Month range holds thousands of blocks;
+/// bucketed this way they land in a few dozen slices).
+const SLICE_PX: f64 = 12.0;
+/// At most this many of a slice's blocks ride into one tooltip as `Block`
+/// rows; any beyond collapse into a single "... and N more" continuation
+/// line, so a dense slice cannot flood the tip with a row per block.
+const TOOLTIP_BLOCK_LIMIT: usize = 3;
 /// Intermediate x-axis ticks between the start/end edge labels.
 const X_TICK_COUNT: u32 = 4;
 /// Horizontal room each edge label claims, in viewBox units; a tick closer
@@ -107,15 +118,30 @@ struct DrawnMarkup {
     dots: Vec<Markup>,
 }
 
-/// A block the pool found, as the chart needs it: a diamond marker on the
-/// pool line and a `Block height` row in the tooltip of any zone whose strip
-/// reaches the marker.
+/// A block the pool found, as the chart needs it: a `Block height` row in
+/// the tooltip of any zone whose strip reaches its slice's diamond.
 #[derive(Clone, Copy)]
 pub(crate) struct ChartBlock {
     /// Bitcoin Cash height, shown in the tooltip row.
     pub(crate) height: u64,
     /// Unix seconds of the block header, placed on the time axis.
     pub(crate) time: u32,
+}
+
+/// A time slice's worth of found blocks, drawn as ONE diamond (at the
+/// slice's newest block, snapped to the tag line) instead of a diamond per
+/// block, with the heights riding into any reaching zone's tooltip. The
+/// heights run newest first (descending height), so a dense slice's rows
+/// read as the most recent finds first.
+struct BlockSlice {
+    /// The slice's newest block: its time places the marker, its sample
+    /// value its height on the line, its height titles a single-block slice.
+    marker: ChartBlock,
+    /// Marker centre in viewBox units (x on the time axis, y on the line).
+    cx: f64,
+    cy: f64,
+    /// Heights of every block in the slice, newest first.
+    heights: Vec<u64>,
 }
 
 /// Average `points` down to at most `max` points, one per equal slice of
@@ -269,11 +295,13 @@ fn tight_domain(values: &[f64]) -> (f64, f64, Vec<f64>) {
 /// labels the start/end of the x axis. With no points at all it shows a
 /// note instead of an empty frame.
 ///
-/// `blocks` are the pool's found blocks, drawn as green diamonds on the
-/// pool line and named in the tooltip of every hit zone whose strip reaches
-/// a marker; a block outside the plotted window (possible when a page's
-/// sample history is shorter than its range) is skipped rather than drawn
-/// off the axis.
+/// `blocks` are the pool's found blocks, bucketed into time slices
+/// [SLICE_PX] wide: each slice draws one green diamond on the pool line,
+/// and up to [TOOLTIP_BLOCK_LIMIT] of a reaching zone's heights ride into
+/// that zone's tooltip (the rest collapse into one "... and N more" line);
+/// a block outside the plotted window (possible when a page's sample
+/// history is shorter than its range) is skipped rather than drawn off the
+/// axis.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn line_chart(
     title: &str,
@@ -492,9 +520,9 @@ pub(crate) fn line_chart_with(
         .collect();
 
     // Blocks in the plotted window, each snapped to the first drawn
-    // series's line for its diamond's height, with its marker centre
-    // already placed. Only blocks older than the plotted run itself
-    // fall outside and are skipped rather than drawn left of the axis.
+    // series's line for its marker height, with its marker centre already
+    // placed. Only blocks older than the plotted run itself fall outside
+    // and are skipped rather than drawn left of the axis.
     let first_drawn_points = drawn.first().map(|(_, points)| points.as_slice());
     let window_blocks: Vec<(ChartBlock, f64, f64)> = blocks
         .iter()
@@ -508,10 +536,54 @@ pub(crate) fn line_chart_with(
             Some((*block, x(time), y(sample_value)))
         })
         .collect();
+    // Bucket the window blocks into time slices [SLICE_PX] wide -- the
+    // bucket is the block's x in slice widths, i.e. the time bucket
+    // expressed in viewBox units, the same quotient the replica's
+    // time-based bucket computes -- so each slice draws ONE diamond (its
+    // newest block, on the tag line as before) instead of a diamond per
+    // block, and its height list feeds the tips' capped rows (see
+    // [TOOLTIP_BLOCK_LIMIT]). A Month range's thousands of blocks collapse
+    // into a few dozen slices instead of saturating the figure. The
+    // marker is the slice's tallest (newest) block and the heights come
+    // out newest first, whatever order the blocks arrive in.
+    let mut slice_index: HashMap<usize, usize> = HashMap::with_capacity(window_blocks.len());
+    let mut window_slices: Vec<BlockSlice> = Vec::with_capacity(window_blocks.len());
+    for (block, cx, cy) in window_blocks {
+        let bucket = ((cx - PAD_LEFT) / SLICE_PX) as usize;
+        if let Some(&position) = slice_index.get(&bucket) {
+            let slice = &mut window_slices[position];
+            let insert = slice
+                .heights
+                .iter()
+                .position(|height| *height < block.height)
+                .unwrap_or(slice.heights.len());
+            slice.heights.insert(insert, block.height);
+            if block.height > slice.marker.height {
+                slice.marker = block;
+                slice.cx = cx;
+                slice.cy = cy;
+            }
+        } else {
+            slice_index.insert(bucket, window_slices.len());
+            window_slices.push(BlockSlice {
+                marker: block,
+                cx,
+                cy,
+                heights: vec![block.height],
+            });
+        }
+    }
+    // Newest slice first, so a tip that reaches several slices lists their
+    // heights newest first, as the found-blocks feed reads.
+    window_slices.sort_by(|slice_a, slice_b| {
+        let key_a = (u64::from(slice_a.marker.time), slice_a.marker.height);
+        let key_b = (u64::from(slice_b.marker.time), slice_b.marker.height);
+        key_b.cmp(&key_a)
+    });
     let zones = hit_zones(
         &drawn,
         tags,
-        &window_blocks,
+        &window_slices,
         start,
         span,
         plot_width,
@@ -519,22 +591,39 @@ pub(crate) fn line_chart_with(
         format_time,
         integer_classes,
     );
-    // The found-block diamonds, in window order, carrying the zone numbers
-    // whose strips reach them (pages.css grows a marker on any of its
-    // tagged zones' hover). Emitted between the series dots and the tracers,
-    // so a hovered tracer never covers a marker, and after the gridlines, so
-    // a marker never dims under them.
-    let cubes: Vec<Markup> = window_blocks
+    // The found-block diamonds: one per time slice, carrying the zone
+    // numbers whose strips reach them (pages.css grows a marker on any of
+    // its tagged zones' hover). Emitted between the series dots and the
+    // tracers, so a hovered tracer never covers a marker, and after the
+    // gridlines, so a marker never dims under them. A slice's title names
+    // its one block, or the slice's count when several share the diamond.
+    let cubes: Vec<Markup> = window_slices
         .iter()
-        .map(|(block, cx, cy)| {
-            let zones_of_block: Vec<usize> = zones
+        .enumerate()
+        .map(|(position, slice)| {
+            let zones_of_slice: Vec<usize> = zones
                 .iter()
-                .filter(|zone| zone.blocks.contains(&block.height))
+                .filter(|zone| zone.slices.contains(&position))
                 .map(|zone| zone.zone)
                 .collect();
+            let title = if slice.heights.len() == 1 {
+                format!(
+                    "Block {} \u{b7} {}",
+                    slice.marker.height,
+                    format_time(u64::from(slice.marker.time))
+                )
+            } else {
+                format!(
+                    "{} blocks \u{b7} {}",
+                    slice.heights.len(),
+                    format_time(u64::from(slice.marker.time))
+                )
+            };
+            let cx = slice.cx;
+            let cy = slice.cy;
             html! {
-                rect class="cube" data-zone=[(!zones_of_block.is_empty())
-                        .then(|| zones_of_block
+                rect class="cube" data-zone=[(!zones_of_slice.is_empty())
+                        .then(|| zones_of_slice
                             .iter()
                             .map(usize::to_string)
                             .collect::<Vec<_>>()
@@ -543,7 +632,7 @@ pub(crate) fn line_chart_with(
                     y=(format!("{:.1}", cy - CUBE_SIZE / 2.0))
                     width=(format!("{CUBE_SIZE:.1}")) height=(format!("{CUBE_SIZE:.1}"))
                     transform=(format!("rotate(45 {cx:.1} {cy:.1})")) {
-                    title { "Block " (block.height) " \u{b7} " (format_time(u64::from(block.time))) }
+                    title { (title) }
                 }
             }
         })
@@ -636,10 +725,12 @@ struct HitZone {
     zone: usize,
     /// Tags in tip-display order, each with its nearest sample at this zone.
     nearests: Vec<(&'static str, Option<(u64, f64)>)>,
-    /// In-window blocks whose marker this zone's strip reaches: their
-    /// heights ride into the tip as `Block height` rows, and the same reach
-    /// tags the markers with this zone number for the hover grow.
-    blocks: Vec<u64>,
+    /// In-window block slices whose diamond this zone's strip reaches: up
+    /// to [TOOLTIP_BLOCK_LIMIT] of their heights ride into the tip as
+    /// `Block height` rows (then one "... and N more" continuation line),
+    /// and the same reach tags the diamonds with this zone number for the
+    /// hover grow.
+    slices: Vec<usize>,
 }
 
 /// The hit zones tiling the plot, one per `STEP_PX` step of `fx`.
@@ -651,7 +742,7 @@ struct HitZone {
 fn hit_zones(
     drawn: &[(&Series, Vec<(u64, f64)>)],
     tags: &[(&'static str, &'static str)],
-    window_blocks: &[(ChartBlock, f64, f64)],
+    window_slices: &[BlockSlice],
     start: u64,
     span: f64,
     plot_width: f64,
@@ -695,8 +786,9 @@ fn hit_zones(
                 .unwrap_or(start);
             tip.push_str(&format_time(header_time));
             tip.push_str("</b><br>");
-            // One row per tag whose series is drawn (has a nearest sample).
-            let mut rows = Vec::with_capacity(effective_tags.len());
+            // One row per tag whose series is drawn (has a nearest sample),
+            // then the capped block rows and their overflow line.
+            let mut rows = Vec::with_capacity(effective_tags.len() + TOOLTIP_BLOCK_LIMIT + 1);
             for (class, nearest) in &nearests {
                 if let Some((_, nearest_val)) = nearest {
                     let label = effective_tags
@@ -714,20 +806,33 @@ fn hit_zones(
                     ));
                 }
             }
-            // Blocks whose marker this strip reaches: half the strip plus
-            // the marker's half-diagonal. Their heights ride into the tip
-            // (two nearby blocks then both show, since both diamonds sit
-            // under the cursor), and the same reach tags the markers below
-            // so pages.css can grow them on the same hover -- one reach test
-            // for both effects.
-            let blocks: Vec<u64> = window_blocks
+            // Slices whose diamond this strip reaches: half the strip plus
+            // the marker's half-diagonal. Their heights ride into the tip,
+            // capped at [TOOLTIP_BLOCK_LIMIT] rows -- the heights run
+            // newest first, and anything beyond collapses into one
+            // "... and N more" continuation line so a dense slice cannot
+            // flood the tip with a row per block. The same reach tags the
+            // markers below so pages.css can grow them on the same hover --
+            // one reach test for both effects.
+            let slices: Vec<usize> = window_slices
                 .iter()
-                .filter(|(_, cx, _)| (cx - fx).abs() <= STEP_PX / 2.0 + CUBE_HALF_DIAG)
-                .map(|(block, _, _)| block.height)
+                .enumerate()
+                .filter(|(_, slice)| (slice.cx - fx).abs() <= STEP_PX / 2.0 + CUBE_HALF_DIAG)
+                .map(|(position, _slice)| position)
                 .collect();
-            for height in &blocks {
+            let heights: Vec<u64> = slices
+                .iter()
+                .flat_map(|position| window_slices[*position].heights.iter().copied())
+                .collect();
+            for height in heights.iter().take(TOOLTIP_BLOCK_LIMIT) {
                 rows.push(format!(
                     "<span class=\"key blocks\">Block</span> <b>{height}</b>"
+                ));
+            }
+            if heights.len() > TOOLTIP_BLOCK_LIMIT {
+                rows.push(format!(
+                    "<span class=\"more\">... and {} more</span>",
+                    heights.len() - TOOLTIP_BLOCK_LIMIT
                 ));
             }
             for (index, row) in rows.iter().enumerate() {
@@ -742,7 +847,7 @@ fn hit_zones(
                 tip: PreEscaped(tip),
                 zone: index + 2,
                 nearests,
-                blocks,
+                slices,
             }
         })
         .collect()
@@ -1117,7 +1222,56 @@ mod tests {
     }
 
     #[test]
-    fn two_blocks_under_one_cursor_both_show_in_that_tip() {
+    fn two_blocks_a_slice_apart_each_draw_a_diamond_and_one_tip_names_both() {
+        let markup = line_chart(
+            "Hashrate",
+            &[Series {
+                label: "Pool",
+                class: "pool",
+                points: vec![(100, 10.0), (200, 10.0)],
+            }],
+            &[
+                ChartBlock {
+                    height: 42,
+                    time: 151,
+                },
+                ChartBlock {
+                    height: 43,
+                    time: 152,
+                },
+            ],
+            value,
+            time,
+            time,
+            time,
+        )
+        .into_string();
+        // x(151) = 398.32 lands in slice 26, x(152) = 404.64 in slice 27,
+        // so the two blocks keep their own diamonds: one titled per block.
+        assert_eq!(markup.matches("class=\"cube\"").count(), 2);
+        assert!(markup.contains("Block 42 \u{b7} t151"));
+        assert!(markup.contains("Block 43 \u{b7} t152"));
+        // Strip 41 sits at x = 404, within reach of both markers (5.68 and
+        // 0.64 away), so its tip names both blocks, newest first.
+        let strip = markup
+            .find("data-left=\"56.111111%")
+            .expect("strip 41 exists");
+        let after = markup[strip + 1..]
+            .find("data-left=\"")
+            .map(|offset| strip + 1 + offset)
+            .unwrap_or(markup.len());
+        let tip = &markup[strip..after];
+        let newest_row = tip
+            .find("<span class=\"key blocks\">Block</span> <b>43</b>")
+            .expect("the newer block rides in");
+        let older_row = tip
+            .find("<span class=\"key blocks\">Block</span> <b>42</b>")
+            .expect("the older block rides in too");
+        assert!(newest_row < older_row, "heights list newest first");
+    }
+
+    #[test]
+    fn two_blocks_in_one_slice_share_a_diamond_titled_with_the_count() {
         let markup = line_chart(
             "Hashrate",
             &[Series {
@@ -1141,18 +1295,148 @@ mod tests {
             time,
         )
         .into_string();
-        // Strip 42 sits at x = 396, within reach of both markers (x = 392
-        // and x = 398.32), so its tip names both blocks.
+        // x = 392 and x = 398.32 share slice 26 (a 12 px slice), so one
+        // diamond covers both, titled with the count at the newest block
+        // (t151), and the reaching tip still names each block.
+        assert_eq!(markup.matches("class=\"cube\"").count(), 1);
+        assert!(markup.contains("2 blocks \u{b7} t151"));
+        assert!(!markup.contains("Block 42 \u{b7}"));
         let strip = markup
             .find("data-left=\"55.000000%")
-            .expect("strip 42 exists");
+            .expect("strip 40 exists");
         let after = markup[strip + 1..]
             .find("data-left=\"")
             .map(|offset| strip + 1 + offset)
             .unwrap_or(markup.len());
         let tip = &markup[strip..after];
-        assert!(tip.contains("<span class=\"key blocks\">Block</span> <b>42</b>"));
+        let newest_row = tip
+            .find("<span class=\"key blocks\">Block</span> <b>43</b>")
+            .expect("the newest block rides in");
+        let older_row = tip
+            .find("<span class=\"key blocks\">Block</span> <b>42</b>")
+            .expect("the older block rides in too");
+        assert!(newest_row < older_row, "heights list newest first");
+    }
+
+    #[test]
+    fn a_dense_slice_caps_its_tip_at_three_block_rows_and_counts_the_rest() {
+        let markup = line_chart(
+            "Hashrate",
+            &[Series {
+                label: "Pool",
+                class: "pool",
+                points: vec![(100, 10.0), (1_100, 10.0)],
+            }],
+            &[
+                ChartBlock {
+                    height: 40,
+                    time: 100,
+                },
+                ChartBlock {
+                    height: 41,
+                    time: 101,
+                },
+                ChartBlock {
+                    height: 42,
+                    time: 102,
+                },
+                ChartBlock {
+                    height: 43,
+                    time: 103,
+                },
+                ChartBlock {
+                    height: 44,
+                    time: 104,
+                },
+            ],
+            value,
+            time,
+            time,
+            time,
+        )
+        .into_string();
+        // All five seconds fall in slice 0 (a slice spans ~19 s here), so
+        // one diamond carries the count at the newest block.
+        assert_eq!(markup.matches("class=\"cube\"").count(), 1);
+        assert!(markup.contains("5 blocks \u{b7} t104"));
+        // The reaching strip's tip lists at most three Block rows, the
+        // newest first, and folds the two past the cap into one line.
+        let strip = markup
+            .find("data-left=\"10.555556%")
+            .expect("strip 0 exists");
+        let after = markup[strip + 1..]
+            .find("data-left=\"")
+            .map(|offset| strip + 1 + offset)
+            .unwrap_or(markup.len());
+        let tip = &markup[strip..after];
+        assert!(tip.contains("<span class=\"key blocks\">Block</span> <b>44</b>"));
         assert!(tip.contains("<span class=\"key blocks\">Block</span> <b>43</b>"));
+        assert!(tip.contains("<span class=\"key blocks\">Block</span> <b>42</b>"));
+        assert!(tip.contains("<span class=\"more\">... and 2 more</span>"));
+        assert!(!tip.contains("<b>41</b>"), "row four past the cap");
+        assert!(!tip.contains("<b>40</b>"), "row five past the cap");
+        assert_eq!(
+            tip.matches("class=\"key blocks\"").count(),
+            TOOLTIP_BLOCK_LIMIT,
+            "the cap is exactly three Block rows"
+        );
+        assert_eq!(tip.matches("class=\"more\"").count(), 1);
+    }
+
+    #[test]
+    fn six_blocks_bucketed_into_four_slices_draw_four_diamonds() {
+        let markup = line_chart(
+            "Hashrate",
+            &[Series {
+                label: "Pool",
+                class: "pool",
+                points: vec![(100, 10.0), (1_100, 10.0)],
+            }],
+            &[
+                ChartBlock {
+                    height: 40,
+                    time: 100,
+                },
+                ChartBlock {
+                    height: 41,
+                    time: 101,
+                },
+                ChartBlock {
+                    height: 42,
+                    time: 119,
+                },
+                ChartBlock {
+                    height: 43,
+                    time: 120,
+                },
+                ChartBlock {
+                    height: 44,
+                    time: 138,
+                },
+                ChartBlock {
+                    height: 45,
+                    time: 157,
+                },
+            ],
+            value,
+            time,
+            time,
+            time,
+        )
+        .into_string();
+        // t100/t101 share slice 0 and t119/t120 slice 1 (both titled with
+        // the count at their newest block), while t138 and t157 sit alone
+        // in slices 2 and 3 (a slice spans ~18.99 s here): six blocks draw
+        // four diamonds, one per slice.
+        assert_eq!(markup.matches("class=\"cube\"").count(), 4);
+        assert!(markup.contains("2 blocks \u{b7} t101"));
+        assert!(markup.contains("2 blocks \u{b7} t120"));
+        assert!(markup.contains("Block 44 \u{b7} t138"));
+        assert!(markup.contains("Block 45 \u{b7} t157"));
+        assert!(!markup.contains("Block 40"), "merged into slice 0's title");
+        assert!(!markup.contains("Block 41"), "merged into slice 0's title");
+        assert!(!markup.contains("Block 42"), "merged into slice 1's title");
+        assert!(!markup.contains("Block 43"), "merged into slice 1's title");
     }
 
     #[test]
