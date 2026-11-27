@@ -127,13 +127,15 @@ Under `[network]`, list share chain peers in `dial_peers` by IP address or
 host name; a host name is looked up again on every dial, so dynamic DNS works:
 
 ```toml
-dial_peers = ["/ip4/203.0.113.1/tcp/6884", "/dns4/pool.example.com/tcp/6884"]
+dial_peers = ["/ip4/203.0.113.1/tcp/6886", "/dns4/pool.example.com/tcp/6886"]
 ```
 
-A Bitcoin Cash node never uses DNS seeds (the built-in ones are Bitcoin
-nodes): `dns_seed` is ignored and off on `chain = "bitcoin-cash"`. Without
-`dial_peers` or [Nostr discovery](p2p-network.md#finding-peers-through-nostr)
-the node only waits to be dialed. Once connected it dials peers it learns of
+Port 6886 is chipnet's; mainnet nodes listen on 6884. A Bitcoin Cash node
+takes the DNS seeds of its `bitcoin_cash_network`
+([P2P network](p2p-network.md#dns-seeds)): chipnet has one, mainnet none yet.
+Without seeds, `dial_peers` or
+[Nostr discovery](p2p-network.md#finding-peers-through-nostr) the node only
+waits to be dialed. Once connected it dials peers it learns of
 until it has `target_outgoing_peers` outgoing peers, 16 by default
 ([P2P network](p2p-network.md#outgoing-peers)).
 
@@ -144,7 +146,8 @@ share is older), or the port never opens; `config.sample.toml` sets `false`.
 Set `true` once `dial_peers` lists a node of a running share chain.
 
 For a node others join: keep `listen_address` on all interfaces
-(`/ip4/0.0.0.0/tcp/6884`), open TCP port 6884 in the firewall and router, and
+(`/ip4/0.0.0.0/tcp/6884`, or `6886` on chipnet), open that TCP port in the
+firewall and router, and
 publish `/dns4/<host name>/tcp/6884` or `/ip4/<public IP>/tcp/6884` for their
 `dial_peers`.
 

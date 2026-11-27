@@ -44,7 +44,8 @@ p2poolv2_user: "p2poolv2"
 p2poolv2_group: "p2poolv2"
 
 # --- Network config ---
-p2poolv2_p2p_listen_address: "/ip4/0.0.0.0/tcp/6884"
+# 6886 is chipnet's share chain port; mainnet listens on 6884.
+p2poolv2_p2p_listen_address: "/ip4/0.0.0.0/tcp/6886"
 # Share chain peers, as "/ip4/<address>/tcp/<port>". Until a Bitcoin Cash
 # network has DNS seeds, a node joining a running share chain needs at least
 # one peer here, or one found through Nostr.
@@ -63,7 +64,7 @@ p2poolv2_max_transaction_per_second: 100
 p2poolv2_max_requests_per_second: 100
 p2poolv2_dial_timeout_secs: 30
 # Optional: set to advertise a specific address to peers (for NAT)
-# p2poolv2_external_address: "/ip4/203.0.113.1/tcp/6884"
+# p2poolv2_external_address: "/ip4/203.0.113.1/tcp/6886"
 
 # --- Store config ---
 p2poolv2_store_path: "/var/lib/p2poolv2/{{ p2poolv2_instance }}/store.db"

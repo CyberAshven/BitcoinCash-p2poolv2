@@ -297,6 +297,13 @@ format and genesis re-pin.
 
 ### Changed
 
+- Chipnet has a share-chain P2P port of its own, 6886; mainnet, regtest and
+  scalenet keep 6884, so one host runs a mainnet and a chipnet node on their
+  defaults. Built-in and `dns_seed_hosts` seeds and the virtual port of the
+  onion service follow the network, and `config.sample.toml` (chipnet)
+  listens on 6886. A chipnet node on 6884 keeps working with its peers'
+  `dial_peers` naming that port; peers it reaches through seeds or Tor dial
+  6886.
 - `pool_signature` is the operator line of the coinbase tag and, with the
   new `node_label`, follows the coinbase name rules: an operator line of at
   most 24 characters (the 16-byte limit is gone), a label of at most 8, only

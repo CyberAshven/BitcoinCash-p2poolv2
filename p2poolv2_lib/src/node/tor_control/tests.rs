@@ -97,6 +97,7 @@ fn service(control: &str, key_file: Option<PathBuf>) -> OnionService {
         control: control.to_string(),
         password: None,
         target: "127.0.0.1:6884".parse().unwrap(),
+        port: 6884,
         key_file,
     }
 }
@@ -120,6 +121,27 @@ async fn a_node_authenticates_with_no_password_and_adds_the_service() {
             "AUTHENTICATE",
             "ADD_ONION NEW:ED25519-V3 Flags=DiscardPK Port=6884,127.0.0.1:6884",
         ]
+    );
+}
+
+/// A chipnet node's service takes chipnet's port, 6886, and the node
+/// advertises it.
+#[tokio::test]
+async fn a_chipnet_service_asks_for_and_advertises_port_6886() {
+    let tor = FakeTor::start(tor_answers("NULL", None)).await;
+    let mut chipnet = service(&tor.address, None);
+    chipnet.port = 6886;
+    let (address, _connection) = open(&chipnet).await.unwrap();
+
+    assert_eq!(
+        address,
+        format!("/onion3/{SERVICE_ID}:6886")
+            .parse::<Multiaddr>()
+            .unwrap()
+    );
+    assert_eq!(
+        tor.commands()[2],
+        "ADD_ONION NEW:ED25519-V3 Flags=DiscardPK Port=6886,127.0.0.1:6884"
     );
 }
 
@@ -331,6 +353,8 @@ fn the_service_follows_the_config() {
     config.network.listen_address = "/ip4/0.0.0.0/tcp/6890".to_string();
     let made = OnionService::from_config(&config).expect("listen_onion is on by default");
     assert_eq!(made.target, "127.0.0.1:0".parse().unwrap());
+    // The sample config is chipnet's: its peers dial port 6886.
+    assert_eq!(made.port, 6886);
     assert_eq!(made.control, crate::config::DEFAULT_TOR_CONTROL);
     assert_eq!(
         made.key_file,

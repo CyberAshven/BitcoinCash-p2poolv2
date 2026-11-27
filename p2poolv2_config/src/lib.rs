@@ -275,6 +275,20 @@ impl BitcoinCashNetwork {
         }
     }
 
+    /// The share-chain P2P port of this network's nodes: the port of the
+    /// sample `listen_address`, the port the built-in seeds name and the
+    /// virtual port of a node's onion service. Chipnet has its own, 6886, so
+    /// one host can run a mainnet and a chipnet node on their defaults, as
+    /// each Bitcoin Cash Node network has a default port of its own.
+    pub fn default_p2p_port(self) -> u16 {
+        match self {
+            BitcoinCashNetwork::Chipnet => 6886,
+            BitcoinCashNetwork::Mainnet
+            | BitcoinCashNetwork::Regtest
+            | BitcoinCashNetwork::Scalenet => 6884,
+        }
+    }
+
     /// Human-readable prefix covered by the CashAddr checksum.
     pub fn cashaddr_prefix(self) -> &'static str {
         match self {
@@ -1443,7 +1457,8 @@ pub struct NetworkConfig {
     pub onion_only: bool,
     /// Make this node a Tor onion service through Tor's control port
     /// (`tor_control`), as Bitcoin Cash Node's `-listenonion` does, so
-    /// peers with Tor reach it at `/onion3/<address>:6884`. The service
+    /// peers with Tor reach it at `/onion3/<address>:<port>`, the port being
+    /// the network's default P2P port (6884, or 6886 on chipnet). The service
     /// forwards to the node's `listen_address`, and its key is kept in
     /// `onion_v3_private_key` beside the store, so the address survives
     /// restarts. Off when the node does not listen, its `external_address`
@@ -1485,7 +1500,8 @@ pub struct NetworkConfig {
     pub onlynet: Option<Vec<PeerNetwork>>,
     /// DNS seed hostnames that replace the built-in ones, so a new seed can
     /// be used before a release names it. Their A/AAAA records list
-    /// long-running nodes on the network's seed port (6884 on Bitcoin Cash),
+    /// long-running nodes on the network's seed port (6884 on Bitcoin Cash
+    /// mainnet, 6886 on chipnet),
     /// or on the port an entry names as `host:port`.
     #[serde(default)]
     pub dns_seed_hosts: Vec<String>,

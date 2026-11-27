@@ -63,7 +63,7 @@ most 120,960) and RocksDB's caches in memory.
 |---|---|---|---|
 | 3333 | Stratum V1 (`[stratum] port`) | miners | your miners: LAN, or the internet for a public pool |
 | 3336 | Stratum V2 (`sv2_port`, optional) | SV2 miners, proxies, Job Declaration clients | LAN without authority keys; with Noise keys, as you choose |
-| 6884 | Share chain P2P (`[network] listen_address`) | other P2Poolv2 nodes | the internet, so others can dial you; set `external_address` behind NAT |
+| 6884 / 6886 | Share chain P2P (`[network] listen_address`): mainnet / chipnet | other P2Poolv2 nodes | the internet, so others can dial you; set `external_address` behind NAT |
 | 46884 | API and dashboard (`[api] port`) | you, Prometheus, a reverse proxy | localhost or a reverse proxy; `public_dashboard` for a public node |
 | 8332 / 48332 / 18443 | BCHN RPC: mainnet / chipnet / regtest | the P2Poolv2 node | localhost only |
 | 8333 / 48333 / 18444 | BCHN P2P: mainnet / chipnet / regtest | Bitcoin Cash peers; the P2Poolv2 node with `node_p2p_address` | the internet (outbound is enough) |
