@@ -19,14 +19,13 @@ use std::sync::Arc;
 /// node passes `None` and keeps the address's own form.
 pub fn get_distribution(
     tracker: &Arc<JobTracker>,
-    pool_signature_length: usize,
     network: bitcoin::network::Network,
     cash_network: Option<BchShareNetwork>,
 ) -> Option<String> {
     let job_id = tracker.get_latest_job_id();
     let job_details = tracker.get_job(job_id)?;
 
-    match extract_outputs_from_coinbase2(&job_details.coinbase2, pool_signature_length) {
+    match extract_outputs_from_coinbase2(&job_details.coinbase2) {
         Ok(outputs) => {
             let total_value = job_details.blocktemplate.coinbasevalue;
             let mut exposition = String::new();
@@ -120,6 +119,8 @@ mod tests {
         hex::encode(coinbase2_bytes)
     }
 
+    /// The coinbase tag gives its own length, so the parser needs no
+    /// configuration to find the outputs after it.
     #[tokio::test]
     async fn test_get_distribution_success() {
         let tracker = start_tracker_actor();
@@ -135,7 +136,10 @@ mod tests {
             script_pubkey: address.script_pubkey(),
         }];
 
-        let coinbase2 = create_valid_coinbase2(b"P2Poolv2", &outputs);
+        let coinbase2 = create_valid_coinbase2(
+            b"P2Poolv2\x0fCyberAshven\x0fBCHN 29.2.1 node1\x0fzg690z",
+            &outputs,
+        );
 
         let job_id = tracker.get_next_job_id();
         tracker.insert_job(
@@ -148,7 +152,7 @@ mod tests {
             job_id,
         );
 
-        let result = get_distribution(&tracker, 8, Network::Signet, None);
+        let result = get_distribution(&tracker, Network::Signet, None);
 
         assert!(result.is_some());
         let exposition = result.unwrap();
@@ -187,13 +191,8 @@ mod tests {
             job_id,
         );
 
-        let exposition = get_distribution(
-            &tracker,
-            8,
-            Network::Regtest,
-            Some(BchShareNetwork::Regtest),
-        )
-        .unwrap();
+        let exposition =
+            get_distribution(&tracker, Network::Regtest, Some(BchShareNetwork::Regtest)).unwrap();
 
         let cashaddr = encode_payout_address(&payout, BchShareNetwork::Regtest).unwrap();
         assert!(cashaddr.starts_with("bchreg:"));
@@ -208,7 +207,7 @@ mod tests {
         let tracker = start_tracker_actor();
 
         // Don't insert any jobs
-        let result = get_distribution(&tracker, 8, Network::Signet, None);
+        let result = get_distribution(&tracker, Network::Signet, None);
 
         assert!(result.is_none());
     }
@@ -249,7 +248,7 @@ mod tests {
             declared_job_id,
         );
 
-        let result = get_distribution(&tracker, 8, Network::Signet, None);
+        let result = get_distribution(&tracker, Network::Signet, None);
 
         assert!(result.unwrap().contains(
             "coinbase_output{index=\"0\",address=\"tb1q3udk7r26qs32ltf9nmqrjaaa7tr55qmkk30q5d\"} 4900000000"
@@ -272,7 +271,7 @@ mod tests {
             job_id,
         );
 
-        let result = get_distribution(&tracker, 8, Network::Signet, None);
+        let result = get_distribution(&tracker, Network::Signet, None);
 
         assert!(result.is_none());
     }
@@ -316,7 +315,7 @@ mod tests {
             job_id,
         );
 
-        let result = get_distribution(&tracker, 8, Network::Signet, None);
+        let result = get_distribution(&tracker, Network::Signet, None);
 
         assert!(result.is_some());
         let exposition = result.unwrap();
@@ -368,7 +367,7 @@ mod tests {
             job_id,
         );
 
-        let result = get_distribution(&tracker, 8, Network::Signet, None);
+        let result = get_distribution(&tracker, Network::Signet, None);
 
         // Should still return Some, just without the unparseable output
         assert!(result.is_some());

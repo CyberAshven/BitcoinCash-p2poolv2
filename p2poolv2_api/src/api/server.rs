@@ -70,7 +70,6 @@ pub(crate) struct AppState {
 /// Used with Extension axum framework
 #[derive(Clone)]
 pub struct AppConfig {
-    pub pool_signature_length: usize,
     pub network: bitcoin::Network,
     /// Bitcoin Cash share prefix. Independent of `network`, which stays the
     /// Bitcoin share-chain network used for taproot addresses and genesis.
@@ -283,13 +282,11 @@ pub async fn start_api_server(
     monitoring_event_sender: MonitoringEventSender,
     network: bitcoin::Network,
     cash_network: Option<BchShareNetwork>,
-    pool_signature: Option<String>,
     pplns_window: Option<Arc<RwLock<PplnsWindow>>>,
     stratum_port: u16,
     sv2_port: Option<u16>,
 ) -> Result<(oneshot::Sender<()>, u16), std::io::Error> {
     let app_config = AppConfig {
-        pool_signature_length: pool_signature.unwrap_or_default().len(),
         network,
         cash_network,
         cors_allowed: config.cors_allowed,
@@ -405,7 +402,6 @@ async fn metrics(State(state): State<Arc<AppState>>) -> String {
 
     if let Some(coinbase_distribution) = parse_coinbase::get_distribution(
         &state.tracker_handle,
-        state.app_config.pool_signature_length,
         state.app_config.network,
         state.app_config.cash_network,
     ) {

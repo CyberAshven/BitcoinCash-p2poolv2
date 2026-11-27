@@ -25,12 +25,12 @@ use crate::test_utils::{
     TestSv2Client, test_bch_custom_coinbase, test_bch_custom_job_with_aux,
     test_bch_prepared_for_template, test_bch_solve_custom_job, test_bch_stratum_context,
     test_coinbase_only_from, test_custom_job_from_payout_outputs, test_declared_coinbase_parts,
-    test_payout_outputs_request, test_sv2_authority, test_sv2_setup,
+    test_declared_script_prefix, test_payout_outputs_request, test_sv2_authority, test_sv2_setup,
 };
 use binary_sv2::{B016M, B032, B064K, B0255, Deserialize, Seq064K, U256};
 use bitcoin::consensus::{deserialize, serialize};
 use bitcoin::hashes::Hash;
-use bitcoin::script::Builder;
+use bitcoin::script::{Builder, Instruction, PushBytesBuf, Script};
 use bitcoin::{Address, Amount, Block, BlockHash, Network, PubkeyHash, Transaction, TxOut};
 use bitcoindrpc::BitcoindRpcClient;
 use common_messages_sv2::{
@@ -674,10 +674,7 @@ async fn bchn_jobs_on_requested_payout_outputs_reach_both_real_nodes() {
     )
     .unwrap();
     // The client's own scriptSig prefix, which P2Pool never chose.
-    let full_prefix = Builder::new()
-        .push_int(i64::from(full_height))
-        .push_slice(b"standard client")
-        .into_bytes();
+    let full_prefix = test_declared_script_prefix(full_height);
 
     let mut full_jdc = TestSv2Client::connect(address, authority.public_key).await;
     full_jdc
@@ -870,10 +867,7 @@ async fn bchn_jobs_on_requested_payout_outputs_reach_both_real_nodes() {
     template_sender.send(Some(Arc::clone(&prepared))).unwrap();
     mining.receive(MESSAGE_TYPE_NEW_EXTENDED_MINING_JOB).await;
     mining.receive(MESSAGE_TYPE_MINING_SET_NEW_PREV_HASH).await;
-    let private_prefix = Builder::new()
-        .push_int(i64::from(private_height))
-        .push_slice(b"standard client")
-        .into_bytes();
+    let private_prefix = test_declared_script_prefix(private_height);
     let mut private_jdc = TestSv2Client::connect(address, authority.public_key).await;
     private_jdc
         .send_message(
@@ -1016,6 +1010,9 @@ async fn bchn_jobs_on_requested_payout_outputs_reach_both_real_nodes() {
 struct RunningJob {
     template: BlockTemplate,
     channel_id: u32,
+    /// The chain line of the coinbase tag in the job of the running node,
+    /// which a job declared to it must name.
+    chain_line: Vec<u8>,
 }
 
 /// Open an extended channel on a running node and turn its first job into
@@ -1062,6 +1059,15 @@ async fn running_node_job(mining: &mut TestSv2Client, identity: &str) -> Running
     let mut height_bytes = [0u8; 4];
     height_bytes[..height_length].copy_from_slice(&script_sig[1..=height_length]);
     let height = u32::from_le_bytes(height_bytes);
+    let chain_line = match Script::from_bytes(script_sig).instructions().last() {
+        Some(Ok(Instruction::PushBytes(tag))) => tag
+            .as_bytes()
+            .split(|byte| *byte == 0x0f)
+            .nth(3)
+            .expect("the coinbase tag of the node has a chain line")
+            .to_vec(),
+        _ => panic!("the job coinbase does not end with a coinbase tag push"),
+    };
     let subsidy = 5_000_000_000_u64 >> (height / 210_000);
     let prev_hash = BlockHash::from_byte_array(prev.prev_hash.as_ref().try_into().unwrap());
     let template = serde_json::from_value(json!({
@@ -1085,6 +1091,7 @@ async fn running_node_job(mining: &mut TestSv2Client, identity: &str) -> Running
     RunningJob {
         template,
         channel_id: opened.channel_id,
+        chain_line,
     }
 }
 
@@ -1113,9 +1120,11 @@ async fn a_running_node_serves_requested_payout_outputs() {
     let mut mining = TestSv2Client::connect(address, authority).await;
     let job = running_node_job(&mut mining, &identity).await;
     let template = job.template;
+    let mut tag = b"P2Poolv2\x0fstandard client\x0f\x0f".to_vec();
+    tag.extend_from_slice(&job.chain_line);
     let prefix = Builder::new()
         .push_int(i64::from(template.height))
-        .push_slice(b"standard client")
+        .push_slice(PushBytesBuf::try_from(tag).unwrap())
         .into_bytes();
     let extensions = encode_extension_frame(
         EXTENSIONS_NEGOTIATION,

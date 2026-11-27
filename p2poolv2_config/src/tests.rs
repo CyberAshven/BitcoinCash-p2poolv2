@@ -899,23 +899,88 @@ fn test_pool_signature_option() {
 
     // Test with Some value
     let mut config_with_sig = StratumConfig::<Raw>::new_for_test_default();
-    config_with_sig.pool_signature = Some("MyPool/1.0".to_string());
+    config_with_sig.pool_signature = Some("MyPool 1.0".to_string());
     assert_eq!(
         config_with_sig.pool_signature,
-        Some("MyPool/1.0".to_string())
+        Some("MyPool 1.0".to_string())
     );
 
     // Test parsing preserves Some value
     let parsed_with_sig = config_with_sig.parse().unwrap();
     assert_eq!(
         parsed_with_sig.pool_signature,
-        Some("MyPool/1.0".to_string())
+        Some("MyPool 1.0".to_string())
     );
+    assert_eq!(parsed_with_sig.coinbase_operator(), "MyPool 1.0");
 
     // Test sig length limit
     let mut config_with_sig = StratumConfig::<Raw>::new_for_test_default();
-    config_with_sig.pool_signature = Some("MyPool/1.0 and some more bytes....".to_string());
+    config_with_sig.pool_signature = Some("MyPool 1.0 and some more bytes".to_string());
     assert_err!(config_with_sig.parse());
+}
+
+/// The old 16-byte limit is gone: an operator line of 24 characters is
+/// taken.
+#[test]
+fn test_a_pool_signature_of_24_characters_is_accepted() {
+    let mut config = StratumConfig::<Raw>::new_for_test_default();
+    config.pool_signature = Some("Longest-Operator-Name-24".to_string());
+    let parsed = config.parse().unwrap();
+    assert_eq!(parsed.coinbase_operator(), "Longest-Operator-Name-24");
+}
+
+#[test]
+fn test_the_old_default_pool_signature_leaves_the_operator_line_empty() {
+    let mut config = StratumConfig::<Raw>::new_for_test_default();
+    config.pool_signature = Some("P2Poolv2".to_string());
+    assert_eq!(config.parse().unwrap().coinbase_operator(), "");
+}
+
+#[test]
+fn test_a_pool_signature_with_an_email_is_refused() {
+    let mut config = StratumConfig::<Raw>::new_for_test_default();
+    config.pool_signature = Some("pool@example.com".to_string());
+    let error = config.parse().unwrap_err();
+    assert!(error.message.starts_with("pool_signature "), "{error}");
+    assert!(error.message.contains("'@'"), "{error}");
+}
+
+#[test]
+fn test_a_pool_signature_with_an_address_is_refused() {
+    let mut config = StratumConfig::<Raw>::new_for_test_default();
+    config.pool_signature = Some("qpm2qsznhks23z7629mms6s4cwef74vcwvy22gdx6a".to_string());
+    let error = config.parse().unwrap_err();
+    assert!(error.message.contains("may be an address"), "{error}");
+}
+
+#[test]
+fn test_a_node_label_is_kept() {
+    let mut config = StratumConfig::<Raw>::new_for_test_default();
+    config.node_label = Some("node1".to_string());
+    assert_eq!(config.parse().unwrap().coinbase_node_label(), "node1");
+}
+
+#[test]
+fn test_an_unset_node_label_is_empty() {
+    let config = StratumConfig::<Raw>::new_for_test_default();
+    assert_eq!(config.parse().unwrap().coinbase_node_label(), "");
+}
+
+#[test]
+fn test_a_node_label_over_its_length_is_refused() {
+    let mut config = StratumConfig::<Raw>::new_for_test_default();
+    config.node_label = Some("node-label".to_string());
+    let error = config.parse().unwrap_err();
+    assert!(error.message.starts_with("node_label "), "{error}");
+    assert!(error.message.contains("more than the 8 allowed"), "{error}");
+}
+
+#[test]
+fn test_a_node_label_with_a_url_is_refused() {
+    let mut config = StratumConfig::<Raw>::new_for_test_default();
+    config.node_label = Some("x.io/a".to_string());
+    let error = config.parse().unwrap_err();
+    assert!(error.message.contains("'/'"), "{error}");
 }
 
 #[test]

@@ -86,7 +86,8 @@ version_mask = "1fffe000"
 # connect only after this node has synced it. A new share chain never looks
 # current, so leave it false when you start one.
 wait_for_chain_sync = false
-# Tags the coinbases this node builds. At most 16 bytes.
+# The operator line of the coinbase tag this node writes. At most 24
+# characters; "P2Poolv2" leaves the line empty.
 pool_signature = "P2Poolv2"
 
 [logging]

@@ -21,15 +21,15 @@ use crate::test_utils::{
     TestSv2Client, bch_template_transaction, test_bch_custom_job, test_bch_custom_job_with_leaves,
     test_bch_prepared, test_bch_prepared_on_anchor, test_bch_prepared_with_cuts,
     test_bch_solve_custom_job, test_bch_stratum_context, test_coinbase_only_from,
-    test_custom_job_from_payout_outputs, test_declared_coinbase_parts, test_payout_outputs_request,
-    test_sv2_authority, test_sv2_setup, test_verify_payout_outputs_request,
+    test_custom_job_from_payout_outputs, test_declared_coinbase_parts, test_declared_script_prefix,
+    test_payout_outputs_request, test_sv2_authority, test_sv2_setup,
+    test_verify_payout_outputs_request,
 };
 use crate::test_utils::{make_test_share_address, setup_test_chain_store_handle};
 use binary_sv2::U256;
 use binary_sv2::{B016M, B032, B064K, B0255, Seq064K};
 use bitcoin::consensus::{deserialize, serialize};
 use bitcoin::hashes::Hash;
-use bitcoin::script::Builder;
 use bitcoin::secp256k1::{Keypair, Secp256k1};
 use bitcoin::{BlockHash, Network};
 use bitcoindrpc::BitcoindRpcClient;
@@ -630,10 +630,7 @@ async fn a_standard_client_mines_on_requested_payout_outputs_in_both_modes() {
     )
     .unwrap();
     // The client's own scriptSig prefix, which P2Pool never chose.
-    let prefix = Builder::new()
-        .push_int(i64::from(template.height))
-        .push_slice(b"kth")
-        .into_bytes();
+    let prefix = test_declared_script_prefix(template.height);
 
     let mut declarator = TestSv2Client::connect(address, authority.public_key).await;
     declarator
@@ -955,10 +952,7 @@ async fn a_moved_anchor_pushes_payout_outputs_stale_and_refuses_earlier_tokens()
         Network::Regtest,
     );
     let identity = encode_payout_address(&payout, BchShareNetwork::Regtest).unwrap();
-    let prefix = Builder::new()
-        .push_int(i64::from(template.height))
-        .push_slice(b"kth")
-        .into_bytes();
+    let prefix = test_declared_script_prefix(template.height);
     let mut declarator = TestSv2Client::connect(address, authority.public_key).await;
     declarator
         .send_pair(

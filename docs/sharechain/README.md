@@ -81,8 +81,10 @@ itself:
 - **Bitcoin Cash coinbase.** The coinbase transaction the miner hashed. On a
   node's own jobs its scriptSig carries the block height, the template's
   `coinbaseaux` flags, the extranonce, a nanosecond timestamp and the pool
-  signature; a declared job's scriptSig is the miner's own prefix followed by
-  the extranonce. Either way it stays within Bitcoin Cash's 100-byte limit.
+  signature, the [coinbase tag](../stratum.md#the-coinbase-tag) of the node;
+  a declared job's scriptSig is the miner's own prefix, with a coinbase tag
+  that names this share chain, followed by the extranonce. Either way it
+  stays within Bitcoin Cash's 100-byte limit.
   Its outputs carry the merge-mining commitment (output 0), the donation,
   the fee, the payouts, a padding output and the share commitment. Bitcoin
   Cash has no SegWit, so there is no witness commitment output.

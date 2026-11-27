@@ -44,6 +44,7 @@ use p2poolv2_lib::stratum::node_p2p_listener::{
 };
 use p2poolv2_lib::stratum::server::{StratumServerBuilder, Sv2Listener};
 use p2poolv2_lib::stratum::sv2::start_template_provider;
+use p2poolv2_lib::stratum::work::coinbase_tag::{ShareChainId, coinbase_tag_for_node};
 use p2poolv2_lib::stratum::work::gbt::start_gbt;
 use p2poolv2_lib::stratum::work::notify::start_notify;
 use p2poolv2_lib::stratum::work::prepared_notify::PreparedNotifyParams;
@@ -220,9 +221,9 @@ async fn stop_electrum_server(electrum_task: JoinHandle<()>) {
 /// `NodeHandles::emissions_tx` and `NodeHandles::template_rx` before
 /// calling `NodeRunner::run()`.
 pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), ExitCode> {
-    // A bad [stratum] setting, such as a pool signature over 16 bytes, stops
-    // the start here with its reason, before the store opens or the node is
-    // asked anything.
+    // A bad [stratum] setting, such as a pool signature outside the coinbase
+    // name rules, stops the start here with its reason, before the store
+    // opens or the node is asked anything.
     let stratum_config = match config.stratum.clone().parse() {
         Ok(stratum_config) => stratum_config,
         Err(error) => {
@@ -336,6 +337,14 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
         exit_sender.clone(),
         exit_sender.subscribe(),
     );
+
+    let share_chain_id = ShareChainId::new(
+        config.stratum.network,
+        config.stratum.chain,
+        genesis.block_hash(),
+    );
+    let coinbase_tag =
+        coinbase_tag_for_node(&stratum_config, &config.bitcoinrpc, share_chain_id).await;
 
     let bitcoinrpc_config = config.bitcoinrpc.clone();
     let extra_submit_nodes = config.submit_nodes.clone();
@@ -515,6 +524,7 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
             template_tx,
             chain_store_handle_for_notify,
             &cloned_stratum_config,
+            coinbase_tag,
             payout,
             pool_difficulty_for_notify,
             notify_transactions,
@@ -701,7 +711,6 @@ pub async fn build_node(config: Config) -> Result<(NodeHandles, NodeRunner), Exi
         monitoring_event_sender.clone(),
         stratum_config.network,
         bch_share_network,
-        stratum_config.pool_signature,
         api_pplns_window,
         stratum_config.port,
         stratum_config.sv2_port,

@@ -38,7 +38,6 @@ async fn build_state(
     };
     let state = Arc::new(AppState {
         app_config: AppConfig {
-            pool_signature_length: 0,
             network: bitcoin::Network::Signet,
             cash_network,
             cors_allowed: false,

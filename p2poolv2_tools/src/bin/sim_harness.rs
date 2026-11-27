@@ -49,7 +49,7 @@ Env:
   DISTINCT_ADDR  1 = each node gets its own payout  (default 1; needs a loaded
                  address via RPC getnewaddress            p2pool wallet on BCHN)
   POOL_SIGNATURE_PREFIX  node i signs as PREFIX<i>  (default P2Pool-sim-;
-                 each must stay within the 16-byte config limit)
+                 each must pass the 24-character operator rules)
   DIAL_FANOUT    how many earlier peers each dials  (default 3)
   LATE_MINER     node index launched with its emitter off (default unset); it
                  syncs but mines nothing until `failures late-miner` restarts it

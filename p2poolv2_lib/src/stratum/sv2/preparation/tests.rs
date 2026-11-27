@@ -1,9 +1,10 @@
 use super::*;
 use crate::shares::merge_mining::MergeMiningCommitment;
-use crate::test_utils::{test_bch_custom_job_with_aux, test_bch_prepared};
+use crate::test_utils::{
+    test_bch_custom_job_with_aux, test_bch_prepared, test_declared_script_prefix,
+};
 use bitcoin::Address;
 use bitcoin::consensus::deserialize;
-use bitcoin::script::Builder;
 use bitcoin::{Network, PubkeyHash};
 use p2poolv2_wallet::payout_address::PayoutAddress;
 use p2poolv2_wallet::share_owner::ShareOwner;
@@ -49,10 +50,7 @@ fn full_preparation_matches_pplns_with_selected_fee_revenue() {
     )
     .unwrap();
     let descriptor = BchCoinbase {
-        prefix: Builder::new()
-            .push_int(i64::from(prepared.template().height))
-            .push_slice(b"miner")
-            .into_bytes(),
+        prefix: test_declared_script_prefix(prepared.template().height),
         merge_mining: aux,
     };
     let result = prepare_coinbase(
@@ -127,10 +125,7 @@ fn coinbase_only_preparation_preserves_pplns_and_aux_commitment() {
     )
     .unwrap();
     let descriptor = BchCoinbase {
-        prefix: Builder::new()
-            .push_int(i64::from(prepared.template().height))
-            .push_slice(b"miner")
-            .into_bytes(),
+        prefix: test_declared_script_prefix(prepared.template().height),
         merge_mining: aux,
     };
     let result = prepare_coinbase(

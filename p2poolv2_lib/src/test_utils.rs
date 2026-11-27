@@ -117,6 +117,8 @@ use crate::stratum::work::block_template::TemplateTransaction;
 use crate::stratum::work::coinbase::build_bitcoin_coinbase_transaction;
 #[cfg(test)]
 use crate::stratum::work::coinbase::{EXTRANONCE_SEPARATOR, build_declared_coinbase};
+#[cfg(any(test, feature = "test-utils"))]
+use crate::stratum::work::coinbase_tag::ShareChainId;
 #[cfg(test)]
 use crate::stratum::work::difficulty::validate::validate_bitcoin_difficulty;
 #[cfg(test)]
@@ -1055,6 +1057,7 @@ fn test_bch_prepared_on(
     .unwrap();
     Arc::new(
         PreparedNotifyParamsBuilder::new(Arc::new(template), outputs, b"P2Poolv2", true)
+            .share_chain_id(Some(test_share_chain_id()))
             .pplns_weights(Some(weights))
             .payout_split(payout_split)
             .prev_share_blockhash(anchor)
@@ -1171,11 +1174,7 @@ pub(crate) fn test_bch_custom_job_with_leaves(
         ShareCommitment::from_mining_job_token(&token, payout, ShareOwner::CashP2pkh([0x22; 20]))
             .unwrap();
     let descriptor = BchCoinbase {
-        prefix: Builder::new()
-            .push_int(i64::from(template.height))
-            .push_slice(b"miner")
-            .into_script()
-            .into_bytes(),
+        prefix: test_declared_script_prefix(template.height),
         merge_mining,
     };
     commitment.bch_coinbase = Some(descriptor.clone());
@@ -1793,6 +1792,30 @@ pub const TEST_TIP_TIME: u32 = TEST_ANCHOR_TIME + 20;
 /// Realistic coinbase timestamp for tests: Jan 1 2020 00:00:00 UTC in nanoseconds
 #[cfg(any(test, feature = "test-utils"))]
 pub const TEST_COINBASE_NSECS: u64 = 1_577_836_800_000_000_000;
+
+/// The share chain of the test prepared params (`test_bch_prepared`),
+/// written `zg690z`: the family of a genesis digest starting 12 34 56 and
+/// the fork of a protocol digest starting 78 9a.
+#[cfg(any(test, feature = "test-utils"))]
+pub fn test_share_chain_id() -> ShareChainId {
+    ShareChainId::from_digest_starts([0x12, 0x34, 0x56], [0x78, 0x9a])
+}
+
+/// The coinbase tag a test declarator writes: the operator `miner`, a Knuth
+/// node line and the chain line of [`test_share_chain_id`].
+#[cfg(test)]
+pub(crate) const TEST_DECLARED_COINBASE_TAG: &[u8] = b"P2Poolv2\x0fminer\x0fKnuth 1.7.0\x0fzg690z";
+
+/// The scriptSig prefix a test declarator writes before the extranonce at
+/// `height`: the height push, then [`TEST_DECLARED_COINBASE_TAG`].
+#[cfg(test)]
+pub(crate) fn test_declared_script_prefix(height: u32) -> Vec<u8> {
+    Builder::new()
+        .push_int(i64::from(height))
+        .push_slice(PushBytesBuf::try_from(TEST_DECLARED_COINBASE_TAG.to_vec()).unwrap())
+        .into_script()
+        .into_bytes()
+}
 
 /// What a test weak share is mined on and pays (`build_test_weak_share`).
 #[cfg(test)]

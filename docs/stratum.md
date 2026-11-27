@@ -81,7 +81,8 @@ carries the merge-mining commitment as output 0
 a padding output and the share commitment, and every job commits to the
 share chain tip ([Share commitments](sharechain/share-commitments.md)). A
 coinbase scriptSig is at most 100 bytes (`MAX_COINBASE_SCRIPTSIG_SIZE` in
-BCHN's `src/consensus/consensus.h`). The coinbase pays every miner directly
+BCHN's `src/consensus/consensus.h`), and it names the pool, the operator,
+the node and the share chain ([The coinbase tag](#the-coinbase-tag)). The coinbase pays every miner directly
 within 1,000,000 bytes, or 3,072 on a job that merge-mines tokens, and the
 rest through a payout tree ([Coinbase payouts](payouts/coinbase.md)).
 
@@ -146,6 +147,110 @@ but count nothing.
 Version rolling: the node offers the BIP 320 general-purpose bits
 (`version_mask = "1fffe000"`), which ASIC firmware rolls on Bitcoin Cash as
 on Bitcoin.
+
+## The coinbase tag
+
+Every coinbase a node builds names P2Pool v2, the operator, the node and
+the share chain in one data push of its scriptSig, the fifth, after the
+height, the aux flags, the extranonce and the nanosecond time:
+
+```text
+P2Poolv2 0x0F <operator> 0x0F <node> 0x0F <chain>
+```
+
+The byte 0x0F separates the lines, as DATUM separates its primary and
+secondary tags, so explorers that read DATUM tags split the push at 0x0F,
+show line 1, the operator, and group every P2Pool v2 block as one pool.
+Every line is always written, so the positions are fixed: [0] `P2Poolv2`,
+[1] operator, [2] node, [3] chain. Lines 1 and 2 may be empty; line 3 is
+always there. Later versions may add lines after the chain line, and a
+parser ignores the lines it does not know.
+
+| Line | Comes from | Example |
+|---|---|---|
+| [0] | The software; never configured | `P2Poolv2` |
+| [1] operator | `[stratum] pool_signature`. Unset, empty or `P2Poolv2` (the old default) leaves it empty, so the node line never stands in its place | `CyberAshven` |
+| [2] node | The node software and version from the `subversion` of `getnetworkinfo` on the `[bitcoinrpc]` node, read at start, then `[stratum] node_label` after a space | `BCHN 29.2.1 node1` |
+| [3] chain | Computed from the share chain; never configured | `q7x2k8` |
+
+Three tags, with `q7x2k8` as an example chain line (each node logs its own
+tag at start as `Coinbase tag: ...`, with ` | ` for 0x0F):
+
+| Case | Tag |
+|---|---|
+| Full | `P2Poolv2 0x0F CyberAshven 0x0F BCHN 29.2.1 node1 0x0F q7x2k8` |
+| No operator | `P2Poolv2 0x0F 0x0F BCHN 29.2.1 node1 0x0F q7x2k8` |
+| No node line | `P2Poolv2 0x0F CyberAshven 0x0F 0x0F q7x2k8` |
+
+**The node line.** The first user agent of the subversion (BIP 14), without
+its parenthesised comments, named as operators know it:
+`/Bitcoin Cash Node:29.2.1(EB32.0)/` becomes `BCHN 29.2.1`, `/Knuth:1.7.0/`
+becomes `Knuth 1.7.0` and `/bchd:0.22.4/` becomes `BCHD 0.22.4`. Other
+software keeps its own name and version. The label follows after a space.
+The node software is not the operator to fix, so it never stops the start:
+a node without `getnetworkinfo`, or a software line that breaks the name
+rules or does not fit beside the label, leaves the software out, with a
+warning, and the node line is the label alone.
+
+**The chain line.** Six characters of the CashAddr alphabet
+`qpzry9x8gf2tvdw0s3jn54khce6mua7l`, five bits a character, most
+significant first, in two parts:
+
+- the family, 4 characters: the first 20 bits of SHA-256 over the genesis
+  share hash (its 32 bytes in the order the share chain serializes them).
+  Every fork of a share chain keeps it, so explorers group forks by the
+  first four characters;
+- the fork, 2 characters: the first 10 bits of SHA-256 over the P2P
+  protocol string the node connects with, the one it logs at start as
+  `P2P protocol string: ...`. A share chain that splits off with other
+  rules, or another implementation, gets another fork part.
+
+For example, `q7x2k8` could be an original chain, `q7x2m3` a rule fork of
+it and `t9dw4c` an unrelated chain. Every node on one share chain writes the
+same line. A rule change that also re-pins the genesis share, as the flag
+days of this project usually do, changes the family too.
+
+**The name rules.** No address or email goes on chain. The operator line is
+at most 24 characters, `node_label` at most 8 and the node line at most 23;
+the node software takes what the label and the space before it leave. A
+name holds only letters, digits, spaces, `.`, `_` and `-`, which keeps out
+`@`, `:` and `/`: no emails, no `bitcoincash:` or `bchtest:` addresses and
+no URLs. A word of 20 characters or more made only of base58, hex or
+CashAddr characters is refused too, as it reads as an address pasted without
+its prefix. A `pool_signature` or `node_label` that breaks a rule stops the
+node at start with the reason (`Refusing to start: [stratum] pool_signature
+...`); a name is refused, never cut short.
+
+**The 100-byte scriptSig.** The tag gets what the largest of every other
+push leaves (`MAX_COINBASE_TAG_BYTES` in `stratum/work/coinbase_tag.rs`):
+
+| Push | Bytes at most |
+|---|---|
+| Height: a four-byte script number from 8,388,608 up to the 500,000,000 a lock time allows | 5 |
+| Aux flags: BCHD pushes `/bchd/`; BCHN and Knuth send none, one zero byte | 8 |
+| Extranonce, enonce1 and enonce2 | 13 |
+| Nanosecond time | 9 |
+| Tag push opcode | 1 |
+| Tag: `P2Poolv2`, three separators, an operator line of 24, a node line of 23 and the chain line of 6 | 64 |
+| Total | 100 |
+
+Merge mining adds nothing to the scriptSig: its commitment is output 0. A
+declared job writes the height and its own tag in a prefix of at most 88
+bytes, 70 with the longest tag, then the 12-byte extranonce.
+
+**Not a share-chain rule.** Validation reads the push from the coinbase of
+each share and rebuilds the coinbase with it as it is, so nodes with other
+tags, and older nodes with a plain signature, accept the shares of one
+another.
+
+**Declared jobs.** A Stratum V2 Job Declaration client builds the template,
+so the operator and node lines of the tag in its scriptSig prefix are its
+own. The share lands on this share chain, though: the prefix must carry,
+after the height push, a data push that starts with the `P2Poolv2` line and
+has the chain line of this node, with every line under the name rules. The
+chain line is in the tag of every job the node sends. Otherwise the job
+gets `invalid-coinbase-tag`, and the reason is logged as a warning
+([Job Declaration](bch-job-declaration.md#rules-a-declared-job-must-meet)).
 
 ## The pool difficulty
 

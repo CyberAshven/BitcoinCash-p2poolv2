@@ -112,7 +112,7 @@ const TEMPLATE_SOURCES: &[&str] = &["rpc", "rpc_light", "sv2"];
 const LOG_LEVELS: &[&str] = &["error", "warn", "info", "debug", "trace"];
 
 /// The settings listed, in order.
-pub const FIELDS: [FieldSpec; 44] = [
+pub const FIELDS: [FieldSpec; 45] = [
     // The network switch and the chain come first: they decide the rest.
     optional(
         "stratum",
@@ -280,7 +280,14 @@ pub const FIELDS: [FieldSpec; 44] = [
     optional(
         "stratum",
         "pool_signature",
-        "Text in each coinbase (at most 16 bytes)",
+        "Operator line of the coinbase tag: at most 24 letters, digits, spaces, . _ -",
+        ValueKind::Text,
+        None,
+    ),
+    optional(
+        "stratum",
+        "node_label",
+        "Label after the node software in the coinbase tag: at most 8 characters",
         ValueKind::Text,
         None,
     ),

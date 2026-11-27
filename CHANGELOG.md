@@ -97,6 +97,22 @@ format and genesis re-pin.
 
 ### Added
 
+- The coinbase tag: every coinbase a node builds names P2Pool v2, the
+  operator, the node and the share chain in its signature push,
+  `P2Poolv2 0x0F <operator> 0x0F <node> 0x0F <chain>`, separated by 0x0F as
+  DATUM separates its tags, so explorers group every P2Pool v2 block as one
+  pool and show who built the template. The operator line is
+  `[stratum] pool_signature`. The node line is the node software and
+  version from `getnetworkinfo` (`BCHN 29.2.1`, `Knuth 1.7.0`,
+  `BCHD 0.22.4`), then the new `[stratum] node_label`. The chain line is six
+  CashAddr characters: four from SHA-256 of the genesis share hash (the
+  family, kept by every fork), two from SHA-256 of the P2P protocol string
+  (the fork). Every line is always written, so the positions stay fixed;
+  parsers ignore lines after the chain line. A node without
+  `getnetworkinfo`, or node software outside the name rules, gets the label
+  alone and a warning, and the node starts. The tag fits the 100-byte
+  scriptSig at the largest of every other push; it is not a share-chain
+  rule (`docs/stratum.md`, "The coinbase tag").
 - `/found_blocks?num=N` returns the N most recent found blocks (1 to 100),
   read newest first from the end of the store without walking the rest, from
   upstream `64934868` and `9afcdeff`. The response stays a bare array, and
@@ -281,6 +297,25 @@ format and genesis re-pin.
 
 ### Changed
 
+- `pool_signature` is the operator line of the coinbase tag and, with the
+  new `node_label`, follows the coinbase name rules: an operator line of at
+  most 24 characters (the 16-byte limit is gone), a label of at most 8, only
+  letters, digits, spaces, `.`, `_` and `-`, and no word of 20 or more
+  characters made only of base58, hex or CashAddr characters, so no address,
+  email or URL goes on chain. A name that breaks a rule stops the node at
+  start with the reason; it is never cut short. A `pool_signature` with `/`
+  or `:`, accepted before, now stops the start. Unset, empty or `P2Poolv2`,
+  the old default, leaves the operator line empty.
+- A declared Stratum V2 job must carry a coinbase tag in its scriptSig
+  prefix, after the height push: a push with the `P2Poolv2` line, operator
+  and node lines of its own under the name rules, and the chain line of the
+  node, which the tag of every job the node sends shows. Otherwise it gets
+  `SetCustomMiningJob.Error` `invalid-coinbase-tag`, with the reason logged
+  as a warning. A Job Declaration client that writes another signature
+  needs an update.
+- `/metrics` finds the coinbase outputs after the coinbase tag at whatever
+  length the tag has, and `start_api_server` no longer takes the pool
+  signature.
 - A Bitcoin node stops mining on a block template that marks required (`!`
   prefix) a rule P2Poolv2 does not implement, and logs an error naming the
   rule, instead of building blocks that may be invalid (from upstream).

@@ -172,7 +172,11 @@ version_mask = "1fffe000"
 # Add a pool signature, if you want. Comment out the line if you want
 # to mine anonymous blocks. This signature is only used to show others
 # how large your pool is, if you are running private, there is no need
-# to add a pool signature. Maximum length 16 bytes.
+# to add a pool signature. It is the operator line of the coinbase tag
+# (docs/stratum.md, "The coinbase tag"): at most 24 letters, digits, spaces,
+# '.', '_' and '-'; "P2Poolv2", the old default, leaves the line empty.
+# node_label (at most 8 characters) follows the node software on the node
+# line.
 # It only tags the coinbases this node builds. It is not part of consensus:
 # peers read each block's signature from its own coinbase, so nodes with
 # different signatures, or none, still accept each other's shares.

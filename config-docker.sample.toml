@@ -139,7 +139,8 @@ version_mask = "1fffe000"
 # chipnet or mainnet, joining a running share chain: set true, so miners
 # connect only once the node has synced.
 wait_for_chain_sync = false
-# Tags the coinbases this node builds; not part of consensus. Max 16 bytes.
+# The operator line of the coinbase tag (docs/stratum.md); not part of
+# consensus. At most 24 characters; "P2Poolv2" leaves the line empty.
 pool_signature = "P2Poolv2"
 
 [bitcoinrpc]

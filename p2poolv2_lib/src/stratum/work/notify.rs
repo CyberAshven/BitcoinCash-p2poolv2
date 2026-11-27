@@ -33,6 +33,7 @@ use crate::stratum::sv2::PoolTransactionCache;
 use crate::stratum::work::band_policy::{
     POOL_HASHRATE_SHARES, recent_pool_hashrate, share_rate_limit,
 };
+use crate::stratum::work::coinbase_tag::NodeCoinbaseTag;
 use crate::stratum::work::merge_tokens::{TokenFile, TokenSet};
 use crate::stratum::work::prepared_notify::{
     PreparedNotifyParams, PreparedNotifyParamsBuilder, fit_weak_shares,
@@ -50,7 +51,9 @@ use tracing::{debug, error, warn};
 pub(crate) struct NotifyContext {
     pub chain_store_handle: ChainStoreHandle,
     pub config: StratumConfig<crate::config::Parsed>,
-    pub pool_signature: Vec<u8>,
+    /// The coinbase tag of this node, the signature push of every coinbase
+    /// it builds, and the share chain its chain line names.
+    pub coinbase_tag: NodeCoinbaseTag,
     pub pool_difficulty: pool_difficulty::PoolDifficulty,
     pub payout: Box<dyn PayoutDistribution + Send>,
     /// Latest prepared template, for Stratum V2 Job Declaration tokens.
@@ -201,9 +204,10 @@ fn build_prepared_notify(
     PreparedNotifyParamsBuilder::new(
         Arc::clone(template),
         output_distribution,
-        &context.pool_signature,
+        context.coinbase_tag.as_bytes(),
         clean_jobs,
     )
+    .share_chain_id(Some(context.coinbase_tag.share_chain_id()))
     .pplns_weights(weights)
     .payout_split(PayoutSplit::for_chain(
         context.config.chain,
@@ -552,12 +556,17 @@ fn publish_prepared_notify(
 /// A token file (`merge_mining_tokens`) that cannot be read or is not valid
 /// returns at once too, so a node never starts mining without the tokens it
 /// was told to merge-mine.
+///
+/// Every coinbase carries `coinbase_tag` as its signature push, and every
+/// job a miner declares on these params must name its share chain
+/// (`stratum::work::coinbase_tag`).
 #[allow(clippy::too_many_arguments)] // wiring constructor: each parameter is a distinct collaborator, a params struct would only move the list
 pub async fn start_notify(
     mut notifier_rx: mpsc::Receiver<NotifyCmd>,
     template_tx: watch::Sender<Option<Arc<PreparedNotifyParams>>>,
     chain_store_handle: ChainStoreHandle,
     config: &StratumConfig<crate::config::Parsed>,
+    coinbase_tag: NodeCoinbaseTag,
     payout: Box<dyn PayoutDistribution + Send>,
     pool_difficulty: pool_difficulty::PoolDifficulty,
     pool_transactions: PoolTransactionCache,
@@ -565,10 +574,6 @@ pub async fn start_notify(
     weak_pool: Option<WeakPool>,
     tracker: Arc<JobTracker>,
 ) {
-    let pool_signature = match config.pool_signature {
-        Some(ref sig) => sig.as_bytes().to_vec(),
-        None => Vec::new(),
-    };
     let merge_tokens = match config
         .merge_mining_tokens
         .as_deref()
@@ -585,7 +590,7 @@ pub async fn start_notify(
     let mut notify_context = NotifyContext {
         chain_store_handle,
         config: config.clone(),
-        pool_signature,
+        coinbase_tag,
         pool_difficulty,
         payout,
         pool_transactions,
@@ -676,6 +681,7 @@ mod tests {
     use crate::stratum::work::tracker::{JobId, start_tracker_actor};
     use crate::test_utils::genesis_for_tests;
     use crate::test_utils::make_test_share_address;
+    use crate::test_utils::test_share_chain_id;
     use bitcoin::CompactTarget;
     use bitcoin::CompressedPublicKey;
     use bitcoin::hashes::Hash;
@@ -789,6 +795,7 @@ mod tests {
                 template_tx,
                 chain_store_handle,
                 &stratum_config,
+                NodeCoinbaseTag::new("", "", test_share_chain_id()),
                 Box::new(mock_payout),
                 pool_difficulty,
                 PoolTransactionCache::new(),
@@ -874,6 +881,7 @@ mod tests {
                 template_tx,
                 chain_store_handle,
                 &config,
+                NodeCoinbaseTag::new("", "", test_share_chain_id()),
                 Box::new(payout),
                 pool_difficulty,
                 PoolTransactionCache::new(),
@@ -989,6 +997,7 @@ mod tests {
                 template_tx,
                 chain_store_handle,
                 &config,
+                NodeCoinbaseTag::new("", "", test_share_chain_id()),
                 Box::new(payout),
                 pool_difficulty,
                 PoolTransactionCache::new(),
@@ -1110,6 +1119,7 @@ mod tests {
                 template_tx,
                 chain_store_handle,
                 &config,
+                NodeCoinbaseTag::new("", "", test_share_chain_id()),
                 Box::new(payout),
                 pool_difficulty,
                 PoolTransactionCache::new(),
@@ -1226,6 +1236,7 @@ mod tests {
                 template_tx,
                 chain_store_handle,
                 &stratum_config,
+                NodeCoinbaseTag::new("", "", test_share_chain_id()),
                 Box::new(mock_payout),
                 pool_difficulty,
                 PoolTransactionCache::new(),
@@ -1334,7 +1345,7 @@ mod tests {
         let mut context = NotifyContext {
             chain_store_handle,
             config: stratum_config,
-            pool_signature: b"test_pool".to_vec(),
+            coinbase_tag: NodeCoinbaseTag::new("test_pool", "", test_share_chain_id()),
             pool_difficulty,
             payout: Box::new(mock_payout),
             pool_transactions: PoolTransactionCache::new(),
@@ -1438,7 +1449,7 @@ mod tests {
             },
         ];
 
-        let pool_signature = b"test_sig";
+        let pool_signature = b"P2Poolv2\x0fCyberAshven\x0fBCHN 29.2.1\x0fzg690z";
         let witness_commitment = template.default_witness_commitment.clone();
 
         let prepared = PreparedNotifyParamsBuilder::new(
@@ -1467,8 +1478,7 @@ mod tests {
         let coinbase2_hex = &notify.params.coinbase2;
 
         // Extract outputs from coinbase2 and verify they match the original
-        let extracted_txouts =
-            extract_outputs_from_coinbase2(coinbase2_hex, pool_signature.len()).unwrap();
+        let extracted_txouts = extract_outputs_from_coinbase2(coinbase2_hex).unwrap();
 
         let expected_txout_1 = TxOut {
             value: original_output_pairs[0].amount,

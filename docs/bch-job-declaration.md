@@ -94,8 +94,10 @@ the raw scriptSig prefix and the merge-mining v2 commitment (root, tree
 height `h` and salt; [Auxiliary work proofs](bch-auxpow.md)). The coinbase
 is fixed:
 
-- **scriptSig:** the prefix, beginning with the canonical height push, then
-  the channel's 12-byte extranonce, within the 100-byte scriptSig limit;
+- **scriptSig:** the prefix, beginning with the canonical height push and
+  holding a [coinbase tag](stratum.md#the-coinbase-tag) that names this
+  share chain, then the 12-byte extranonce of the channel, within the 100-byte
+  scriptSig limit;
 - **version** 2, input sequence `0xfffffffe`, lock time `height - 1`;
 - **outputs:** the 53-byte merge-mining commitment as output 0 (the exact
   empty commitment when no token is merge-mined), the exact PPLNS outputs,
@@ -117,24 +119,31 @@ node's log, unless a code is given.
    Bitcoin Cash in P2Pool mode (`unsupported-pool-mode`).
 2. The token is in the registry and unused (`invalid-mining-job-token`).
 3. The channel chose the token's donation (`donation-mismatch`).
-4. The header has the previous block hash and nBits of the token's
+4. The scriptSig prefix carries, after the height push, a data push that
+   starts with the `P2Poolv2` line of the
+   [coinbase tag](stratum.md#the-coinbase-tag); every such push has the
+   operator, node and chain lines under the name rules, within 64 bytes, and
+   the chain line of this node, which the tag of every job the node sends
+   shows. The declarator writes its own operator and node lines
+   (`invalid-coinbase-tag`, the reason logged as a warning).
+5. The header has the previous block hash and nBits of the token's
    template, changes version bits only inside the node's version mask, and
    has `min_ntime` at or after the template's `mintime` and at most 7,200
    seconds ahead.
-5. The coinbase is as above: version, sequence, lock time, a Bitcoin Cash
+6. The coinbase is as above: version, sequence, lock time, a Bitcoin Cash
    P2PKH share owner, a valid output 0, a value within BCH's money range,
    and outputs equal to the node's rebuild byte for byte, within the
    coinbase limit. Its parts around the extranonce are at most 65,535
    bytes each.
-6. The merkle path has at most 32 siblings. In Full-Template mode the
+7. The merkle path has at most 32 siblings. In Full-Template mode the
    coinbase is the declared prefix and suffix, the path is the one of the
    declared transactions in CTOR, and the template passes the node's BCH
    checks and block size limit.
-7. A token job (output 0 not empty) carries the [declared token
+8. A token job (output 0 not empty) carries the [declared token
    leaves](#declared-token-leaves), and its header nBits pass the
    [ASERT header check](bch-auxpow.md#the-asert-header-check)
    (`invalid-token-asert`).
-8. A Full-Template job's block passes the node's proposal check, below.
+9. A Full-Template job's block passes the node's proposal check, below.
 
 ### Full-Template
 
