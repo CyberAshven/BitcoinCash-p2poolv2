@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 mod cashaddr;
+pub mod coinbase_tag;
 
 use bitcoin::base58;
 use bitcoin::hashes::Hash;
@@ -199,9 +200,6 @@ pub fn parse_share_address(address: &str, network: Network) -> Result<ShareAddre
             message: format!("Invalid share chain address: {error}"),
         })
 }
-
-/// Max length for pool signature P2Poolv2 + 8 more bytes for users to add
-const MAX_POOL_SIGNATURE_LENGTH: usize = 16;
 
 /// Pool operating mode.
 ///
@@ -507,8 +505,17 @@ pub struct StratumConfig<State = Raw> {
     pub version_mask: i32,
     /// Test config to ignore difficulty
     pub ignore_difficulty: Option<bool>,
-    /// Optional pool signature to include in coinbase
+    /// The operator line of the coinbase tag (`docs/stratum.md`, "The
+    /// coinbase tag"), at most [`coinbase_tag::MAX_OPERATOR_LENGTH`]
+    /// characters under the coinbase name rules. Unset, empty or
+    /// `P2Poolv2`, the old default, leaves the operator line empty.
     pub pool_signature: Option<String>,
+    /// Written after a space at the end of the node line of the coinbase tag,
+    /// after the node software and version the node reports. At most
+    /// [`coinbase_tag::MAX_NODE_LABEL_LENGTH`] characters under the coinbase
+    /// name rules.
+    #[serde(default)]
+    pub node_label: Option<String>,
     /// Maximum concurrent stratum connections. Default: 90% of OS fd limit.
     pub max_connections: Option<u32>,
     /// Wait for the share chain to be current before accepting stratum
@@ -591,10 +598,17 @@ impl StratumConfig<Raw> {
     /// On Bitcoin Cash the parsed `network` is [`Self::effective_network`].
     pub fn parse(mut self) -> Result<StratumConfig<Parsed>, ConfigError> {
         self.network = self.effective_network();
-        if self.pool_signature.clone().unwrap_or("".to_string()).len() > MAX_POOL_SIGNATURE_LENGTH {
-            return Err(ConfigError {
-                message: format!("Pool signature length is limited to {MAX_POOL_SIGNATURE_LENGTH}"),
-            });
+        if let Some(pool_signature) = &self.pool_signature {
+            coinbase_tag::check_coinbase_name(pool_signature, coinbase_tag::MAX_OPERATOR_LENGTH)
+                .map_err(|reason| ConfigError {
+                    message: format!("pool_signature {reason}"),
+                })?;
+        }
+        if let Some(node_label) = &self.node_label {
+            coinbase_tag::check_coinbase_name(node_label, coinbase_tag::MAX_NODE_LABEL_LENGTH)
+                .map_err(|reason| ConfigError {
+                    message: format!("node_label {reason}"),
+                })?;
         }
 
         // Bitcoin Cash has a built-in donation address, so `donation` alone is
@@ -800,6 +814,7 @@ impl StratumConfig<Raw> {
             version_mask: self.version_mask,
             ignore_difficulty: self.ignore_difficulty,
             pool_signature: self.pool_signature,
+            node_label: self.node_label,
             max_connections: self.max_connections,
             wait_for_chain_sync: self.wait_for_chain_sync,
             mode: self.mode,
@@ -848,6 +863,18 @@ impl StratumConfig<Parsed> {
     /// Bitcoin Cash share address configured for this pool, if any.
     pub fn bch_miner_address(&self) -> Option<BchShareAddress> {
         self.bch_miner_address
+    }
+
+    /// The operator line of the coinbase tag, from `pool_signature`: empty
+    /// when it is unset, empty or the old default `P2Poolv2`.
+    pub fn coinbase_operator(&self) -> &str {
+        coinbase_tag::operator_line(self.pool_signature.as_deref())
+    }
+
+    /// The label at the end of the node line of the coinbase tag, from
+    /// `node_label`: empty when it is unset.
+    pub fn coinbase_node_label(&self) -> &str {
+        self.node_label.as_deref().unwrap_or_default()
     }
 
     /// The payout level of a miner whose login chooses none
@@ -1306,6 +1333,7 @@ impl StratumConfig<Raw> {
             version_mask: DEFAULT_VERSION_MASK,
             ignore_difficulty: None,
             pool_signature: None,
+            node_label: None,
             max_connections: None,
             wait_for_chain_sync: true,
             mode: PoolMode::default(),
@@ -3169,23 +3197,88 @@ mod tests {
 
         // Test with Some value
         let mut config_with_sig = StratumConfig::<Raw>::new_for_test_default();
-        config_with_sig.pool_signature = Some("MyPool/1.0".to_string());
+        config_with_sig.pool_signature = Some("MyPool 1.0".to_string());
         assert_eq!(
             config_with_sig.pool_signature,
-            Some("MyPool/1.0".to_string())
+            Some("MyPool 1.0".to_string())
         );
 
         // Test parsing preserves Some value
         let parsed_with_sig = config_with_sig.parse().unwrap();
         assert_eq!(
             parsed_with_sig.pool_signature,
-            Some("MyPool/1.0".to_string())
+            Some("MyPool 1.0".to_string())
         );
+        assert_eq!(parsed_with_sig.coinbase_operator(), "MyPool 1.0");
 
         // Test sig length limit
         let mut config_with_sig = StratumConfig::<Raw>::new_for_test_default();
-        config_with_sig.pool_signature = Some("MyPool/1.0 and some more bytes....".to_string());
+        config_with_sig.pool_signature = Some("MyPool 1.0 and some more bytes".to_string());
         assert_err!(config_with_sig.parse());
+    }
+
+    /// The old 16-byte limit is gone: an operator line of 24 characters is
+    /// taken.
+    #[test]
+    fn test_a_pool_signature_of_24_characters_is_accepted() {
+        let mut config = StratumConfig::<Raw>::new_for_test_default();
+        config.pool_signature = Some("Longest-Operator-Name-24".to_string());
+        let parsed = config.parse().unwrap();
+        assert_eq!(parsed.coinbase_operator(), "Longest-Operator-Name-24");
+    }
+
+    #[test]
+    fn test_the_old_default_pool_signature_leaves_the_operator_line_empty() {
+        let mut config = StratumConfig::<Raw>::new_for_test_default();
+        config.pool_signature = Some("P2Poolv2".to_string());
+        assert_eq!(config.parse().unwrap().coinbase_operator(), "");
+    }
+
+    #[test]
+    fn test_a_pool_signature_with_an_email_is_refused() {
+        let mut config = StratumConfig::<Raw>::new_for_test_default();
+        config.pool_signature = Some("pool@example.com".to_string());
+        let error = config.parse().unwrap_err();
+        assert!(error.message.starts_with("pool_signature "), "{error}");
+        assert!(error.message.contains("'@'"), "{error}");
+    }
+
+    #[test]
+    fn test_a_pool_signature_with_an_address_is_refused() {
+        let mut config = StratumConfig::<Raw>::new_for_test_default();
+        config.pool_signature = Some("qpm2qsznhks23z7629mms6s4cwef74vcwvy22gdx6a".to_string());
+        let error = config.parse().unwrap_err();
+        assert!(error.message.contains("may be an address"), "{error}");
+    }
+
+    #[test]
+    fn test_a_node_label_is_kept() {
+        let mut config = StratumConfig::<Raw>::new_for_test_default();
+        config.node_label = Some("node1".to_string());
+        assert_eq!(config.parse().unwrap().coinbase_node_label(), "node1");
+    }
+
+    #[test]
+    fn test_an_unset_node_label_is_empty() {
+        let config = StratumConfig::<Raw>::new_for_test_default();
+        assert_eq!(config.parse().unwrap().coinbase_node_label(), "");
+    }
+
+    #[test]
+    fn test_a_node_label_over_its_length_is_refused() {
+        let mut config = StratumConfig::<Raw>::new_for_test_default();
+        config.node_label = Some("node-label".to_string());
+        let error = config.parse().unwrap_err();
+        assert!(error.message.starts_with("node_label "), "{error}");
+        assert!(error.message.contains("more than the 8 allowed"), "{error}");
+    }
+
+    #[test]
+    fn test_a_node_label_with_a_url_is_refused() {
+        let mut config = StratumConfig::<Raw>::new_for_test_default();
+        config.node_label = Some("x.io/a".to_string());
+        let error = config.parse().unwrap_err();
+        assert!(error.message.contains("'/'"), "{error}");
     }
 
     #[test]

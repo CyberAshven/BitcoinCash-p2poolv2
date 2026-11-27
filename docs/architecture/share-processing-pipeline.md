@@ -785,7 +785,10 @@ witness commitment back out of the bitcoin coinbase
 (`parse_bitcoin_coinbase_fields`), rebuilds the coinbase from the PPLNS window,
 and requires the two to be equal. The pool signature is read rather than taken
 from this node's config because it is only a tag: nodes configured with
-different signatures must agree on every block.
+different signatures must agree on every block. It holds the
+[coinbase tag](../stratum.md#the-coinbase-tag) of the node that built the
+coinbase, read as opaque bytes of any length, so the tag is not a share-chain
+rule.
 
 The coinbase merkle branch travels separately from the header, because shares
 mined on one template share a branch:

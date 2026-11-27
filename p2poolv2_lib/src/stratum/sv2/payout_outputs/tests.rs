@@ -5,7 +5,7 @@ use crate::stratum::sv2::session::DeclaredJob;
 use crate::test_utils::{
     test_bch_custom_job_with_aux, test_bch_prepared, test_bch_prepared_with_cuts,
     test_bch_prepared_with_payee_count, test_custom_job_from_payout_outputs,
-    test_payout_outputs_request,
+    test_declared_script_prefix, test_payout_outputs_request,
 };
 use bitcoin::consensus::{deserialize, serialize};
 use bitcoin::script::Builder;
@@ -198,10 +198,7 @@ fn requested_outputs_are_the_bytes_jd_prepare_builds() {
         .mining_job_token([0x11; 32], template.curtime)
         .unwrap();
     let value = template.coinbasevalue + 219;
-    let prefix = Builder::new()
-        .push_int(i64::from(template.height))
-        .push_slice(b"miner")
-        .into_bytes();
+    let prefix = test_declared_script_prefix(template.height);
     let payout = PayoutAddress::from(Address::p2pkh(
         PubkeyHash::from_byte_array([0x22; 20]),
         Network::Regtest,

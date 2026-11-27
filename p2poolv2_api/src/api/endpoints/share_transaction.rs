@@ -96,7 +96,6 @@ mod tests {
                 .unwrap();
         let state = Arc::new(AppState {
             app_config: AppConfig {
-                pool_signature_length: 0,
                 network: bitcoin::Network::Signet,
                 cash_network: None,
                 cors_allowed: false,

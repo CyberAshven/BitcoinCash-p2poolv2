@@ -744,7 +744,6 @@ mod tests {
                 .unwrap();
         let state = Arc::new(AppState {
             app_config: AppConfig {
-                pool_signature_length: 0,
                 network,
                 cash_network,
                 cors_allowed: false,
@@ -1451,7 +1450,6 @@ mod tests {
             by_share_owner: HashMap::new(),
         };
         let app_config = AppConfig {
-            pool_signature_length: 0,
             network: Network::Regtest,
             cash_network: None,
             cors_allowed: false,
@@ -1508,7 +1506,6 @@ mod tests {
             by_share_owner: HashMap::new(),
         };
         let app_config = AppConfig {
-            pool_signature_length: 0,
             network: Network::Regtest,
             cash_network: None,
             cors_allowed: false,
@@ -1562,7 +1559,6 @@ mod tests {
             by_share_owner: HashMap::new(),
         };
         let app_config = AppConfig {
-            pool_signature_length: 0,
             network: Network::Regtest,
             cash_network: None,
             cors_allowed: false,

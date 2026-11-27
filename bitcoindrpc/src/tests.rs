@@ -180,6 +180,73 @@ async fn getblockchaininfo_reads_the_chain_name() {
 }
 
 #[tokio::test]
+async fn getnetworkinfo_reads_the_subversion() {
+    let mock_server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(body_json(serde_json::json!({
+            "method": "getnetworkinfo",
+            "params": [],
+            "id": 0
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "result": {"version": 29020100, "subversion": "/Bitcoin Cash Node:29.2.1(EB32.0)/"},
+            "error": null,
+            "id": 0
+        })))
+        .mount(&mock_server)
+        .await;
+    let client = BitcoindRpcClient::new(&mock_server.uri(), "p2pool", "p2pool").unwrap();
+
+    let info = client.getnetworkinfo().await.unwrap();
+
+    assert_eq!(
+        info.subversion.as_deref(),
+        Some("/Bitcoin Cash Node:29.2.1(EB32.0)/")
+    );
+}
+
+#[tokio::test]
+async fn getnetworkinfo_without_a_subversion_reads_none() {
+    let mock_server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "result": {"version": 1},
+            "error": null,
+            "id": 0
+        })))
+        .mount(&mock_server)
+        .await;
+    let client = BitcoindRpcClient::new(&mock_server.uri(), "p2pool", "p2pool").unwrap();
+
+    assert_eq!(
+        client.getnetworkinfo().await.unwrap(),
+        GetNetworkInfo { subversion: None }
+    );
+}
+
+#[tokio::test]
+async fn a_node_without_getnetworkinfo_answers_method_not_found() {
+    let mock_server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "result": null,
+            "error": {"code": -32601, "message": "Method not found"},
+            "id": 0
+        })))
+        .mount(&mock_server)
+        .await;
+    let client = BitcoindRpcClient::new(&mock_server.uri(), "p2pool", "p2pool").unwrap();
+
+    assert!(
+        client
+            .getnetworkinfo()
+            .await
+            .unwrap_err()
+            .is_method_not_found()
+    );
+}
+
+#[tokio::test]
 async fn getblockhash_reads_the_block_at_a_height() {
     let mock_server = MockServer::start().await;
     Mock::given(method("POST"))
