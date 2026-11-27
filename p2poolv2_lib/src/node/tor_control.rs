@@ -10,10 +10,10 @@
 //! password, with the cookie file of Tor (`COOKIE`), or with `tor_password`
 //! (`HASHEDPASSWORD`), then `ADD_ONION`. `tor_password` is the stronger
 //! choice: `COOKIE` sends the cookie itself to whatever answers on
-//! `tor_control`. The service's virtual port is always
-//! 6884, the default P2Pool port, whatever the node listens on, as Bitcoin
-//! Cash Node keeps its default port "to avoid decloaking"; Tor forwards it to
-//! the node's listen address.
+//! `tor_control`. The service's virtual port is always the network's default
+//! P2P port (6884, or 6886 on chipnet), whatever the node listens on, as
+//! Bitcoin Cash Node keeps its default port "to avoid decloaking"; Tor
+//! forwards it to the node's listen address.
 //!
 //! The first `ADD_ONION` asks for a new ed25519 key, and the key Tor sends
 //! back is saved as `ED25519-V3:<base64>` in `onion_v3_private_key` beside
@@ -23,12 +23,13 @@
 //!
 //! The control connection stays open while the node runs: Tor removes the
 //! service when it closes. While it is up the node advertises
-//! `/onion3/<service>:6884`; when it closes the node stops, and connects
+//! `/onion3/<service>:<that port>`; when it closes the node stops, and connects
 //! again after Bitcoin Cash Node's backoff, 1 second growing 1.5 times a try,
 //! here capped at 10 minutes. A node with no Tor running logs each try at
 //! debug only.
 
 use super::SwarmSend;
+use super::dns_seeds::default_p2p_port;
 use super::onion::onion3_target;
 use crate::config::{Config, PeerNetwork};
 use libp2p::Multiaddr;
@@ -47,9 +48,6 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
 use tracing::{debug, info, warn};
-
-/// The port peers dial on this node's onion service, whatever it listens on.
-pub(crate) const ONION_SERVICE_PORT: u16 = 6884;
 
 /// Tor's SOCKS port where Tor runs with its defaults. Onion peers are dialed
 /// through it once the control port has made the node's onion service,
@@ -91,6 +89,9 @@ pub(crate) struct OnionService {
     pub(crate) password: Option<String>,
     /// Where the service forwards to: the node's listen address.
     pub(crate) target: SocketAddr,
+    /// The virtual port peers dial on the service, whatever the node
+    /// listens on: the network's default P2P port.
+    pub(crate) port: u16,
     /// The file the onion key is kept in, or None to have Tor keep no key.
     pub(crate) key_file: Option<PathBuf>,
 }
@@ -141,6 +142,7 @@ impl OnionService {
             control: network.tor_control.clone(),
             password: network.tor_password.clone(),
             target: SocketAddr::new(ip, 0),
+            port: default_p2p_port(config.stratum.chain, config.stratum.bitcoin_cash_network),
             key_file: network.onion_key_file(&config.store.path),
         })
     }
@@ -273,12 +275,13 @@ async fn set_up(
         &add_onion_command(
             saved_key.as_deref(),
             service.key_file.is_none(),
+            service.port,
             service.target,
         ),
     )
     .await?
     .accepted("ADD_ONION")?;
-    let added = parse_add_onion(&reply)?;
+    let added = parse_add_onion(&reply, service.port)?;
     if saved_key.is_none()
         && let Some(path) = &service.key_file
     {
@@ -469,11 +472,16 @@ fn read_cookie(path: &str) -> Result<Vec<u8>, String> {
 
 /// The `ADD_ONION` command: the saved key or a new one, with
 /// `Flags=DiscardPK` when Tor should keep no key, and the virtual port
-/// [`ONION_SERVICE_PORT`] forwarded to `target`.
-fn add_onion_command(key: Option<&str>, discard_key: bool, target: SocketAddr) -> String {
+/// `port` forwarded to `target`.
+fn add_onion_command(
+    key: Option<&str>,
+    discard_key: bool,
+    port: u16,
+    target: SocketAddr,
+) -> String {
     let key = key.unwrap_or("NEW:ED25519-V3");
     let flags = if discard_key { " Flags=DiscardPK" } else { "" };
-    format!("ADD_ONION {key}{flags} Port={ONION_SERVICE_PORT},{target}")
+    format!("ADD_ONION {key}{flags} Port={port},{target}")
 }
 
 /// What `ADD_ONION` made: the service's address, and its key when Tor made
@@ -485,7 +493,7 @@ struct Added {
 }
 
 /// The `ServiceID=` and `PrivateKey=` lines of an `ADD_ONION` reply.
-fn parse_add_onion(lines: &[String]) -> Result<Added, String> {
+fn parse_add_onion(lines: &[String], port: u16) -> Result<Added, String> {
     let service_id = lines
         .iter()
         .find_map(|line| line.strip_prefix("ServiceID="))
@@ -498,7 +506,7 @@ fn parse_add_onion(lines: &[String]) -> Result<Added, String> {
         && service_id
             .bytes()
             .all(|byte| byte.is_ascii_lowercase() || (b'2'..=b'7').contains(&byte));
-    let address = format!("/onion3/{service_id}:{ONION_SERVICE_PORT}")
+    let address = format!("/onion3/{service_id}:{port}")
         .parse::<Multiaddr>()
         .ok()
         .filter(|address| well_formed && onion3_target(address).is_some())

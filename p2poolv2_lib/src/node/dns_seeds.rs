@@ -46,20 +46,33 @@ const TESTNET4_P2P_PORT: u16 = 46884;
 /// Seed hostnames for testnet4.
 const TESTNET4_SEED_HOSTNAMES: &[&str] = &["seed.testnet4.p2poolv2.org"];
 
-/// The port of every sample config's `listen_address`. Bitcoin Cash nodes
-/// listen on it on every network, and so do Bitcoin nodes on a network
-/// without a seed port of its own.
+/// The P2P port of Bitcoin nodes on a network without a seed port of its
+/// own. Bitcoin Cash nodes listen on their network's
+/// `BitcoinCashNetwork::default_p2p_port` instead.
 const DEFAULT_P2P_PORT: u16 = 6884;
 
 /// Seed hostnames for Bitcoin Cash mainnet. Each is run by a different
 /// operator; its A/AAAA records list long-running mainnet nodes on
-/// `DEFAULT_P2P_PORT`.
+/// mainnet's default port.
 const BITCOIN_CASH_MAINNET_SEED_HOSTNAMES: &[&str] = &[];
 
-/// Seed hostnames for Bitcoin Cash chipnet, as for mainnet. An entry may
-/// name its own port as `host:port`, for a seed node that listens on
-/// another port than the network's.
-const BITCOIN_CASH_CHIPNET_SEED_HOSTNAMES: &[&str] = &["p2poolv2-chipnet.realbitcoin.cash:6886"];
+/// Seed hostnames for Bitcoin Cash chipnet, as for mainnet, on chipnet's
+/// default port. An entry may name its own port as `host:port`, for a seed
+/// node that listens on another port than the network's.
+const BITCOIN_CASH_CHIPNET_SEED_HOSTNAMES: &[&str] = &["p2poolv2-chipnet.realbitcoin.cash"];
+
+/// The P2P port a node on `chain` listens on by default, and the virtual
+/// port of its onion service: its Bitcoin Cash network's default port, or
+/// `DEFAULT_P2P_PORT` on Bitcoin.
+pub(crate) fn default_p2p_port(
+    chain: Chain,
+    bitcoin_cash_network: Option<BitcoinCashNetwork>,
+) -> u16 {
+    match (chain, bitcoin_cash_network) {
+        (Chain::BitcoinCash, Some(network)) => network.default_p2p_port(),
+        _ => DEFAULT_P2P_PORT,
+    }
+}
 
 /// The DNS seeds for one network and the port their nodes listen on. A
 /// hostname written `host:port` overrides that port for its own nodes.
@@ -98,15 +111,12 @@ pub(crate) fn dns_seeds_for_network(network: bitcoin::Network) -> Option<DnsSeed
 /// Returns the built-in DNS seeds for a Bitcoin Cash network, or None when
 /// the network has none.
 pub(crate) fn dns_seeds_for_bitcoin_cash(network: BitcoinCashNetwork) -> Option<DnsSeeds> {
-    match network {
-        BitcoinCashNetwork::Mainnet => {
-            DnsSeeds::new(BITCOIN_CASH_MAINNET_SEED_HOSTNAMES, DEFAULT_P2P_PORT)
-        }
-        BitcoinCashNetwork::Chipnet => {
-            DnsSeeds::new(BITCOIN_CASH_CHIPNET_SEED_HOSTNAMES, DEFAULT_P2P_PORT)
-        }
-        _ => None,
-    }
+    let hostnames = match network {
+        BitcoinCashNetwork::Mainnet => BITCOIN_CASH_MAINNET_SEED_HOSTNAMES,
+        BitcoinCashNetwork::Chipnet => BITCOIN_CASH_CHIPNET_SEED_HOSTNAMES,
+        _ => return None,
+    };
+    DnsSeeds::new(hostnames, network.default_p2p_port())
 }
 
 /// Returns the DNS seeds a node on `chain` may query, or None.
@@ -131,7 +141,10 @@ pub(crate) fn dns_seeds_for_chain(
     if configured.is_empty() {
         return built_in;
     }
-    let port = built_in.map_or(DEFAULT_P2P_PORT, |seeds| seeds.port);
+    let port = built_in.map_or_else(
+        || default_p2p_port(chain, bitcoin_cash_network),
+        |seeds| seeds.port,
+    );
     DnsSeeds::new(configured, port)
 }
 
@@ -315,15 +328,33 @@ mod tests {
         assert_eq!(resolve_dns_seeds(seeds).await, HashSet::from([expected]));
     }
 
-    /// Chipnet has one built-in seed node, listening on its own port.
+    /// Chipnet has one built-in seed node, on chipnet's port 6886.
     #[test]
     fn chipnet_has_a_built_in_seed() {
         let seeds = dns_seeds_for_bitcoin_cash(BitcoinCashNetwork::Chipnet).unwrap();
         assert_eq!(
             seeds.hostnames,
-            vec!["p2poolv2-chipnet.realbitcoin.cash:6886".to_string()]
+            vec!["p2poolv2-chipnet.realbitcoin.cash".to_string()]
         );
-        assert_eq!(seeds.port, DEFAULT_P2P_PORT);
+        assert_eq!(seeds.port, 6886);
+    }
+
+    /// Chipnet has a port of its own; every other Bitcoin Cash network and
+    /// Bitcoin keep 6884.
+    #[test]
+    fn the_default_p2p_port_follows_the_bitcoin_cash_network() {
+        assert_eq!(
+            default_p2p_port(Chain::BitcoinCash, Some(BitcoinCashNetwork::Chipnet)),
+            6886
+        );
+        for network in [
+            BitcoinCashNetwork::Mainnet,
+            BitcoinCashNetwork::Regtest,
+            BitcoinCashNetwork::Scalenet,
+        ] {
+            assert_eq!(default_p2p_port(Chain::BitcoinCash, Some(network)), 6884);
+        }
+        assert_eq!(default_p2p_port(Chain::Bitcoin, None), 6884);
     }
 
     #[test]
@@ -390,11 +421,11 @@ mod tests {
     fn bitcoin_cash_seeds_are_picked_by_bitcoin_cash_network() {
         assert_eq!(
             dns_seeds_for_bitcoin_cash(BitcoinCashNetwork::Mainnet),
-            DnsSeeds::new(BITCOIN_CASH_MAINNET_SEED_HOSTNAMES, DEFAULT_P2P_PORT)
+            DnsSeeds::new(BITCOIN_CASH_MAINNET_SEED_HOSTNAMES, 6884)
         );
         assert_eq!(
             dns_seeds_for_bitcoin_cash(BitcoinCashNetwork::Chipnet),
-            DnsSeeds::new(BITCOIN_CASH_CHIPNET_SEED_HOSTNAMES, DEFAULT_P2P_PORT)
+            DnsSeeds::new(BITCOIN_CASH_CHIPNET_SEED_HOSTNAMES, 6886)
         );
         assert_eq!(
             dns_seeds_for_bitcoin_cash(BitcoinCashNetwork::Regtest),
@@ -420,7 +451,20 @@ mod tests {
             ),
             Some(DnsSeeds {
                 hostnames: configured.clone(),
-                port: DEFAULT_P2P_PORT,
+                port: 6886,
+            })
+        );
+        // Regtest has no built-in seeds; configured ones take its port.
+        assert_eq!(
+            dns_seeds_for_chain(
+                Chain::BitcoinCash,
+                bitcoin::Network::Regtest,
+                Some(BitcoinCashNetwork::Regtest),
+                &configured
+            ),
+            Some(DnsSeeds {
+                hostnames: configured.clone(),
+                port: 6884,
             })
         );
         assert_eq!(

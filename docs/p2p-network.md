@@ -101,7 +101,8 @@ A new node finds its first peers in `[network] dial_peers`, through Nostr,
 from DNS seeds once its network has some, and after a restart from the peers
 it saved. A `dial_peers` entry is an IP
 address (`/ip4/`, `/ip6/`) or host name (`/dns4/`, `/dns6/`, `/dns/`), port
-6884 by default ([Requirements](requirements.md#ports)). A host name is
+6884 by default, 6886 on chipnet ([Requirements](requirements.md#ports)). A
+host name is
 resolved through the system's DNS on every dial, reconnects included. Only
 host names in `dial_peers` are dialed, never a `/dns` address learned from a
 peer, and `blocked_ips` is checked after a name resolves.
@@ -140,7 +141,8 @@ connects to `tor_control` (`127.0.0.1:9051` by default) and:
    Cash Node uses, is not used here: it needs two HMAC keys that the control
    spec fixes as constant strings;
 2. sends `ADD_ONION` with its key, or `NEW:ED25519-V3` the first time, and
-   `Port=6884,<listen address>`: peers dial port 6884, the default, whatever
+   `Port=<port>,<listen address>`: peers dial the network's default port,
+   6884, or 6886 on chipnet, whatever
    the node listens on, and Tor forwards to the node's `listen_address`
    (`127.0.0.1` for `0.0.0.0`);
 3. saves the new key as `ED25519-V3:<base64>` in `onion_v3_private_key`
@@ -148,7 +150,7 @@ connects to `tor_control` (`127.0.0.1:9051` by default) and:
    later start, so the onion address stays. With `ephemeral_node_key` Tor
    keeps no key (`Flags=DiscardPK`) and the address is new on every start;
 4. keeps the control connection open, since Tor removes the service when it
-   closes. While it is up, Identify sends `/onion3/<address>:6884`, pushed to
+   closes. While it is up, Identify sends `/onion3/<address>:<port>`, pushed to
    connected peers at once, and the node announces it on Nostr. When the
    connection closes the node stops advertising it and connects again after
    1 second, 1.5 times longer each try, at most 10 minutes.
@@ -168,13 +170,14 @@ Cash Node's `doc/tor.md` describes:
 
 ```
 HiddenServiceDir /var/lib/tor/p2pool/
-HiddenServicePort 6884 127.0.0.1:6884
+HiddenServicePort 6886 127.0.0.1:6886
 ```
 
 Tor writes the service's name to `hostname` in that directory and keeps its
-key there. Set `external_address = "/onion3/<the name without .onion>:6884"`:
+key there. Set `external_address = "/onion3/<the name without .onion>:6886"`:
 Identify sends it to every peer, and peers with a `tor_proxy` keep and dial
-it. The first port, the one peers dial, stays 6884 whatever the node listens
+it. The first port, the one peers dial, stays the network's default (6886 on
+chipnet as here, 6884 on mainnet) whatever the node listens
 on, as Bitcoin Cash Node keeps its default port for every onion service, so
 the port tells nothing about the node. The second address is the node's
 `listen_address`; `127.0.0.1` reaches a node listening on `0.0.0.0`. A node
@@ -267,12 +270,14 @@ one seed, so no seed operator can fill a node's connections.
 
 - **Which seeds:** a Bitcoin Cash node takes the seeds of its
   `bitcoin_cash_network` (`node/dns_seeds.rs`), never Bitcoin's. Chipnet's
-  list has one seed node, `p2poolv2-chipnet.realbitcoin.cash:6886`; mainnet's
+  list has one seed node, `p2poolv2-chipnet.realbitcoin.cash`, on chipnet's
+  port 6886; mainnet's
   is empty until operators run seeds; regtest and scalenet have none.
   `[network] dns_seed_hosts` replaces the built-in list, so a new seed works
   before a release names it. `dns_seed = false` skips seeds.
 - **Running a seed:** point a host name's A/AAAA records at long-running
-  nodes of one network that listen on port 6884. No crawler is needed; keep
+  nodes of one network that listen on its default port, 6884 on mainnet and
+  6886 on chipnet. No crawler is needed; keep
   the records to nodes that stay up. Each seed should have its own operator,
   so one person's mistake or outage leaves the others. A seed whose nodes
   listen on another port is written `host:port`, in the built-in lists and

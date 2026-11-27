@@ -1,16 +1,17 @@
 # P2Poolv2 on Bitcoin Cash: a chipnet node, next to a BCHN chipnet node on
-# this computer. For mainnet set bitcoin_cash_network = "mainnet", point
-# [bitcoinrpc] at BCHN's mainnet RPC (port 8332) and use bitcoincash:
-# payout and p2pool: share addresses. docs/bch-quickstart.md walks through
-# it. config-bitcoin.sample.toml is the Bitcoin sample kept from upstream.
+# this computer. For mainnet set bitcoin_cash_network = "mainnet", listen on
+# port 6884 (chipnet has its own, 6886), point [bitcoinrpc] at BCHN's
+# mainnet RPC (port 8332) and use bitcoincash: payout and p2pool: share
+# addresses. docs/bch-quickstart.md walks through it.
+# config-bitcoin.sample.toml is the Bitcoin sample kept from upstream.
 
 [network]
 # Where peers reach this node's share chain.
-listen_address = "/ip4/0.0.0.0/tcp/6884"
+listen_address = "/ip4/0.0.0.0/tcp/6886"
 # Share chain peers to dial at startup and keep reconnecting to. A peer is
 # an IP address or a host name, as /dns4/, /dns6/ or /dns/; only host names
 # listed here are ever dialed, never ones learned from peers.
-# dial_peers = ["/ip4/203.0.113.1/tcp/6884", "/dns4/pool.example.com/tcp/6884"]
+# dial_peers = ["/ip4/203.0.113.1/tcp/6886", "/dns4/pool.example.com/tcp/6886"]
 # A Tor SOCKS5 proxy for dialing onion peers, "/onion3/<address>:<port>",
 # as Bitcoin Cash Node's -onion. Unset, 127.0.0.1:9050 is used once Tor's
 # control port has made this node an onion service (listen_onion), and
@@ -41,8 +42,9 @@ listen_address = "/ip4/0.0.0.0/tcp/6884"
 # with "CookieAuthentication 1" (COOKIE), which sends the cookie itself to
 # whatever answers at tor_control, so the cookie file must be readable by
 # the user of the node. Peers with Tor reach the node at
-# /onion3/<address>:6884; the key is kept in onion_v3_private_key beside the
-# store, so the address survives restarts.
+# /onion3/<address>:6886, chipnet's port (6884 on mainnet), whatever the node
+# listens on; the key is kept in onion_v3_private_key beside the store, so
+# the address survives restarts.
 # Off when onlynet leaves onion out.
 # listen_onion = true
 # tor_control = "127.0.0.1:9051"
@@ -58,11 +60,12 @@ listen_address = "/ip4/0.0.0.0/tcp/6884"
 # addresses, from dial_peers, the outgoing target or Kademlia, still go out
 # directly and show those peers its IP. onlynet = ["onion"] turns it on.
 # onion_only = false
-# DNS seeds whose A/AAAA records list long-running nodes on port 6884, or on
-# the port an entry names as host:port. They replace the built-in seeds of
-# bitcoin_cash_network, so a new seed works before a release names it. Seeds
-# are a fallback: dns_seed = false skips them.
-# dns_seed_hosts = ["seed.example.org", "seed.example.net:6886"]
+# DNS seeds whose A/AAAA records list long-running nodes on the network's
+# port (6886 on chipnet, 6884 on mainnet), or on the port an entry names as
+# host:port. They replace the built-in seeds of bitcoin_cash_network, so a
+# new seed works before a release names it. Seeds are a fallback:
+# dns_seed = false skips them.
+# dns_seed_hosts = ["seed.example.org", "seed.example.net:6890"]
 max_pending_incoming = 10
 max_pending_outgoing = 10
 # Inbound peers. Each outgoing peer is another node's inbound one, so with
@@ -91,7 +94,7 @@ max_requests_per_second = 100
 dial_timeout_secs = 30
 # Optional external address for nodes behind NAT. If set, this address
 # is advertised to peers instead of auto-detecting from identify observations.
-# external_address = "/ip4/203.0.113.1/tcp/6884"
+# external_address = "/ip4/203.0.113.1/tcp/6886"
 # This node's peer ID comes from a key kept in p2p_node_key beside the store,
 # made on the first start, so peers keep finding the node under one peer ID
 # after a restart. node_key_path puts the key elsewhere; ephemeral_node_key =
