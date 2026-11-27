@@ -25,11 +25,11 @@ fn generate_password() -> String {
     URL_SAFE_NO_PAD.encode(password_bytes)
 }
 
-/// Write a generated password to a new file only its owner can read.
+/// Write `contents` to a new file only its owner can read.
 ///
-/// Refuses to overwrite an existing file, so an earlier password is never
+/// Refuses to overwrite an existing file, so earlier credentials are never
 /// lost or replaced unnoticed.
-fn write_password_file(path: &Path, password: &str) -> Result<(), Box<dyn Error>> {
+fn write_owner_only_file(path: &Path, contents: &str) -> Result<(), Box<dyn Error>> {
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -40,45 +40,63 @@ fn write_password_file(path: &Path, password: &str) -> Result<(), Box<dyn Error>
     let mut file = options
         .open(path)
         .map_err(|error| format!("Could not create {}: {error}", path.display()))?;
-    writeln!(file, "{password}")?;
+    file.write_all(contents.as_bytes())?;
     Ok(())
 }
 
-/// Execute the gen-auth command
+/// Execute the gen-auth command.
+///
+/// No credential reaches the terminal, where it would end up in scrollback
+/// and logs: `auth_user` and `auth_token` go to `credentials_file`, ready to
+/// copy into `config.toml`, and a generated password to `password_file`.
+/// Both are new files only their owner can read. The user already knows a
+/// password they gave, so none is written then.
 pub fn execute(
     username: String,
     password: Option<String>,
     password_file: &Path,
+    credentials_file: &Path,
 ) -> Result<(), Box<dyn Error>> {
-    // Determine password (generate, prompt, or use provided). A generated
-    // password goes to `password_file`, never to the terminal; the user
-    // already knows one they gave.
     let (password, generated) = match password {
         None => (generate_password(), true),
         Some(ref p) if p == "-" => (rpassword::prompt_password("Enter password: ")?, false),
         Some(p) => (p, false),
     };
+    // Refuse before writing anything, so a run never leaves half its files.
+    for path in std::iter::once(credentials_file).chain(generated.then_some(password_file)) {
+        if path.exists() {
+            return Err(
+                format!("{} already exists; it is never overwritten", path.display()).into(),
+            );
+        }
+    }
 
-    // Generate salt
     let salt = generate_salt();
-
-    // Compute HMAC
     let hmac = password_to_hmac(&salt, &password)
         .map_err(|error| format!("Failed to compute HMAC: {error}"))?;
 
-    // Display results in an easy-to-copy format
-    println!("\n=== API Authentication Credentials ===\n");
-    println!("Username: {username}");
+    write_owner_only_file(
+        credentials_file,
+        &format!(
+            "# P2Pool API credentials from p2poolv2_cli gen-auth.\n\
+             # Copy these two lines into the [api] section of config.toml.\n\
+             auth_user = \"{username}\"\n\
+             auth_token = \"{salt}${hmac}\"\n"
+        ),
+    )?;
     if generated {
-        write_password_file(password_file, &password)?;
+        write_owner_only_file(password_file, &format!("{password}\n"))?;
+    }
+
+    println!("\n=== API Authentication Credentials ===\n");
+    println!(
+        "auth_user and auth_token: written to {}",
+        credentials_file.display()
+    );
+    if generated {
         println!("Password: written to {}", password_file.display());
     }
-    println!("Salt:     {salt}");
-    println!("HMAC:     {hmac}");
-    println!("\n=== Add to config.toml ===\n");
-    println!("auth_user = \"{username}\"");
-    println!("auth_token = \"{salt}${hmac}\"");
-    println!();
+    println!("\nCopy auth_user and auth_token into the [api] section of config.toml.\n");
 
     Ok(())
 }
